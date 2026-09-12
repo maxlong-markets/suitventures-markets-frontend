@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="suits-mark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Yellowtail&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;background:#050506;color:#F1EFE9;font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+a{color:#F1EFE9;text-decoration:none}a:hover{color:#FFFFFF}
+button{font-family:inherit;font-size:inherit}
+input{font-family:inherit;color:#F1EFE9}
+input::placeholder{color:rgba(232,228,220,0.34)}
+input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+::-webkit-scrollbar{height:4px;width:4px}::-webkit-scrollbar-thumb{background:rgba(232,228,220,0.18)}
+@keyframes svShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+@keyframes svSpin{to{transform:rotate(360deg)}}
+</style>
+</helmet>
+<div ref="{{ rootRef }}" style="position:relative;width:100%;min-height:{{ minH }};background:#050506;color:#F1EFE9;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.4;overflow:hidden">
+
+<sc-if value="{{ showChrome }}" hint-placeholder-val="{{ true }}">
+<header style="display:flex;align-items:center;justify-content:space-between;gap:16px;height:56px;padding:0 {{ pad }}px;border-bottom:1px solid rgba(240,232,214,0.09)">
+  <div style="display:flex;align-items:center;gap:30px;min-width:0">
+    <a href="#markets" onClick="{{ goMarkets }}" style="display:flex;align-items:center;gap:10px;white-space:nowrap">
+      <img src="suits-mark.png" alt="" style="width:22px;height:22px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 1px rgba(240,232,214,0.16)">
+      <span style="display:flex;align-items:baseline;gap:8px"><span style="font-family:Yellowtail,'Brush Script MT',cursive;font-size:22px;line-height:1;color:#F4EEDA;letter-spacing:0">SuitVentures</span><span style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.22em;text-transform:uppercase;color:rgba(232,228,220,0.5)">Markets</span></span>
+    </a>
+    <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}">
+    <nav style="display:flex;gap:22px">
+      <sc-for list="{{ nav }}" as="n" hint-placeholder-count="4">
+        <a href="#" onClick="{{ n.go }}" style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;color:{{ n.color }};padding:4px 0" style-hover="color:#FFFFFF">{{ n.label }}</a>
+      </sc-for>
+    </nav>
+    </sc-if>
+  </div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}">
+    <div style="position:relative;display:flex;align-items:center">
+      <input value="{{ query }}" onChange="{{ setQuery }}" placeholder="Ticker or address" style="width:{{ searchW }}px;height:32px;padding:0 10px 0 30px;background:transparent;border:1px solid rgba(240,232,214,0.14);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11.5px;outline:none" style-focus="border-color:rgba(244,238,218,0.55)">
+      <svg width="12" height="12" viewBox="0 0 12 12" style="position:absolute;left:10px;pointer-events:none"><circle cx="5" cy="5" r="3.6" style="fill:none;stroke:rgba(232,228,220,0.45);stroke-width:1.2"></circle><line x1="7.8" y1="7.8" x2="11" y2="11" style="stroke:rgba(232,228,220,0.45);stroke-width:1.2"></line></svg>
+    </div>
+    </sc-if>
+    <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+      <button onClick="{{ toggleSearch }}" aria-label="Search" style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(240,232,214,0.14);background:transparent;cursor:pointer"><svg width="12" height="12" viewBox="0 0 12 12"><circle cx="5" cy="5" r="3.6" style="fill:none;stroke:rgba(232,228,220,0.6);stroke-width:1.2"></circle><line x1="7.8" y1="7.8" x2="11" y2="11" style="stroke:rgba(232,228,220,0.6);stroke-width:1.2"></line></svg></button>
+    </sc-if>
+    <button onClick="{{ walletClick }}" title="{{ walletTitle }}" style="display:flex;align-items:center;gap:9px;height:32px;padding:0 14px;border:1px solid rgba(255,255,255,0.3);background:transparent;color:#F4F2EE;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(255,255,255,0.75);background:rgba(255,255,255,0.08)">
+      <sc-if value="{{ isHolder }}" hint-placeholder-val="{{ false }}">
+        <span style="position:relative;display:flex" onMouseEnter="{{ tipOn }}" onMouseLeave="{{ tipOff }}">
+          <img src="suits-mark.png" alt="Suit holder" style="width:16px;height:16px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 1px rgba(240,232,214,0.22)">
+          <sc-if value="{{ tip }}" hint-placeholder-val="{{ false }}">
+            <span style="position:absolute;top:26px;right:-10px;padding:6px 9px;background:#0C0C0F;border:1px solid rgba(240,232,214,0.14);font-size:9.5px;letter-spacing:0.06em;text-transform:none;color:#F1EFE9;white-space:nowrap;z-index:5">Suit holder, 0% fee</span>
+          </sc-if>
+        </span>
+      </sc-if>
+      <span>{{ walletLabel }}</span>
+    </button>
+  </div>
+</header>
+<sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+  <nav style="display:flex;gap:22px;padding:12px 16px 0;overflow-x:auto;scrollbar-width:none">
+    <sc-for list="{{ nav }}" as="n" hint-placeholder-count="4">
+      <a href="#" onClick="{{ n.go }}" style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;color:{{ n.color }};white-space:nowrap">{{ n.label }}</a>
+    </sc-for>
+  </nav>
+  <sc-if value="{{ searchOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:12px 16px 0"><input value="{{ query }}" onChange="{{ setQuery }}" placeholder="Ticker or address" style="width:100%;height:34px;padding:0 10px;background:transparent;border:1px solid rgba(240,232,214,0.14);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:12px;outline:none" style-focus="border-color:rgba(244,238,218,0.55)"></div>
+  </sc-if>
+</sc-if>
+<sc-if value="{{ showChips }}" hint-placeholder-val="{{ true }}">
+<div style="position:relative;border-bottom:1px solid rgba(240,232,214,0.09)">
+  <div style="display:flex;gap:6px;align-items:center;padding:12px {{ pad }}px;overflow-x:auto;scrollbar-width:none">
+    <sc-for list="{{ chips }}" as="c" hint-placeholder-count="8">
+      <button onClick="{{ c.select }}" style="flex:none;height:26px;padding:0 11px;border:1px solid {{ c.border }};background:{{ c.bg }};color:{{ c.color }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.14em;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.45)">{{ c.label }}</button>
+    </sc-for>
+    <button onClick="{{ togglePicker }}" style="flex:none;height:26px;padding:0 11px;margin-left:4px;border:1px dashed {{ moreBorder }};background:transparent;color:{{ moreColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.14em;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(240,232,214,0.6);color:#F1EFE9">{{ moreLabel }}</button>
+    <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ false }}"><button onClick="{{ clearQuotes }}" style="flex:none;height:26px;padding:0 6px;border:0;background:transparent;color:rgba(232,228,220,0.45);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;cursor:pointer" style-hover="color:#F1EFE9">Clear</button></sc-if>
+  </div>
+  <sc-if value="{{ picker }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;left:{{ pad }}px;right:{{ pad }}px;top:100%;margin-top:-1px;max-width:520px;background:#0C0C0F;border:1px solid rgba(240,232,214,0.14);z-index:25;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace">
+      <div style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid rgba(240,232,214,0.09)">
+        <div style="position:relative;display:flex;align-items:center;flex:1">
+          <input value="{{ pickerQ }}" onChange="{{ setPickerQ }}" placeholder="Find a quote asset" style="width:100%;height:30px;padding:0 10px 0 28px;background:transparent;border:1px solid rgba(240,232,214,0.14);font-family:inherit;font-size:11px;outline:none" style-focus="border-color:rgba(244,238,218,0.55)">
+          <svg width="12" height="12" viewBox="0 0 12 12" style="position:absolute;left:9px;pointer-events:none"><circle cx="5" cy="5" r="3.6" style="fill:none;stroke:rgba(232,228,220,0.45);stroke-width:1.2"></circle><line x1="7.8" y1="7.8" x2="11" y2="11" style="stroke:rgba(232,228,220,0.45);stroke-width:1.2"></line></svg>
+        </div>
+        <span style="font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4);white-space:nowrap">{{ quoteCount }} quotes</span>
+      </div>
+      <div style="display:grid;grid-template-columns:14px minmax(0,1fr) 64px 84px;gap:12px;align-items:center;height:28px;padding:0 12px;border-bottom:1px solid rgba(240,232,214,0.09);font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4)">
+        <span></span><span onClick="{{ pickSort.sym }}" style="cursor:pointer">Asset <span style="color:#F1EFE9">{{ pickInd.sym }}</span></span><span onClick="{{ pickSort.pairs }}" style="cursor:pointer;text-align:right">Pairs <span style="color:#F1EFE9">{{ pickInd.pairs }}</span></span><span onClick="{{ pickSort.vol }}" style="cursor:pointer;text-align:right">Vol 24h <span style="color:#F1EFE9">{{ pickInd.vol }}</span></span>
+      </div>
+      <div style="max-height:312px;overflow-y:auto">
+        <sc-for list="{{ pickerRows }}" as="pr" hint-placeholder-count="8">
+          <div onClick="{{ pr.toggle }}" style="display:grid;grid-template-columns:14px minmax(0,1fr) 64px 84px;gap:12px;align-items:center;height:36px;padding:0 12px;border-bottom:1px solid rgba(240,232,214,0.06);cursor:pointer;font-variant-numeric:tabular-nums;font-size:11.5px" style-hover="background:rgba(232,228,220,0.045)">
+            <span style="width:14px;height:14px;border:1px solid {{ pr.boxBorder }};background:{{ pr.boxBg }};display:flex;align-items:center;justify-content:center;font-size:9px;color:#050506;line-height:1">{{ pr.check }}</span>
+            <span style="display:flex;align-items:baseline;gap:8px;min-width:0"><span style="color:#F1EFE9">{{ pr.sym }}</span><span style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;color:rgba(232,228,220,0.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ pr.name }}</span></span>
+            <span style="text-align:right;color:rgba(232,228,220,0.7)">{{ pr.pairs }}</span>
+            <span style="text-align:right">{{ pr.vol }}</span>
+          </div>
+        </sc-for>
+        <sc-if value="{{ pickerEmpty }}" hint-placeholder-val="{{ false }}"><div style="padding:22px 12px;text-align:center;font-size:11px;color:rgba(232,228,220,0.45)">No quote asset matches.</div></sc-if>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-top:1px solid rgba(240,232,214,0.09)">
+        <span style="font-size:10.5px;color:rgba(232,228,220,0.5)">{{ selSummary }}</span>
+        <div style="display:flex;gap:6px">
+          <button onClick="{{ clearQuotes }}" style="height:28px;padding:0 12px;border:1px solid rgba(240,232,214,0.14);background:transparent;color:rgba(232,228,220,0.7);font-family:inherit;font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.45);color:#F1EFE9">Clear</button>
+          <button onClick="{{ togglePicker }}" style="height:28px;padding:0 14px;border:0;background:#F4EEDA;color:#050506;font-family:inherit;font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;cursor:pointer" style-hover="background:#FFFFFF">Done</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+</div>
+</sc-if>
+</sc-if>
+
+<sc-if value="{{ showListPage }}" hint-placeholder-val="{{ true }}">
+<section style="padding:0 {{ pad }}px 32px">
+  <sc-if value="{{ isWardrobe }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;align-items:baseline;gap:14px;margin-top:18px">
+      <h1 style="margin:0;font-size:18px;font-weight:500;letter-spacing:-0.01em">Watchlist</h1>
+      <span style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4)">{{ wardrobeCount }}</span>
+    </div>
+  </sc-if>
+  <sc-if value="{{ showPresets }}" hint-placeholder-val="{{ true }}">
+  <div style="display:flex;align-items:center;gap:10px 16px;padding:14px 0;flex-wrap:wrap">
+    <div style="display:flex;border:1px solid rgba(240,232,214,0.12);overflow-x:auto;scrollbar-width:none;max-width:100%">
+      <sc-for list="{{ presets }}" as="p" hint-placeholder-count="5">
+        <button onClick="{{ p.select }}" style="height:28px;padding:0 12px;border:0;border-right:1px solid {{ p.sep }};background:{{ p.bg }};color:{{ p.color }};font-size:11.5px;cursor:pointer;white-space:nowrap" style-hover="color:#FFFFFF">{{ p.label }}</button>
+      </sc-for>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;max-width:100%">
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><span style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.4)">Launchpad</span></sc-if>
+      <div style="display:flex;border:1px solid rgba(240,232,214,0.12);overflow-x:auto;scrollbar-width:none">
+        <sc-for list="{{ pads }}" as="pd" hint-placeholder-count="5">
+          <button onClick="{{ pd.select }}" style="height:28px;padding:0 10px;border:0;border-right:1px solid {{ pd.sep }};background:{{ pd.bg }};color:{{ pd.color }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.14em;cursor:pointer;white-space:nowrap" style-hover="color:#FFFFFF">{{ pd.label }}</button>
+        </sc-for>
+      </div>
+    </div>
+    <div style="margin-left:auto;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:rgba(232,228,220,0.4);white-space:nowrap">{{ countLabel }}</div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ wardrobeLocked }}" hint-placeholder-val="{{ false }}">
+    <div style="padding:72px 16px;text-align:center;border-top:1px solid rgba(240,232,214,0.09)">
+      <img src="suits-mark.png" alt="" style="width:36px;height:36px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 1px rgba(240,232,214,0.16);opacity:0.8">
+      <div style="font-size:17px;margin:18px 0 6px">Your watchlist lives with your wallet.</div>
+      <div style="font-size:12.5px;color:rgba(232,228,220,0.5)">Connect to see the tokens you've starred.</div>
+      <button onClick="{{ openConnect }}" style="margin-top:22px;height:34px;padding:0 18px;border:1px solid rgba(255,255,255,0.3);background:transparent;color:#F4F2EE;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer" style-hover="border-color:rgba(255,255,255,0.75);background:rgba(255,255,255,0.08)">Connect Wallet</button>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ never }}" hint-placeholder-val="{{ false }}">
+    <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:12.5px;margin-top:14px">
+      <div style="display:grid;grid-template-columns:{{ trCols }};gap:12px;align-items:center;height:32px;border-bottom:1px solid rgba(240,232,214,0.14);font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4)">
+        <div>#</div><div>Wallet</div><div style="text-align:right">Vol 24h</div><div style="text-align:right">Trades</div><div style="text-align:right">Top token</div>
+      </div>
+      <sc-for list="{{ traders }}" as="tr" hint-placeholder-count="6">
+        <div style="display:grid;grid-template-columns:{{ trCols }};gap:12px;align-items:center;height:{{ rowH }}px;border-bottom:1px solid rgba(240,232,214,0.07)" style-hover="background:rgba(232,228,220,0.045)">
+          <div style="color:rgba(232,228,220,0.4);font-size:11px">{{ tr.rank }}</div>
+          <div style="display:flex;align-items:center;gap:8px;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ tr.wallet }}</span><sc-if value="{{ tr.suit }}" hint-placeholder-val="{{ false }}"><img src="suits-mark.png" alt="Suit holder" title="Suit holder, 0% fee" style="width:14px;height:14px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 1px rgba(240,232,214,0.22)"></sc-if></div>
+          <div style="text-align:right">{{ tr.vol }}</div>
+          <div style="text-align:right">{{ tr.trades }}</div>
+          <div style="text-align:right;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:500">{{ tr.top }}</div>
+        </div>
+      </sc-for>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ showTable }}" hint-placeholder-val="{{ true }}">
+  <div style="overflow-x:auto">
+    <div style="display:grid;grid-template-columns:{{ cols }};gap:8px;align-items:center;height:32px;border-bottom:1px solid rgba(240,232,214,0.14);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4);white-space:nowrap">
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div onClick="{{ sortBy.rank }}" style="cursor:pointer">#</div></sc-if>
+      <div onClick="{{ sortBy.ticker }}" style="cursor:pointer">Token <span style="color:#F1EFE9">{{ ind.ticker }}</span></div>
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div></div><div>Quote</div></sc-if>
+      <div onClick="{{ sortBy.p }}" style="cursor:pointer;text-align:right">Price <span style="color:#F1EFE9">{{ ind.p }}</span></div>
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div onClick="{{ sortBy.h1 }}" style="cursor:pointer;text-align:right">1h <span style="color:#F1EFE9">{{ ind.h1 }}</span></div></sc-if>
+      <div onClick="{{ sortBy.h24 }}" style="cursor:pointer;text-align:right">24h <span style="color:#F1EFE9">{{ ind.h24 }}</span></div>
+      <div onClick="{{ sortBy.vol }}" style="cursor:pointer;text-align:right">{{ volHead }} <span style="color:#F1EFE9">{{ ind.vol }}</span></div>
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div onClick="{{ sortBy.mcap }}" style="cursor:pointer;text-align:right">Mcap <span style="color:#F1EFE9">{{ ind.mcap }}</span></div></sc-if>
+      <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}"><div onClick="{{ sortBy.fdv }}" style="cursor:pointer;text-align:right">FDV <span style="color:#F1EFE9">{{ ind.fdv }}</span></div></sc-if>
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div onClick="{{ sortBy.liq }}" style="cursor:pointer;text-align:right">Liquidity <span style="color:#F1EFE9">{{ ind.liq }}</span></div></sc-if>
+      <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}"><div onClick="{{ sortBy.holders }}" style="cursor:pointer;text-align:right">Holders <span style="color:#F1EFE9">{{ ind.holders }}</span></div><div onClick="{{ sortBy.age }}" style="cursor:pointer;text-align:right">Age <span style="color:#F1EFE9">{{ ind.age }}</span></div></sc-if>
+      <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><span style="text-align:right">Bull</span><span style="text-align:right">Bear</span></div></sc-if>
+    </div>
+
+    <sc-if value="{{ loading }}" hint-placeholder-val="{{ false }}">
+      <sc-for list="{{ skeletons }}" as="s" hint-placeholder-count="8">
+        <div style="display:flex;align-items:center;gap:14px;height:{{ rowH }}px;border-bottom:1px solid rgba(240,232,214,0.07)">
+          <span style="width:22px;height:22px;border-radius:50%;background:rgba(232,228,220,0.06)"></span>
+          <span style="width:{{ s.a }}px;height:10px;background:linear-gradient(90deg,rgba(232,228,220,0.05) 25%,rgba(232,228,220,0.11) 50%,rgba(232,228,220,0.05) 75%);background-size:200% 100%;animation:svShimmer 1.4s linear infinite"></span>
+          <span style="flex:1"></span>
+          <span style="width:{{ s.b }}px;height:10px;background:linear-gradient(90deg,rgba(232,228,220,0.05) 25%,rgba(232,228,220,0.11) 50%,rgba(232,228,220,0.05) 75%);background-size:200% 100%;animation:svShimmer 1.4s linear infinite"></span>
+          <span style="width:{{ s.c }}px;height:10px;background:linear-gradient(90deg,rgba(232,228,220,0.05) 25%,rgba(232,228,220,0.11) 50%,rgba(232,228,220,0.05) 75%);background-size:200% 100%;animation:svShimmer 1.4s linear infinite"></span>
+          <span style="width:{{ s.d }}px;height:10px;background:linear-gradient(90deg,rgba(232,228,220,0.05) 25%,rgba(232,228,220,0.11) 50%,rgba(232,228,220,0.05) 75%);background-size:200% 100%;animation:svShimmer 1.4s linear infinite"></span>
+        </div>
+      </sc-for>
+    </sc-if>
+
+    <sc-if value="{{ hasRows }}" hint-placeholder-val="{{ true }}">
+    <sc-for list="{{ rows }}" as="r" hint-placeholder-count="8">
+      <div style="border-bottom:1px solid {{ rowBorder }};background:{{ r.bg }}">
+        <div onClick="{{ r.open }}" style="display:grid;grid-template-columns:{{ cols }};gap:8px;align-items:center;height:{{ rowH }}px;cursor:pointer;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:12.5px;white-space:nowrap" style-hover="background:rgba(232,228,220,0.045)">
+          <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="color:rgba(232,228,220,0.4);font-size:11px">{{ r.rank }}</div></sc-if>
+          <div style="display:flex;align-items:center;gap:10px;min-width:0">
+            <span style="width:{{ logoSize }}px;height:{{ logoSize }}px;border-radius:50%;background:{{ r.logoBg }};display:flex;align-items:center;justify-content:center;font-size:9.5px;color:rgba(232,228,220,0.75);flex:none">{{ r.initial }}</span>
+            <div style="min-width:0">
+              <div style="display:flex;align-items:center;gap:7px;min-width:0"><span style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-weight:500;font-size:13px;letter-spacing:0.01em;overflow:hidden;text-overflow:ellipsis;min-width:0">{{ r.ticker }}</span><sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><span style="flex:none;font-size:8.5px;letter-spacing:0.14em;padding:1px 4px;border:1px solid rgba(240,232,214,0.18);color:rgba(232,228,220,0.6);line-height:1.3">{{ r.pad }}</span></sc-if></div>
+              <sc-if value="{{ showName }}" hint-placeholder-val="{{ true }}"><div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;color:rgba(232,228,220,0.45);overflow:hidden;text-overflow:ellipsis;margin-top:1px">{{ r.sub }}</div></sc-if>
+            </div>
+          </div>
+          <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><button onClick="{{ r.toggleStar }}" aria-label="Watch" style="width:28px;height:28px;justify-self:center;border:0;background:transparent;color:{{ r.starColor }};font-size:14px;cursor:pointer;padding:0" style-hover="color:#F4EEDA">{{ r.star }}</button><div style="color:rgba(232,228,220,0.6);font-size:11.5px;overflow:hidden;text-overflow:ellipsis">{{ r.pair }}</div></sc-if>
+          <div style="text-align:right">{{ r.price }}</div>
+          <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="text-align:right;color:{{ r.h1c }}">{{ r.h1 }}</div></sc-if>
+          <div style="text-align:right;color:{{ r.h24c }}">{{ r.h24 }}</div>
+          <div style="text-align:right">{{ r.vol }}</div>
+          <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="text-align:right">{{ r.mcap }}</div></sc-if>
+          <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}"><div style="text-align:right">{{ r.fdv }}</div></sc-if>
+          <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="text-align:right">{{ r.liq }}</div></sc-if>
+          <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}"><div style="text-align:right">{{ r.holders }}</div><div style="text-align:right;color:rgba(232,228,220,0.6)">{{ r.age }}</div></sc-if>
+          <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;font-variant-numeric:tabular-nums"><span style="text-align:right;color:#5DBE8A;white-space:nowrap"><span style="opacity:0.55">↑</span>{{ r.bull }}</span><span style="text-align:right;color:#D46A63;white-space:nowrap"><span style="opacity:0.55">↓</span>{{ r.bear }}</span></div>
+          </sc-if>
+        </div>
+        <sc-if value="{{ r.expanded }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:6px 0 14px 32px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:12px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 16px">
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">1h</span><span style="color:{{ r.h1c }}">{{ r.h1 }}</span></div>
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">Mcap</span><span>{{ r.mcap }}</span></div>
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">FDV</span><span>{{ r.fdv }}</span></div>
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">Liquidity</span><span>{{ r.liq }}</span></div>
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">Holders</span><span>{{ r.holders }}</span></div>
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">Age</span><span>{{ r.age }}</span></div>
+              <div style="display:flex;justify-content:space-between;border-bottom:1px dotted rgba(240,232,214,0.14);padding-bottom:4px"><span style="color:rgba(232,228,220,0.45);font-size:10px;letter-spacing:0.14em;text-transform:uppercase">Votes</span><span><span style="color:#5DBE8A">↑{{ r.bull }}</span> <span style="color:#D46A63;margin-left:6px">↓{{ r.bear }}</span></span></div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:12px">
+              <button onClick="{{ r.toggleStar }}" style="height:32px;padding:0 12px;border:1px solid rgba(240,232,214,0.18);background:transparent;color:{{ r.starColor }};font-size:12px;cursor:pointer">{{ r.star }} Watch</button>
+              <button onClick="{{ r.openToken }}" style="flex:1;height:32px;border:0;background:#F4EEDA;color:#050506;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;cursor:pointer">Open {{ r.ticker }} →</button>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-for>
+    </sc-if>
+
+    <sc-if value="{{ showEmpty }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:64px 16px;text-align:center">
+        <div style="font-size:16px">{{ emptyTitle }}</div>
+        <div style="font-size:12.5px;color:rgba(232,228,220,0.5);margin-top:6px">{{ emptySub }}</div>
+        <sc-if value="{{ emptyReset }}" hint-placeholder-val="{{ false }}"><button onClick="{{ resetFilters }}" style="margin-top:18px;height:30px;padding:0 14px;border:1px solid rgba(240,232,214,0.18);background:transparent;color:#F1EFE9;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.2em;text-transform:uppercase;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.5)">Show all pairs</button></sc-if>
+      </div>
+    </sc-if>
+  </div>
+  </sc-if>
+  <sc-if value="{{ placeholderNote }}" hint-placeholder-val="{{ false }}">
+    <div style="margin-top:14px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.08em;color:rgba(232,228,220,0.3)">Rows below the eight you supplied are placeholder pairs for density only.</div>
+  </sc-if>
+</section>
+</sc-if>
+
+<sc-if value="{{ isToken }}" hint-placeholder-val="{{ false }}">
+<section style="padding:0 {{ pad }}px {{ pad }}px">
+  <sc-if value="{{ showChrome }}" hint-placeholder-val="{{ true }}"><a href="#markets" onClick="{{ goMarkets }}" style="display:inline-block;margin:14px 0 0;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(232,228,220,0.45)" style-hover="color:#F1EFE9">← Markets</a></sc-if>
+
+  <sc-if value="{{ hdrLedger }}" hint-placeholder-val="{{ true }}">
+  <div style="display:flex;flex-direction:{{ hdrDir }};align-items:{{ hdrAlign }};justify-content:space-between;gap:{{ hdrGap }}px;padding:18px 0;border-bottom:1px solid rgba(240,232,214,0.09)">
+    <div style="display:flex;align-items:center;gap:14px;min-width:0">
+      <span style="width:40px;height:40px;border-radius:50%;background:{{ tLogoBg }};display:flex;align-items:center;justify-content:center;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:14px;color:rgba(232,228,220,0.8);flex:none">{{ tInitial }}</span>
+      <div style="min-width:0">
+        <div style="display:flex;align-items:baseline;gap:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          <span style="font-size:20px;font-weight:500;letter-spacing:-0.01em;line-height:1.1">{{ tTicker }}</span>
+          <span style="font-size:13px;color:rgba(232,228,220,0.5)">{{ tName }}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;color:rgba(232,228,220,0.5);white-space:nowrap">
+          <span style="color:rgba(232,228,220,0.65)">{{ tPair }}</span>
+          <span style="font-size:8.5px;letter-spacing:0.14em;padding:1px 4px;border:1px solid rgba(240,232,214,0.18);color:rgba(232,228,220,0.6);line-height:1.3">{{ tPad }}</span>
+          <span>{{ tAddr }}</span>
+          <button onClick="{{ copyAddr }}" style="border:0;background:transparent;color:rgba(232,228,220,0.45);font-family:inherit;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;cursor:pointer;padding:0" style-hover="color:#F1EFE9">{{ copyLabel }}</button>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:{{ hdrRightDir }};align-items:{{ hdrRightAlign }};justify-content:space-between;gap:{{ hdrRightGap }}px;flex:none">
+      <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums">
+        <div style="font-size:28px;line-height:1;letter-spacing:-0.01em">{{ tPrice }}</div>
+        <div style="font-size:11.5px;margin-top:5px;white-space:nowrap"><span style="color:{{ tChangeColor }}">{{ tChange }}</span> <span style="color:rgba(232,228,220,0.4);margin-left:6px">24h · {{ tPriceQ }}</span></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button onClick="{{ toggleStarTok }}" aria-label="Watch" style="width:34px;height:34px;border:1px solid rgba(240,232,214,0.14);background:transparent;color:{{ tStarColor }};font-size:15px;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.4)">{{ tStar }}</button>
+        <button onClick="{{ voteBull }}" style="height:34px;padding:0 12px;border:1px solid {{ bullBorder }};background:transparent;color:{{ bullColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.06em;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(240,232,214,0.4)"><span style="color:#5DBE8A">↑</span> Bullish <span style="color:#5DBE8A;margin-left:4px">{{ tBull }}</span></button>
+        <button onClick="{{ voteBear }}" style="height:34px;padding:0 12px;border:1px solid {{ bearBorder }};background:transparent;color:{{ bearColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.06em;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(240,232,214,0.4)"><span style="color:#D46A63">↓</span> Bearish <span style="color:#D46A63;margin-left:4px">{{ tBear }}</span></button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ hdrMasthead }}" hint-placeholder-val="{{ false }}">
+  <div style="padding:26px 0 22px;border-bottom:1px solid rgba(240,232,214,0.09)">
+    <div style="display:flex;align-items:center;gap:10px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(232,228,220,0.45);flex-wrap:wrap">
+      <span>{{ tPair }}</span><span style="opacity:0.4">·</span><span style="font-size:8.5px;letter-spacing:0.14em;padding:1px 4px;border:1px solid rgba(240,232,214,0.18)">{{ tPad }}</span><span style="opacity:0.4">·</span><span>{{ tAddr }}</span>
+      <button onClick="{{ copyAddr }}" style="border:0;background:transparent;color:rgba(232,228,220,0.45);font-family:inherit;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;cursor:pointer;padding:0" style-hover="color:#F1EFE9">{{ copyLabel }}</button>
+    </div>
+    <div style="display:flex;flex-direction:{{ hdrDir }};align-items:{{ mastAlign }};justify-content:space-between;gap:{{ hdrGap }}px;margin-top:14px">
+      <div style="display:flex;align-items:flex-end;gap:18px;min-width:0">
+        <span style="width:56px;height:56px;border-radius:50%;background:{{ tLogoBg }};display:flex;align-items:center;justify-content:center;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:18px;color:rgba(232,228,220,0.8);flex:none">{{ tInitial }}</span>
+        <div>
+          <div style="font-size:{{ mastSize }}px;font-weight:300;letter-spacing:-0.03em;line-height:0.95">{{ tTicker }}</div>
+          <div style="font-size:13px;color:rgba(232,228,220,0.5);margin-top:8px">{{ tName }}</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:{{ hdrRightDir }};align-items:{{ mastRightAlign }};justify-content:space-between;gap:{{ hdrRightGap }}px;flex:none">
+        <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums">
+          <div style="font-size:{{ mastPriceSize }}px;line-height:1;letter-spacing:-0.02em">{{ tPrice }}</div>
+          <div style="font-size:11.5px;margin-top:6px"><span style="color:{{ tChangeColor }}">{{ tChange }}</span><span style="color:rgba(232,228,220,0.4);margin-left:8px">24h</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding-bottom:2px">
+          <button onClick="{{ toggleStarTok }}" aria-label="Watch" style="width:34px;height:34px;border:1px solid rgba(240,232,214,0.14);background:transparent;color:{{ tStarColor }};font-size:15px;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.4)">{{ tStar }}</button>
+          <button onClick="{{ voteBull }}" style="height:34px;padding:0 12px;border:1px solid {{ bullBorder }};background:transparent;color:{{ bullColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(240,232,214,0.4)"><span style="color:#5DBE8A">↑ {{ tBull }}</span></button>
+          <button onClick="{{ voteBear }}" style="height:34px;padding:0 12px;border:1px solid {{ bearBorder }};background:transparent;color:{{ bearColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(240,232,214,0.4)"><span style="color:#D46A63">↓ {{ tBear }}</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ hdrTape }}" hint-placeholder-val="{{ false }}">
+  <div style="border-bottom:1px solid rgba(240,232,214,0.09)">
+    <div style="display:flex;flex-direction:{{ hdrDir }};align-items:{{ hdrAlign }};justify-content:space-between;gap:{{ hdrGap }}px;padding:16px 0 12px">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0;white-space:nowrap;overflow:hidden">
+        <span style="width:32px;height:32px;border-radius:50%;background:{{ tLogoBg }};display:flex;align-items:center;justify-content:center;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:12px;color:rgba(232,228,220,0.8);flex:none">{{ tInitial }}</span>
+        <span style="font-size:17px;font-weight:500">{{ tTicker }}</span>
+        <span style="font-size:12.5px;color:rgba(232,228,220,0.5)">{{ tName }}</span>
+        <span style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:8.5px;letter-spacing:0.14em;padding:1px 4px;border:1px solid rgba(240,232,214,0.18);color:rgba(232,228,220,0.6)">{{ tPad }}</span>
+        <span style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;color:rgba(232,228,220,0.45)">{{ tAddr }}</span>
+        <button onClick="{{ copyAddr }}" style="border:0;background:transparent;color:rgba(232,228,220,0.45);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;cursor:pointer;padding:0" style-hover="color:#F1EFE9">{{ copyLabel }}</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button onClick="{{ toggleStarTok }}" aria-label="Watch" style="width:30px;height:30px;border:1px solid rgba(240,232,214,0.14);background:transparent;color:{{ tStarColor }};font-size:14px;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.4)">{{ tStar }}</button>
+        <button onClick="{{ voteBull }}" style="height:30px;padding:0 10px;border:1px solid {{ bullBorder }};background:transparent;color:{{ bullColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.4)"><span style="color:#5DBE8A">↑ {{ tBull }}</span></button>
+        <button onClick="{{ voteBear }}" style="height:30px;padding:0 10px;border:1px solid {{ bearBorder }};background:transparent;color:{{ bearColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.4)"><span style="color:#D46A63">↓ {{ tBear }}</span></button>
+      </div>
+    </div>
+    <div style="display:flex;overflow-x:auto;scrollbar-width:none;border-top:1px solid rgba(240,232,214,0.09)">
+      <sc-for list="{{ tape }}" as="s" hint-placeholder-count="7">
+        <div style="flex:1 0 auto;min-width:104px;padding:10px 14px 12px 0;margin-right:14px;border-right:1px solid rgba(240,232,214,0.09);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums">
+          <div style="font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.4)">{{ s.label }}</div>
+          <div style="font-size:{{ s.size }}px;margin-top:4px;color:{{ s.color }};line-height:1.1">{{ s.value }}</div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ showBody }}" hint-placeholder-val="{{ true }}">
+  <div style="display:flex;flex-direction:{{ colDir }};gap:{{ colGap }}px;align-items:flex-start;margin-top:{{ bodyTop }}px">
+    <sc-if value="{{ showChart }}" hint-placeholder-val="{{ true }}">
+    <div style="flex:1;min-width:0;width:100%;order:{{ chartOrder }}">
+      <div style="border:1px solid rgba(240,232,214,0.09)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;height:36px;padding:0 10px;border-bottom:1px solid rgba(240,232,214,0.09)">
+          <div style="display:flex;gap:2px">
+            <sc-for list="{{ intervals }}" as="iv" hint-placeholder-count="5">
+              <button onClick="{{ iv.select }}" style="height:24px;padding:0 8px;border:0;background:{{ iv.bg }};color:{{ iv.color }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.06em;cursor:pointer" style-hover="color:#F1EFE9">{{ iv.label }}</button>
+            </sc-for>
+          </div>
+          <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4);white-space:nowrap">Uniswap v4 · Robinhood Chain</div>
+        </div>
+        <div style="position:relative">
+          <div style="position:absolute;top:8px;left:10px;z-index:2;pointer-events:none;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:10.5px;line-height:1.6;white-space:nowrap">
+            <div style="color:#F1EFE9">{{ tPair }} <span style="color:rgba(232,228,220,0.5)">· {{ intervalLabel }} · Uniswap v4</span></div>
+            <div style="color:rgba(232,228,220,0.5)">O <span style="color:{{ legColor }}">{{ legO }}</span> H <span style="color:{{ legColor }}">{{ legH }}</span> L <span style="color:{{ legColor }}">{{ legL }}</span> C <span style="color:{{ legColor }}">{{ legC }}</span> <span style="color:{{ legColor }};margin-left:4px">{{ legChg }}</span></div>
+            <div style="color:rgba(232,228,220,0.5)">Vol <span style="color:{{ legColor }}">{{ legV }}</span></div>
+          </div>
+          <svg width="{{ chartW }}" height="{{ chartH }}" onMouseMove="{{ chartMove }}" onMouseLeave="{{ chartLeave }}" style="display:block;cursor:crosshair">
+            <sc-for list="{{ grid }}" as="g" hint-placeholder-count="1">
+              <line x1="0" x2="{{ plotW }}" y1="{{ g.y }}" y2="{{ g.y }}" style="stroke:rgba(240,232,214,0.06)"></line>
+            </sc-for>
+            <sc-for list="{{ times }}" as="tm" hint-placeholder-count="1">
+              <line x1="{{ tm.x }}" x2="{{ tm.x }}" y1="0" y2="{{ vBase }}" style="stroke:rgba(240,232,214,0.06)"></line>
+            </sc-for>
+            <sc-for list="{{ candles }}" as="c" hint-placeholder-count="1">
+              <rect x="{{ c.x }}" y="{{ c.vy }}" width="{{ c.w }}" height="{{ c.vh }}" style="fill:{{ c.vfill }}"></rect>
+              <line x1="{{ c.cx }}" x2="{{ c.cx }}" y1="{{ c.hy }}" y2="{{ c.ly }}" style="stroke:{{ c.fill }};stroke-width:1"></line>
+              <rect x="{{ c.x }}" y="{{ c.by }}" width="{{ c.w }}" height="{{ c.bh }}" style="fill:{{ c.fill }}"></rect>
+            </sc-for>
+            <line x1="{{ plotW }}" x2="{{ plotW }}" y1="0" y2="{{ vBase }}" style="stroke:rgba(240,232,214,0.12)"></line>
+            <line x1="0" x2="{{ chartW }}" y1="{{ vBase }}" y2="{{ vBase }}" style="stroke:rgba(240,232,214,0.12)"></line>
+            <line x1="0" x2="{{ plotW }}" y1="{{ lastY }}" y2="{{ lastY }}" style="stroke:{{ lastFill }};stroke-dasharray:2 3;opacity:0.8"></line>
+            <sc-if value="{{ hovering }}" hint-placeholder-val="{{ false }}">
+              <line x1="{{ hx }}" x2="{{ hx }}" y1="0" y2="{{ vBase }}" style="stroke:rgba(232,228,220,0.5);stroke-dasharray:3 3"></line>
+              <line x1="0" x2="{{ plotW }}" y1="{{ hy }}" y2="{{ hy }}" style="stroke:rgba(232,228,220,0.5);stroke-dasharray:3 3"></line>
+            </sc-if>
+          </svg>
+          <div style="position:absolute;left:0;top:{{ wmTop }}px;width:{{ plotW }}px;text-align:center;pointer-events:none;font-size:38px;font-weight:500;letter-spacing:0.04em;color:rgba(232,228,220,0.045);line-height:1">{{ tPair }}</div>
+          <div style="position:absolute;inset:0;pointer-events:none;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:10px;line-height:17px">
+            <sc-for list="{{ grid }}" as="g" hint-placeholder-count="1">
+              <div style="position:absolute;left:{{ axisX }}px;top:{{ g.top }}px;color:rgba(232,228,220,0.45)">{{ g.label }}</div>
+            </sc-for>
+            <sc-for list="{{ times }}" as="tm" hint-placeholder-count="1">
+              <div style="position:absolute;left:{{ tm.x }}px;top:{{ timeBoxY }}px;transform:translateX(-50%);color:rgba(232,228,220,0.45)">{{ tm.label }}</div>
+            </sc-for>
+            <div style="position:absolute;left:{{ plotW }}px;top:{{ lastBoxY }}px;width:{{ axW }}px;height:17px;padding-left:6px;background:{{ lastFill }};color:#050506;font-weight:600">{{ lastLabel }}</div>
+            <sc-if value="{{ hovering }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;left:{{ plotW }}px;top:{{ hyBoxY }}px;width:{{ axW }}px;height:17px;padding-left:6px;background:#2A2A31;color:#F1EFE9">{{ hyLabel }}</div>
+              <div style="position:absolute;left:{{ hx }}px;top:{{ timeBoxY }}px;transform:translateX(-50%);padding:0 8px;height:17px;background:#2A2A31;color:#F1EFE9;white-space:nowrap">{{ hTime }}</div>
+            </sc-if>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:22px;border-bottom:1px solid rgba(240,232,214,0.09);margin-top:26px">
+        <sc-for list="{{ tabs }}" as="tb" hint-placeholder-count="3">
+          <button onClick="{{ tb.select }}" style="height:34px;padding:0;border:0;border-bottom:1px solid {{ tb.line }};margin-bottom:-1px;background:transparent;color:{{ tb.color }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer" style-hover="color:#FFFFFF">{{ tb.label }}</button>
+        </sc-for>
+      </div>
+      <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:12px">
+        <sc-if value="{{ tabTrades }}" hint-placeholder-val="{{ true }}">
+          <div style="display:grid;grid-template-columns:{{ tdCols }};gap:10px;height:30px;align-items:center;border-bottom:1px solid rgba(240,232,214,0.09);font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4)">
+            <div>Time</div><div>Side</div><div style="text-align:right">Amount</div><div style="text-align:right">Price</div><sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="text-align:right">Wallet</div></sc-if><div style="text-align:right">Tx</div>
+          </div>
+          <sc-for list="{{ trades }}" as="x" hint-placeholder-count="8">
+            <div style="display:grid;grid-template-columns:{{ tdCols }};gap:10px;height:32px;align-items:center;border-bottom:1px solid rgba(240,232,214,0.06);white-space:nowrap" style-hover="background:rgba(232,228,220,0.035)">
+              <div style="color:rgba(232,228,220,0.55)">{{ x.time }}</div>
+              <div style="color:{{ x.sideColor }}">{{ x.side }}</div>
+              <div style="text-align:right">{{ x.amount }}</div>
+              <div style="text-align:right">{{ x.price }}</div>
+              <sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><div style="text-align:right;color:rgba(232,228,220,0.55)">{{ x.wallet }}</div></sc-if>
+              <a href="#" style="text-align:right;color:rgba(232,228,220,0.45)" style-hover="color:#F1EFE9">↗</a>
+            </div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ tabHolders }}" hint-placeholder-val="{{ false }}">
+          <div style="display:grid;grid-template-columns:32px minmax(0,1fr) 120px 90px;gap:10px;height:30px;align-items:center;border-bottom:1px solid rgba(240,232,214,0.09);font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4)">
+            <div>#</div><div>Wallet</div><div style="text-align:right">Balance</div><div style="text-align:right">Share</div>
+          </div>
+          <sc-for list="{{ holders }}" as="h" hint-placeholder-count="8">
+            <div style="display:grid;grid-template-columns:32px minmax(0,1fr) 120px 90px;gap:10px;height:32px;align-items:center;border-bottom:1px solid rgba(240,232,214,0.06)" style-hover="background:rgba(232,228,220,0.035)">
+              <div style="color:rgba(232,228,220,0.4)">{{ h.rank }}</div>
+              <div style="display:flex;align-items:center;gap:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span>{{ h.wallet }}</span><sc-if value="{{ h.tag }}" hint-placeholder-val="{{ false }}"><span style="font-size:8.5px;letter-spacing:0.14em;padding:1px 4px;border:1px solid rgba(240,232,214,0.18);color:rgba(232,228,220,0.6)">{{ h.tag }}</span></sc-if></div>
+              <div style="text-align:right">{{ h.balance }}</div>
+              <div style="text-align:right;color:rgba(232,228,220,0.7)">{{ h.share }}</div>
+            </div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ tabInfo }}" hint-placeholder-val="{{ false }}">
+          <sc-for list="{{ info }}" as="k" hint-placeholder-count="5">
+            <div style="display:flex;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid rgba(240,232,214,0.06)">
+              <span style="font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4);flex:none">{{ k.label }}</span>
+              <span style="text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ k.value }}</span>
+            </div>
+          </sc-for>
+        </sc-if>
+      </div>
+    </div>
+    </sc-if>
+
+    <div style="width:{{ panelW }};flex:none;order:{{ panelOrder }}">
+      <sc-if value="{{ untradeable }}" hint-placeholder-val="{{ false }}">
+        <div style="border:1px solid rgba(240,232,214,0.09);padding:34px 22px;text-align:center">
+          <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.22em;text-transform:uppercase;color:rgba(232,228,220,0.4)">Not routed</div>
+          <div style="font-size:17px;margin:12px 0 8px">Not tradeable here yet</div>
+          <div style="font-size:12.5px;color:rgba(232,228,220,0.5);line-height:1.5;text-wrap:pretty">This {{ tPadName }} pool can't be routed through the SuitVentures swap. Trade it on {{ tPadName }} for now.</div>
+          <a href="#" style="display:inline-flex;align-items:center;margin-top:20px;height:34px;padding:0 16px;border:1px solid rgba(255,255,255,0.3);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.22em;text-transform:uppercase" style-hover="border-color:rgba(255,255,255,0.75);background:rgba(255,255,255,0.08)"><span style="white-space:nowrap">Trade on {{ tPadName }} ↗</span></a>
+        </div>
+      </sc-if>
+      <sc-if value="{{ tradeable }}" hint-placeholder-val="{{ true }}">
+      <div style="position:relative;border:1px solid rgba(240,232,214,0.09);padding:16px">
+        <sc-if value="{{ pvTicket }}" hint-placeholder-val="{{ true }}">
+          <div style="display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(240,232,214,0.14)">
+            <button onClick="{{ setBuy }}" style="height:32px;border:0;background:{{ buyBg }};color:{{ buyColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer">Buy</button>
+            <button onClick="{{ setSell }}" style="height:32px;border:0;border-left:1px solid rgba(240,232,214,0.14);background:{{ sellBg }};color:{{ sellColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer">Sell</button>
+          </div>
+        </sc-if>
+        <sc-if value="{{ pvTabs }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;gap:20px;border-bottom:1px solid rgba(240,232,214,0.09);margin:-4px 0 0">
+            <button onClick="{{ setBuy }}" style="height:32px;padding:0;border:0;border-bottom:1px solid {{ buyLine }};margin-bottom:-1px;background:transparent;color:{{ buyTabColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer">Buy</button>
+            <button onClick="{{ setSell }}" style="height:32px;padding:0;border:0;border-bottom:1px solid {{ sellLine }};margin-bottom:-1px;background:transparent;color:{{ sellTabColor }};font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer">Sell</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ pvStacked }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:16px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.45)">
+            <span>{{ inLabel }}</span><span style="letter-spacing:0.04em;text-transform:none;font-variant-numeric:tabular-nums">Balance {{ payBal }} {{ payAsset }}</span>
+          </div>
+          <div style="display:flex;align-items:center;border:1px solid rgba(240,232,214,0.14);margin-top:8px;height:52px" style-focus="border-color:rgba(244,238,218,0.55)">
+            <input value="{{ amount }}" onChange="{{ setAmount }}" placeholder="0.00" inputMode="decimal" style="flex:1;min-width:0;height:100%;padding:0 12px;background:transparent;border:0;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:20px;outline:none">
+            <button onClick="{{ toggleDenom }}" title="Switch denomination" style="height:32px;margin-right:10px;padding:0 10px;border:1px solid rgba(240,232,214,0.14);background:transparent;color:#F1EFE9;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.08em;cursor:pointer;white-space:nowrap" style-hover="border-color:rgba(240,232,214,0.45)">{{ denomAsset }} <span style="color:rgba(232,228,220,0.45);margin-left:4px">⇅</span></button>
+          </div>
+          <sc-if value="{{ pvTicket }}" hint-placeholder-val="{{ true }}">
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px">
+              <sc-for list="{{ quicks }}" as="qk" hint-placeholder-count="4">
+                <button onClick="{{ qk.set }}" style="height:26px;border:1px solid rgba(240,232,214,0.12);background:transparent;color:rgba(232,228,220,0.7);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.08em;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.45);color:#F1EFE9">{{ qk.label }}</button>
+              </sc-for>
+            </div>
+          </sc-if>
+          <sc-if value="{{ pvTabs }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;gap:14px;margin-top:8px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.1em">
+              <sc-for list="{{ quicks }}" as="qk" hint-placeholder-count="4">
+                <button onClick="{{ qk.set }}" style="border:0;background:transparent;padding:0;color:rgba(232,228,220,0.5);font-family:inherit;font-size:inherit;letter-spacing:inherit;cursor:pointer;border-bottom:1px dotted rgba(240,232,214,0.3)" style-hover="color:#F1EFE9">{{ qk.label }}</button>
+              </sc-for>
+            </div>
+          </sc-if>
+          <div style="margin-top:18px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums">
+            <div style="font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.45)">{{ outLabel }}</div>
+            <div style="display:flex;align-items:baseline;gap:8px;margin-top:6px"><span style="font-size:22px;letter-spacing:-0.01em">{{ outAmt }}</span><span style="font-size:12px;color:rgba(232,228,220,0.55)">{{ outAsset }}</span><span style="font-size:11px;color:rgba(232,228,220,0.4);margin-left:auto">{{ outUsd }}</span></div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ pvCompact }}" hint-placeholder-val="{{ false }}">
+          <div style="display:grid;grid-template-columns:1fr 24px 1fr;align-items:end;gap:6px;margin-top:16px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums">
+            <div style="min-width:0">
+              <div style="font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.45)">{{ inLabel }}</div>
+              <div style="display:flex;align-items:center;border:1px solid rgba(240,232,214,0.14);margin-top:6px;height:44px;padding-right:8px">
+                <input value="{{ amount }}" onChange="{{ setAmount }}" placeholder="0.00" inputMode="decimal" style="flex:1;min-width:0;height:100%;padding:0 10px;background:transparent;border:0;font-family:inherit;font-variant-numeric:tabular-nums;font-size:15px;outline:none">
+                <button onClick="{{ toggleDenom }}" style="border:0;background:transparent;padding:0;color:rgba(232,228,220,0.7);font-family:inherit;font-size:10.5px;letter-spacing:0.06em;cursor:pointer" style-hover="color:#F1EFE9">{{ denomAsset }} ⇅</button>
+              </div>
+              <div style="font-size:10px;color:rgba(232,228,220,0.4);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Bal {{ payBal }} {{ payAsset }}</div>
+            </div>
+            <div style="height:44px;display:flex;align-items:center;justify-content:center;color:rgba(232,228,220,0.4);margin-bottom:21px">→</div>
+            <div style="min-width:0">
+              <div style="font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.45)">{{ outLabel }}</div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;border:1px solid rgba(240,232,214,0.09);margin-top:6px;height:44px;padding:0 10px;background:rgba(232,228,220,0.03)"><span style="font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ outAmt }}</span><span style="font-size:10.5px;color:rgba(232,228,220,0.55);flex:none">{{ outAsset }}</span></div>
+              <div style="font-size:10px;color:rgba(232,228,220,0.4);margin-top:5px;text-align:right">{{ outUsd }}</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:14px;margin-top:6px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;letter-spacing:0.1em">
+            <sc-for list="{{ quicks }}" as="qk" hint-placeholder-count="4">
+              <button onClick="{{ qk.set }}" style="border:0;background:transparent;padding:0;color:rgba(232,228,220,0.5);font-family:inherit;font-size:inherit;letter-spacing:inherit;cursor:pointer;border-bottom:1px dotted rgba(240,232,214,0.3)" style-hover="color:#F1EFE9">{{ qk.label }}</button>
+            </sc-for>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;margin-top:16px;background:rgba(240,232,214,0.09);border:1px solid rgba(240,232,214,0.09);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums">
+            <sc-for list="{{ breakdown }}" as="b" hint-placeholder-count="6">
+              <div style="background:#050506;padding:8px 9px;min-width:0">
+                <div style="font-size:8.5px;letter-spacing:0.16em;text-transform:uppercase;color:rgba(232,228,220,0.4);white-space:nowrap">{{ b.label }}</div>
+                <div style="font-size:11px;margin-top:3px;color:{{ b.color }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ b.value }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ pvReceipt }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ toggleDetails }}" style="display:flex;justify-content:space-between;align-items:center;width:100%;margin-top:16px;padding:0;border:0;background:transparent;color:rgba(232,228,220,0.55);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;cursor:pointer" style-hover="color:#F1EFE9"><span>Details</span><span style="letter-spacing:0.04em;text-transform:none;font-variant-numeric:tabular-nums">{{ receiptSummary }} {{ detailsGlyph }}</span></button>
+        </sc-if>
+        <sc-if value="{{ showBreakdownList }}" hint-placeholder-val="{{ true }}">
+          <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(240,232,214,0.09);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums;font-size:11.5px">
+            <sc-for list="{{ breakdown }}" as="b" hint-placeholder-count="6">
+              <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:4px 0">
+                <span style="color:rgba(232,228,220,0.5);flex:none">{{ b.label }}</span>
+                <span style="flex:1;border-bottom:1px dotted {{ leader }};transform:translateY(-3px)"></span>
+                <span style="color:{{ b.color }};text-align:right">{{ b.value }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </sc-if>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;color:rgba(232,228,220,0.5)">
+          <span style="letter-spacing:0.18em;text-transform:uppercase;font-size:10px">Slippage</span>
+          <button onClick="{{ toggleSlip }}" aria-label="Slippage settings" style="display:flex;align-items:center;gap:8px;border:0;background:transparent;padding:0;color:{{ slipColor }};font-family:inherit;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer" style-hover="color:#F1EFE9"><span>{{ slipLabel }}</span><svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.2" style="fill:none;stroke:currentColor;stroke-width:1.2;stroke-dasharray:2.6 1.6"></circle><circle cx="7" cy="7" r="1.8" style="fill:currentColor"></circle></svg></button>
+        </div>
+        <sc-if value="{{ slipOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;right:16px;bottom:74px;width:240px;padding:14px;background:#0C0C0F;border:1px solid rgba(240,232,214,0.14);z-index:8;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace">
+            <div style="display:flex;justify-content:space-between;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:rgba(232,228,220,0.5)"><span>Max slippage</span><button onClick="{{ toggleSlip }}" style="border:0;background:transparent;color:rgba(232,228,220,0.5);cursor:pointer;padding:0;font-size:13px;line-height:1">×</button></div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:10px">
+              <sc-for list="{{ slipOpts }}" as="so" hint-placeholder-count="4">
+                <button onClick="{{ so.set }}" style="height:28px;border:1px solid {{ so.border }};background:{{ so.bg }};color:{{ so.color }};font-family:inherit;font-size:10.5px;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.45)">{{ so.label }}</button>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;border:1px solid rgba(240,232,214,0.14);margin-top:6px;height:30px">
+              <input value="{{ slipCustom }}" onChange="{{ setSlipCustom }}" placeholder="Custom" inputMode="decimal" style="flex:1;min-width:0;height:100%;padding:0 10px;background:transparent;border:0;font-family:inherit;font-size:11px;outline:none"><span style="padding-right:10px;font-size:11px;color:rgba(232,228,220,0.45)">%</span>
+            </div>
+            <div style="margin-top:10px;font-size:10.5px;line-height:1.5;color:rgba(232,228,220,0.45)">{{ slipNote }}</div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ btnEnabled }}" hint-placeholder-val="{{ true }}">
+          <button onClick="{{ submit }}" style="width:100%;height:44px;margin-top:14px;border:0;background:#F4EEDA;color:#050506;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer" style-hover="background:#FFFFFF">{{ btnLabel }}</button>
+        </sc-if>
+        <sc-if value="{{ btnDisabled }}" hint-placeholder-val="{{ false }}">
+          <button disabled="{{ true }}" style="width:100%;height:44px;margin-top:14px;border:1px solid rgba(240,232,214,0.12);background:rgba(244,238,218,0.06);color:rgba(232,228,220,0.35);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.22em;text-transform:uppercase;cursor:not-allowed">{{ btnLabel }}</button>
+          <div style="margin-top:8px;text-align:center;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;color:rgba(232,228,220,0.5)">{{ reason }}</div>
+        </sc-if>
+        <sc-if value="{{ btnPending }}" hint-placeholder-val="{{ false }}">
+          <button disabled="{{ true }}" style="width:100%;height:44px;margin-top:14px;border:0;background:rgba(244,238,218,0.55);color:#050506;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:0.22em;text-transform:uppercase;cursor:wait;display:flex;align-items:center;justify-content:center;gap:10px"><span style="width:12px;height:12px;border-radius:50%;border:1.5px solid rgba(5,5,6,0.25);border-top-color:#050506;animation:svSpin .9s linear infinite"></span>Confirm in wallet</button>
+          <div style="margin-top:8px;text-align:center;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;color:rgba(232,228,220,0.5)">Waiting for your signature.</div>
+        </sc-if>
+      </div>
+      </sc-if>
+    </div>
+  </div>
+  </sc-if>
+</section>
+</sc-if>
+
+<sc-if value="{{ hasToasts }}" hint-placeholder-val="{{ false }}">
+<div style="position:absolute;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:20;max-width:calc(100% - 32px)">
+  <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="1">
+    <div style="display:flex;gap:12px;align-items:flex-start;width:{{ toastW }};max-width:100%;padding:12px 14px;background:#0C0C0F;border:1px solid rgba(240,232,214,0.14)">
+      <sc-if value="{{ t.pending }}" hint-placeholder-val="{{ false }}"><span style="flex:none;margin-top:3px;width:12px;height:12px;border-radius:50%;border:1.5px solid rgba(232,228,220,0.25);border-top-color:#F1EFE9;animation:svSpin .9s linear infinite"></span></sc-if>
+      <sc-if value="{{ t.success }}" hint-placeholder-val="{{ false }}"><span style="flex:none;margin-top:3px;width:12px;height:12px;border-radius:50%;background:#F4EEDA"></span></sc-if>
+      <sc-if value="{{ t.failed }}" hint-placeholder-val="{{ false }}"><span style="flex:none;margin-top:3px;width:12px;height:12px;border-radius:50%;border:1.5px solid rgba(232,228,220,0.6)"></span></sc-if>
+      <div style="flex:1;min-width:0">
+        <div style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(232,228,220,0.45)">{{ t.kindLabel }}</div>
+        <div style="font-size:12.5px;margin-top:3px;text-wrap:pretty">{{ t.t }}</div>
+        <a href="#" style="display:inline-block;margin-top:6px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;color:rgba(232,228,220,0.5)" style-hover="color:#F1EFE9">View tx {{ t.hash }} ↗</a>
+      </div>
+      <button onClick="{{ t.dismiss }}" aria-label="Dismiss" style="border:0;background:transparent;color:rgba(232,228,220,0.4);font-size:15px;line-height:1;cursor:pointer;padding:0" style-hover="color:#F1EFE9">×</button>
+    </div>
+  </sc-for>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalConnect }}" hint-placeholder-val="{{ false }}">
+<div onClick="{{ closeModal }}" style="position:absolute;inset:0;background:rgba(5,5,6,0.78);display:flex;align-items:flex-start;justify-content:center;padding:72px 16px 16px;z-index:30">
+  <div onClick="{{ stop }}" role="dialog" style="width:100%;max-width:{{ connectW }}px;background:#0C0C0F;border:1px solid rgba(240,232,214,0.14);display:flex;flex-direction:{{ connectDir }}">
+    <div style="flex:1;padding:22px 22px 20px;border-right:1px solid {{ connectDivider }}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:16px;font-weight:500">Connect a wallet</div>
+        <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}"><button onClick="{{ closeModal }}" aria-label="Close" style="border:0;background:transparent;color:rgba(232,228,220,0.5);font-size:18px;line-height:1;cursor:pointer;padding:0">×</button></sc-if>
+      </div>
+      <div style="margin-top:18px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.22em;text-transform:uppercase;color:rgba(232,228,220,0.4)">Installed</div>
+      <div style="display:flex;flex-direction:column;gap:2px;margin-top:8px">
+        <sc-for list="{{ wallets }}" as="wl" hint-placeholder-count="4">
+          <button onClick="{{ wl.connect }}" style="display:flex;align-items:center;gap:12px;height:44px;padding:0 10px;border:1px solid transparent;background:transparent;color:#F1EFE9;font-size:13px;text-align:left;cursor:pointer" style-hover="background:rgba(232,228,220,0.05);border-color:rgba(240,232,214,0.12)">
+            <span style="width:28px;height:28px;background:{{ wl.bg }};display:flex;align-items:center;justify-content:center;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:11px;color:rgba(232,228,220,0.8);flex:none">{{ wl.initial }}</span>
+            <span style="flex:1">{{ wl.name }}</span>
+            <sc-if value="{{ wl.recent }}" hint-placeholder-val="{{ false }}"><span style="font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:8.5px;letter-spacing:0.16em;text-transform:uppercase;color:#F4EEDA">Recent</span></sc-if>
+          </button>
+        </sc-for>
+      </div>
+    </div>
+    <div style="flex:1;padding:22px 22px 20px;display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:flex-end"><sc-if value="{{ notPhone }}" hint-placeholder-val="{{ true }}"><button onClick="{{ closeModal }}" aria-label="Close" style="border:0;background:transparent;color:rgba(232,228,220,0.5);font-size:18px;line-height:1;cursor:pointer;padding:0" style-hover="color:#F1EFE9">×</button></sc-if></div>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:{{ connectAsidePad }}">
+        <img src="suits-mark.png" alt="" style="width:44px;height:44px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 1px rgba(240,232,214,0.16)">
+        <div style="font-size:15px;font-weight:500;margin-top:16px">Your wallet is your key.</div>
+        <p style="margin:8px 0 0;font-size:12.5px;line-height:1.55;color:rgba(232,228,220,0.55);text-wrap:pretty">It holds your tokens and signs every trade. SuitVentures never holds funds and can't move anything without your approval.</p>
+        <p style="margin:10px 0 0;font-size:12.5px;line-height:1.55;color:rgba(232,228,220,0.55);text-wrap:pretty">Hold a Suit in the connected wallet and the router fee drops to 0%.</p>
+        <div style="display:flex;gap:18px;margin-top:18px;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:9.5px;letter-spacing:0.2em;text-transform:uppercase"><a href="#" style="color:#F4EEDA">Get a wallet ↗</a><a href="#" style="color:rgba(232,228,220,0.5)" style-hover="color:#F1EFE9">Learn more ↗</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<sc-if value="{{ modalSign }}" hint-placeholder-val="{{ false }}">
+<div onClick="{{ closeModal }}" style="position:absolute;inset:0;background:rgba(5,5,6,0.78);display:flex;align-items:flex-start;justify-content:center;padding:72px 16px 16px;z-index:30">
+  <div onClick="{{ stop }}" role="dialog" style="width:100%;max-width:400px;background:#0C0C0F;border:1px solid rgba(240,232,214,0.14);padding:24px 22px 22px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start">
+      <img src="suits-mark.png" alt="" style="width:36px;height:36px;border-radius:50%;object-fit:cover;box-shadow:0 0 0 1px rgba(240,232,214,0.16)">
+      <button onClick="{{ closeModal }}" aria-label="Close" style="border:0;background:transparent;color:rgba(232,228,220,0.5);font-size:18px;line-height:1;cursor:pointer;padding:0" style-hover="color:#F1EFE9">×</button>
+    </div>
+    <div style="font-size:17px;font-weight:500;margin-top:16px">{{ signTitle }}</div>
+    <p style="margin:8px 0 0;font-size:12.5px;line-height:1.55;color:rgba(232,228,220,0.55);text-wrap:pretty">A one-time signature ties your watchlist and votes to this address. No gas, no transaction, nothing moves.</p>
+    <div style="margin-top:16px;padding:10px 12px;border:1px solid rgba(240,232,214,0.09);font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10.5px;line-height:1.6;color:rgba(232,228,220,0.5);word-break:break-all">SuitVentures Markets wants you to sign in with {{ walletLabel }} · Chain 4663 · Nonce {{ nonce }}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:18px">
+      <button onClick="{{ closeModal }}" style="height:40px;border:1px solid rgba(240,232,214,0.18);background:transparent;color:#F1EFE9;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer" style-hover="border-color:rgba(240,232,214,0.5)">Cancel</button>
+      <button onClick="{{ doSign }}" style="height:40px;border:0;background:#F4EEDA;color:#050506;font-family:'SF Mono',SFMono-Regular,ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:0.22em;text-transform:uppercase;cursor:pointer" style-hover="background:#FFFFFF">Sign message</button>
+    </div>
+  </div>
+</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;page&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;markets&quot;,&quot;wardrobe&quot;,&quot;token&quot;],&quot;default&quot;:&quot;markets&quot;,&quot;tsType&quot;:&quot;'markets'|'wardrobe'|'token'&quot;,&quot;section&quot;:&quot;View&quot;},&quot;token&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;AI&quot;,&quot;SUIT&quot;,&quot;SPACEHOOD&quot;,&quot;MOO&quot;,&quot;CASHCAT&quot;,&quot;STONKBROKER&quot;],&quot;default&quot;:&quot;AI&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;View&quot;},&quot;wallet&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;none&quot;,&quot;connected&quot;,&quot;holder&quot;],&quot;default&quot;:&quot;none&quot;,&quot;tsType&quot;:&quot;'none'|'connected'|'holder'&quot;,&quot;section&quot;:&quot;Wallet&quot;},&quot;txOutcome&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;success&quot;,&quot;failed&quot;],&quot;default&quot;:&quot;success&quot;,&quot;tsType&quot;:&quot;'success'|'failed'&quot;,&quot;section&quot;:&quot;Wallet&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;compact&quot;,&quot;regular&quot;,&quot;airy&quot;],&quot;default&quot;:&quot;regular&quot;,&quot;tsType&quot;:&quot;'compact'|'regular'|'airy'&quot;,&quot;section&quot;:&quot;Variants&quot;},&quot;rows&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;hairline&quot;,&quot;zebra&quot;,&quot;borderless&quot;],&quot;default&quot;:&quot;hairline&quot;,&quot;tsType&quot;:&quot;'hairline'|'zebra'|'borderless'&quot;,&quot;section&quot;:&quot;Variants&quot;},&quot;header&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;ledger&quot;,&quot;masthead&quot;,&quot;tape&quot;],&quot;default&quot;:&quot;ledger&quot;,&quot;tsType&quot;:&quot;'ledger'|'masthead'|'tape'&quot;,&quot;section&quot;:&quot;Variants&quot;},&quot;panel&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;ticket&quot;,&quot;receipt&quot;,&quot;compact&quot;],&quot;default&quot;:&quot;ticket&quot;,&quot;tsType&quot;:&quot;'ticket'|'receipt'|'compact'&quot;,&quot;section&quot;:&quot;Variants&quot;},&quot;loading&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;States&quot;},&quot;view&quot;:{&quot;editor&quot;:null,&quot;default&quot;:&quot;app&quot;,&quot;tsType&quot;:&quot;'app'|'panel'|'header'|'table'|'toasts'&quot;},&quot;width&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;number&quot;},&quot;tradeState&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;'disconnected'|'insufficient'|'ready'|'pending'|'untradeable'&quot;},&quot;quotes&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;},&quot;pad&quot;:{&quot;editor&quot;:null,&quot;default&quot;:&quot;all&quot;,&quot;tsType&quot;:&quot;'all'|'LONG'|'Pons'|'Bags'|'SV'&quot;},&quot;picker&quot;:{&quot;editor&quot;:null,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;},&quot;tab&quot;:{&quot;editor&quot;:null,&quot;default&quot;:&quot;trades&quot;,&quot;tsType&quot;:&quot;'trades'|'holders'|'info'&quot;},&quot;preset&quot;:{&quot;editor&quot;:null,&quot;default&quot;:&quot;all&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;modal&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;'connect'|'sign'|'slippage'&quot;},&quot;toasts&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;'demo'&quot;},&quot;maxRows&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;number&quot;},&quot;expandRow&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;},&quot;stars&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;},&quot;amount&quot;:{&quot;editor&quot;:null,&quot;default&quot;:null,&quot;tsType&quot;:&quot;string&quot;},&quot;side&quot;:{&quot;editor&quot;:null,&quot;default&quot;:&quot;buy&quot;,&quot;tsType&quot;:&quot;'buy'|'sell'&quot;},&quot;connectAs&quot;:{&quot;editor&quot;:null,&quot;default&quot;:&quot;holder&quot;,&quot;tsType&quot;:&quot;'connected'|'holder'&quot;}}">
+const INK='#F1EFE9', CREAM='#F4EEDA', UP='#5DBE8A', DOWN='#D46A63', MUTED='rgba(232,228,220,0.5)', HAIR='rgba(240,232,214,0.14)', DIM='rgba(232,228,220,0.45)';
+const QUSD={NVDA:224.4,TSLA:380.2,AAPL:245.1,SPY:655.3,HIMS:48.6,SPCX:210.0,PLTR:178.4,ETH:4480,USDG:1};
+const TOKENS=[
+ {t:'AI',n:'Artificial Inu',q:'NVDA',pad:'LONG',p:0.1943,h1:-2.69,h24:-17.69,vol:4180389,fdv:192265217,liq:5141337,holders:18423,age:1400,bull:1240,bear:388,addr:'0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18'},
+ {t:'SUIT',n:'The Suits',q:'NVDA',pad:'LONG',p:0.00412,h1:1.12,h24:6.84,vol:212640,fdv:4108700,liq:318200,holders:2210,age:960,bull:402,bear:19,addr:'0x87A78590D563F0EFC62192239af46707FFF74386'},
+ {t:'SPACEHOOD',n:'Spacehood',q:'SPCX',pad:'LONG',p:0.0328,h1:4.21,h24:31.6,vol:1462300,fdv:32800000,liq:1204000,holders:6120,age:410,bull:880,bear:140},
+ {t:'BONER',n:'Boner Coin',q:'HIMS',pad:'LONG',p:0.00891,h1:-0.84,h24:12.4,vol:684200,fdv:8910000,liq:402100,holders:3480,age:720,bull:512,bear:97},
+ {t:'MOO',n:'Moo',q:'TSLA',pad:'LONG',p:0.0512,h1:0.32,h24:-4.18,vol:918400,fdv:51200000,liq:2210000,holders:7940,age:1900,bull:640,bear:210},
+ {t:'CASHCAT',n:'Cash Cat',q:'ETH',pad:'Pons',p:0.00174,h1:-1.4,h24:-9.6,vol:402300,fdv:1740000,liq:186400,holders:1980,age:300,bull:220,bear:88},
+ {t:'TENDIES',n:'Tendies',q:'ETH',pad:'Pons',p:0.000612,h1:2.9,h24:44.2,vol:388900,fdv:612000,liq:98200,holders:1120,age:38,bull:310,bear:42},
+ {t:'STONKBROKER',n:'Stonkbroker',q:'USDG',pad:'Bags',p:0.0000482,h1:0,h24:-2.1,vol:12400,fdv:48200,liq:9100,holders:214,age:14,bull:12,bear:9,untradeable:true},
+ {t:'PRINTER',n:'Money Printer',q:'NVDA',pad:'Pons',p:0.00263,h1:-3.1,h24:8.2,vol:264100,fdv:2630000,liq:141000,holders:1640,age:520,bull:198,bear:76,ph:true},
+ {t:'GAINZ',n:'Gainz',q:'SPY',pad:'Pons',p:0.0117,h1:-0.6,h24:-12.8,vol:146800,fdv:11700000,liq:612000,holders:2890,age:2100,bull:150,bear:171,ph:true},
+ {t:'DIAMONDHANDS',n:'Diamond Hands',q:'TSLA',pad:'Pons',p:0.000934,h1:1.8,h24:3.3,vol:98400,fdv:934000,liq:72400,holders:860,age:190,bull:96,bear:31,ph:true},
+ {t:'WIFEMONEY',n:'Wife Changing Money',q:'AAPL',pad:'LONG',p:0.00448,h1:6.4,h24:58.9,vol:1120400,fdv:4480000,liq:284000,holders:2410,age:9,bull:720,bear:64,ph:true},
+ {t:'YOLO',n:'Yolo',q:'USDG',pad:'Pons',p:0.0000917,h1:-8.2,h24:-31.4,vol:88200,fdv:91700,liq:22600,holders:640,age:66,bull:44,bear:120,ph:true},
+ {t:'BAGHOLDER',n:'Bagholder',q:'ETH',pad:'Pons',p:0.000338,h1:0.1,h24:0.9,vol:41200,fdv:338000,liq:61000,holders:1210,age:3300,bull:60,bear:58,ph:true},
+ {t:'CHALK',n:"Tailor's Chalk",q:'NVDA',pad:'SV',p:0.00092,h1:2.2,h24:14.6,vol:176300,fdv:920000,liq:118000,holders:530,age:2,bull:140,bear:11,ph:true},
+ {t:'PLTRCHAD',n:'Palantir Chad',q:'PLTR',pad:'LONG',p:0.0219,h1:-0.3,h24:2.4,vol:312900,fdv:21900000,liq:1480000,holders:4100,age:1250,bull:380,bear:150,ph:true},
+];
+const CIRC={SUIT:0.62,CHALK:0.55,WIFEMONEY:0.9};
+TOKENS.forEach(t=>{t.mcap=Math.round(t.fdv*(CIRC[t.t]||1))});
+const USER='0x3f8A7c21e9B4d0a6F15c8E2b7D9a4C0e1F6b9A2c';
+const QUOTES=[['NVDA','NVIDIA',341],['ETH','Ether',2770],['USDG','Global Dollar',1247],['SPY','S&P 500 ETF',231],['GME','GameStop',184],['DJT','Trump Media',157],['RDDT','Reddit',116],['QQQ','Nasdaq 100 ETF',103],['AAPL','Apple',80],['TSLA','Tesla',75],['PLTR','Palantir',42],['HIMS','Hims & Hers',38],['SPCX','SpaceX',29],['AMD','Advanced Micro Devices',27],['MSFT','Microsoft',24],['HOOD','Robinhood',22],['COIN','Coinbase',19],['MSTR','Strategy',17],['AMZN','Amazon',15],['GOOGL','Alphabet',14],['META','Meta Platforms',12],['CRCL','Circle',11],['AI','Artificial Inu',9],['cbBTC','Coinbase Wrapped BTC',7]];
+const QVOL={}; QUOTES.forEach(([s,n,pairs])=>{const v=TOKENS.filter(t=>t.q===s).reduce((a,t)=>a+t.vol,0); QVOL[s]=v||pairs*(400+hash(s)%1500)});
+const QSORTED=QUOTES.slice().sort((a,b)=>QVOL[b[0]]-QVOL[a[0]]);
+const SORT_FIELD={rank:'vol',ticker:'t',p:'p',h1:'h1',h24:'h24',vol:'vol',mcap:'mcap',fdv:'fdv',liq:'liq',holders:'holders',age:'age'};
+const PRESETS=[{k:'all',l:'All',sort:'vol',dir:'desc'},{k:'volume',l:'Top volume',sort:'vol',dir:'desc'},{k:'gainers',l:'Gainers',sort:'h24',dir:'desc'},{k:'new',l:'New',sort:'age',dir:'asc'},{k:'holders',l:'Most holders',sort:'holders',dir:'desc'}];
+const TOP_TABS=[{k:'volume',l:'Top volume',lead:'The most traded pairs on Robinhood Chain in the last 24 hours.'},{k:'gainers',l:'Gainers',lead:'Largest 24-hour gains among pairs with liquidity above $10K.'},{k:'new',l:'New',lead:'Pools opened in the last seven days, newest first.'},{k:'holders',l:'Most holders',lead:'Ranked by unique wallets holding the token.'},{k:'traders',l:'Best dressed',lead:'The wallets moving the most volume today. Suit holders trade fee-free.'}];
+const DEMO_TOASTS=[{id:1,kind:'pending',t:'Buying 115,500 AI for 100 NVDA',hash:'0x8f3a…c21e'},{id:2,kind:'success',t:'Bought 115,500 AI for 100 NVDA',hash:'0x71bd…04aa'},{id:3,kind:'failed',t:'Swap failed. Price moved past 0.5% slippage; nothing was spent.',hash:'0x2c90…e7f1'}];
+function rng(seed){let a=seed>>>0;return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return h>>>0}
+function normal(r){const u=1-r(),v=r();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+function hexAddr(r){let s='0x';for(let i=0;i<40;i++)s+='0123456789abcdef'[Math.floor(r()*16)];return s}
+function short(a){return a?a.slice(0,6)+'…'+a.slice(-4):''}
+function fmtUsd(v){return v>=1e9?'$'+(v/1e9).toFixed(2)+'B':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1e3?'$'+(v/1e3).toFixed(1)+'K':'$'+v.toFixed(v<10?2:0)}
+function fmtPrice(p){return p>=1000?'$'+p.toLocaleString('en-US',{maximumFractionDigits:2}):p>=1?'$'+p.toFixed(2):p>=0.01?'$'+p.toFixed(4):p>=0.0001?'$'+p.toFixed(6):'$'+p.toFixed(8)}
+function fmtPct(v){return(v>0?'+':v<0?'−':'')+Math.abs(v).toFixed(2)+'%'}
+function pctColor(v){return v>0?UP:v<0?DOWN:MUTED}
+function fmtInt(v){return Math.round(v).toLocaleString('en-US')}
+function fmtAge(h){return h<1?Math.round(h*60)+'m':h<24?Math.round(h)+'h':h<720?Math.round(h/24)+'d':Math.round(h/720)+'mo'}
+function fmtAmt(v,dp){if(!isFinite(v))return'0';const d=dp!=null?dp:v>=1000?0:v>=1?2:v>=0.01?4:6;return v.toLocaleString('en-US',{maximumFractionDigits:d})}
+function fmtQ(v){return v>=1?v.toFixed(4):v>=0.0001?v.toFixed(6):v>=0.000001?v.toFixed(8):v.toFixed(10)}
+function logoShade(t){const s=[ '#1C1C21','#232329','#2A2A31','#1A1A1F','#2E2E36','#212127'];return s[hash(t)%s.length]}
+const SIG={'1m':0.004,'5m':0.008,'15m':0.012,'1h':0.02,'1d':0.06};
+const WALLETS=[{name:'MetaMask',recent:true},{name:'Rabby'},{name:'Coinbase Wallet'},{name:'WalletConnect'}];
+
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    const p=props||{}, ts=p.tradeState;
+    this.state={
+      w:Number(p.width)||0, page:p.page||'markets', token:ts==='untradeable'?'STONKBROKER':(p.token||'AI'),
+      topTab:p.topTab||'volume', pad:p.pad||'all', pickerSort:'vol', pickerDir:'desc', quotes:p.quotes?String(p.quotes).split(','):(p.chip&&p.chip!=='ALL'?[p.chip]:[]), picker:!!p.picker, pickerQ:'', preset:p.preset||'all', sortKey:p.sortKey||'vol', sortDir:p.preset==='new'?'asc':'desc', query:'',
+      wallet:ts==='disconnected'?'none':(p.wallet||'none'), signed:false,
+      stars:p.stars==='none'?[]:(p.stars?String(p.stars).split(','):['SUIT','AI']), votes:{}, expanded:p.expandRow||null,
+      side:p.side||'buy', denom:'quote', amount:ts==='insufficient'?'5000':(ts==='ready'||ts==='pending')?'100':(p.amount!=null?String(p.amount):''),
+      slip:0.5, slipAuto:true, slipOpen:p.modal==='slippage', slipCustom:'', detailsOpen:false, tx:ts==='pending'?'pending':null,
+      modal:(p.modal&&p.modal!=='slippage')?p.modal:null, pending:null, pendingKind:'',
+      toasts:p.toasts==='demo'?DEMO_TOASTS.slice():[], interval:'15m', hover:-1, hoverY:0, tab:p.tab||'trades', tip:false, searchOpen:false, copied:false,
+    };
+    this.rootRef=React.createRef(); this._id=10; this._cache={}; this._step=1;
+    const sk=PRESETS.find(x=>x.k===this.state.preset); if(sk&&!p.sortKey){this.state.sortKey=sk.sort;this.state.sortDir=sk.dir}
+  }
+  componentDidMount(){
+    const el=this.rootRef.current; if(!el) return;
+    const measure=()=>{const w=el.clientWidth; if(w&&w!==this.state.w) this.setState({w})};
+    measure();
+    if(window.ResizeObserver){this._ro=new ResizeObserver(measure);this._ro.observe(el)}
+  }
+  componentWillUnmount(){if(this._ro)this._ro.disconnect();clearTimeout(this._t1);clearTimeout(this._t2);clearTimeout(this._t3)}
+  go(page,extra){this.setState(Object.assign({page,expanded:null,slipOpen:false,searchOpen:false,picker:false},extra||{}))}
+  openToken(t){this.setState({page:'token',token:t,expanded:null,amount:'',denom:'quote',tx:null,hover:-1,tab:'trades',slipOpen:false,picker:false})}
+  setPickSort(k){this.setState(s=>({pickerSort:k,pickerDir:s.pickerSort===k?(s.pickerDir==='desc'?'asc':'desc'):(k==='sym'?'asc':'desc')}))}
+  toggleQuote(s){this.setState(st=>({quotes:st.quotes.includes(s)?st.quotes.filter(x=>x!==s):st.quotes.concat(s),expanded:null}))}
+  gate(action,kind){const{wallet,signed}=this.state; if(wallet==='none'){this.setState({modal:'connect',pending:action,pendingKind:kind});return} if(!signed){this.setState({modal:'sign',pending:action,pendingKind:kind});return} action()}
+  toggleStar(t){this.gate(()=>this.setState(s=>({stars:s.stars.includes(t)?s.stars.filter(x=>x!==t):s.stars.concat(t)})),'star')}
+  vote(t,dir){this.gate(()=>this.setState(s=>({votes:Object.assign({},s.votes,{[t]:s.votes[t]===dir?null:dir})})),'vote')}
+  candles(tok,interval){
+    const key=tok.t+'|'+interval; if(this._cache[key]) return this._cache[key];
+    const r=rng(hash(key)), n=72, sig=SIG[interval]||0.012, out=new Array(n);
+    let c=tok.p; const closes=[]; for(let i=n-1;i>=0;i--){closes[i]=c; c=c/(1+normal(r)*sig)}
+    const base=tok.vol/({'1m':1440,'5m':288,'15m':96,'1h':24,'1d':1}[interval]||96);
+    for(let i=0;i<n;i++){const o=i?closes[i-1]:closes[0]*(1+normal(r)*sig), cl=closes[i]; const h=Math.max(o,cl)*(1+Math.abs(normal(r))*sig*0.6), l=Math.min(o,cl)*(1-Math.abs(normal(r))*sig*0.6); out[i]={o,h,l,c:cl,v:base*(0.35+r()*1.3)}}
+    this._cache[key]=out; return out;
+  }
+  gen(tok){
+    const key='g|'+tok.t; if(this._cache[key]) return this._cache[key];
+    const r=rng(hash(key)); const now=new Date(2026,8,11,13,42,7);
+    const trades=[]; let t=now.getTime(); for(let i=0;i<14;i++){t-=Math.floor(r()*90000)+4000; const d=new Date(t); const buy=r()>0.42; const usd=(r()<0.8?r()*900+20:r()*12000+900); trades.push({time:d.toTimeString().slice(0,8),side:buy?'Buy':'Sell',sideColor:buy?UP:DOWN,amount:fmtAmt(usd/tok.p,0)+' '+tok.t,price:fmtPrice(tok.p*(1+normal(r)*0.006)),wallet:short(hexAddr(r))})}
+    const shares=[]; let rem=100; const holders=[]; for(let i=0;i<10;i++){const s=i===0?(r()*6+4):Math.max(0.3,(rem*0.08)*(0.5+r())); rem-=s; holders.push({rank:i+1,wallet:short(hexAddr(r)),balance:fmtAmt(1e9*s/100,0),share:s.toFixed(2)+'%',tag:i===0?'Pool':(r()>0.75?'Suit':'')})}
+    const pool=hexAddr(r)+hexAddr(r).slice(2,26);
+    const created=new Date(now.getTime()-tok.age*3600000);
+    const info=[{label:'Pool',value:short(pool)},{label:'Hook',value:tok.pad==='LONG'?'Doppler shared v4 hook':tok.pad==='Pons'?'Pons MemeHook · afterSwap':tok.pad==='SV'?'None':'Unknown'},{label:'Fee tier',value:tok.pad==='Pons'?'1.00% hook fee':tok.pad==='LONG'?'Dynamic · 0.30% now':'0.30%'},{label:'Created',value:created.toISOString().slice(0,10)+' · '+fmtAge(tok.age)+' ago'},{label:'Liquidity',value:fmtUsd(tok.liq)+' · '+fmtAmt(tok.liq/2/QUSD[tok.q],2)+' '+tok.q},{label:'Quote',value:tok.q+' · '+fmtUsd(QUSD[tok.q])}];
+    const res={trades,holders,info}; this._cache[key]=res; return res;
+  }
+  traders(){
+    if(this._cache.traders) return this._cache.traders; const r=rng(hash('traders')); const tops=['AI','SPACEHOOD','MOO','AI','WIFEMONEY','BONER','SUIT','TENDIES','AI','PLTRCHAD'];
+    const out=[]; let v=1840000; for(let i=0;i<10;i++){v=v*(0.62+r()*0.3); out.push({rank:i+1,wallet:short(hexAddr(r)),vol:fmtUsd(v),trades:fmtInt(40+r()*600),top:tops[i],suit:r()>0.5})}
+    this._cache.traders=out; return out;
+  }
+  submit(ctx){
+    const id=++this._id, fail=this.props.txOutcome==='failed', verb=ctx.buy?'Buying':'Selling', done=ctx.buy?'Bought':'Sold';
+    const line=`${ctx.recvStr} ${ctx.recvAsset} for ${ctx.payStr} ${ctx.payAsset}`;
+    const r=rng(Date.now()); const hash1=short(hexAddr(r));
+    this.setState(s=>({tx:'pending',slipOpen:false,toasts:s.toasts.concat({id,kind:'pending',t:`${verb} ${line}`,hash:hash1})}));
+    this._t1=setTimeout(()=>{this.setState(s=>({tx:null,amount:fail?s.amount:'',toasts:s.toasts.map(x=>x.id===id?Object.assign({},x,{kind:fail?'failed':'success',t:fail?`Swap failed. Price moved past ${s.slip}% slippage; nothing was spent.`:`${done} ${line}`}):x)}));
+      this._t2=setTimeout(()=>this.setState(s=>({toasts:s.toasts.filter(x=>x.id!==id)})),7000)},1900);
+  }
+  renderVals(){
+    const S=this.state, P=this.props||{};
+    const w=S.w||Number(P.width)||1280, view=P.view||'app';
+    const isPhone=w<680, isDesktop=w>=1180, isTablet=!isPhone&&!isDesktop, notPhone=!isPhone;
+    const density=P.density||'regular', rowsV=P.rows||'hairline', hdr=P.header||'ledger', pv=P.panel||'ticket';
+    const pad=isPhone?16:isTablet?20:24;
+    const rowH=density==='compact'?34:density==='airy'?58:44, showName=density!=='compact', logoSize=density==='compact'?18:density==='airy'?28:22;
+    const rowBorder=rowsV==='borderless'?'transparent':'rgba(240,232,214,0.07)';
+    const connected=S.wallet!=='none', isHolder=S.wallet==='holder';
+    const tok=TOKENS.find(t=>t.t===S.token)||TOKENS[0];
+    const page=view==='panel'||view==='header'?'token':view==='table'?'markets':view==='toasts'?'none':S.page;
+    const isToken=page==='token', isTop=page==='top', isWardrobe=page==='wardrobe', isMarkets=page==='markets';
+    const showChrome=view==='app';
+    const stop=e=>{e.stopPropagation()};
+    const nav=[['Markets','markets'],['Watchlist','wardrobe']].map(([label,k])=>({label,color:page===k?INK:MUTED,go:e=>{e.preventDefault();this.go(k)}}));
+    // chips: top quotes by volume, plus anything selected; the rest live in the picker
+    const sel=S.quotes, topN=isPhone?4:isTablet?6:8;
+    const visible=QSORTED.slice(0,topN).map(x=>x[0]); sel.forEach(s=>{if(!visible.includes(s))visible.push(s)});
+    const chipOf=(k,on,select)=>({label:k,select,bg:on?INK:'transparent',color:on?'#050506':'rgba(232,228,220,0.6)',border:on?INK:HAIR});
+    const chips=[chipOf('ALL',sel.length===0,()=>this.setState({quotes:[],expanded:null}))].concat(visible.map(k=>chipOf(k,sel.includes(k),()=>this.toggleQuote(k))));
+    const pq=S.pickerQ.trim().toLowerCase();
+    const pk=S.pickerSort, pdir=S.pickerDir==='asc'?1:-1;
+    const pickerRows=QSORTED.filter(([s,n])=>!pq||s.toLowerCase().includes(pq)||n.toLowerCase().includes(pq)).sort((a,b)=>pk==='sym'?pdir*a[0].localeCompare(b[0]):pk==='pairs'?pdir*(a[2]-b[2]):pdir*(QVOL[a[0]]-QVOL[b[0]])).map(([s,n,pairs])=>{const on=sel.includes(s);return{sym:s,name:n,pairs:fmtInt(pairs),vol:fmtUsd(QVOL[s]),check:on?'✓':'',boxBorder:on?CREAM:'rgba(240,232,214,0.3)',boxBg:on?CREAM:'transparent',toggle:()=>this.toggleQuote(s)}});
+    // list
+    const q=S.query.trim().toLowerCase();
+    let list=TOKENS.filter(t=>(sel.length===0||sel.includes(t.q))&&(!q||t.t.toLowerCase().includes(q)||t.n.toLowerCase().includes(q)||(t.addr||'').toLowerCase().includes(q)));
+    if(isWardrobe) list=list.filter(t=>S.stars.includes(t.t));
+    if(S.pad!=='all') list=list.filter(t=>t.pad===S.pad);
+    const pads=[['all','All'],['LONG','LONG'],['Pons','PONS'],['Bags','BAGS'],['SV','SV']].map(([k,l],i,arr)=>{const on=S.pad===k;return{label:l,select:()=>this.setState({pad:k,expanded:null}),bg:on?'rgba(244,238,218,0.1)':'transparent',color:on?CREAM:'rgba(232,228,220,0.6)',sep:i===arr.length-1?'transparent':'rgba(240,232,214,0.12)'}});
+    const presetKey=S.preset;
+    if(presetKey==='gainers') list=list.filter(t=>t.h24>0&&t.liq>10000); if(presetKey==='new') list=list.filter(t=>t.age<=168);
+    const f=SORT_FIELD[S.sortKey]||'vol', dir=S.sortDir;
+    list.sort((a,b)=>{if(typeof a[f]==='string'){const c=a[f].localeCompare(b[f]);return c!==0?(dir==='asc'?c:-c):b.vol-a.vol}return dir==='asc'?a[f]-b[f]:b[f]-a[f]});
+    const total=list.length; if(P.maxRows) list=list.slice(0,Number(P.maxRows));
+    const rows=list.map((t,i)=>{const starred=S.stars.includes(t.t);return{key:t.t,rank:i+1,ticker:t.t,pad:t.pad.toUpperCase(),pair:'/ '+t.q,sub:isPhone?t.n+' · '+t.q+' · '+t.pad.toUpperCase():t.n,price:fmtPrice(t.p),h1:fmtPct(t.h1),h1c:pctColor(t.h1),h24:fmtPct(t.h24),h24c:pctColor(t.h24),vol:fmtUsd(t.vol),mcap:fmtUsd(t.mcap),fdv:fmtUsd(t.fdv),liq:fmtUsd(t.liq),holders:fmtInt(t.holders),age:fmtAge(t.age),bull:fmtInt(t.bull),bear:fmtInt(t.bear),star:starred?'★':'☆',starColor:starred?CREAM:'rgba(232,228,220,0.35)',initial:t.t[0],logoBg:logoShade(t.t),bg:rowsV==='zebra'&&i%2===1?'rgba(232,228,220,0.025)':'transparent',expanded:isPhone&&S.expanded===t.t,
+      open:()=>{if(isPhone)this.setState(s=>({expanded:s.expanded===t.t?null:t.t}));else this.openToken(t.t)},openToken:e=>{e.stopPropagation();this.openToken(t.t)},toggleStar:e=>{e.stopPropagation();this.toggleStar(t.t)}}});
+    const sortBy={}, ind={}; Object.keys(SORT_FIELD).forEach(k=>{sortBy[k]=()=>this.setState(s=>({sortKey:k,sortDir:s.sortKey===k?(s.sortDir==='desc'?'asc':'desc'):(k==='age'||k==='ticker'?'asc':'desc')})); ind[k]=S.sortKey===k?(dir==='desc'?'▼':'▲'):''});
+    const presets=PRESETS.map((p,i)=>{const on=S.preset===p.k;return{label:p.l,select:()=>this.setState({preset:p.k,sortKey:p.sort,sortDir:p.dir,expanded:null}),bg:on?'rgba(244,238,218,0.1)':'transparent',color:on?CREAM:'rgba(232,228,220,0.6)',sep:i===PRESETS.length-1?'transparent':'rgba(240,232,214,0.12)'}});
+    const topTabs=TOP_TABS.map(t=>{const on=S.topTab===t.k;const pr=PRESETS.find(x=>x.k===t.k);return{label:t.l,select:()=>this.setState({topTab:t.k,sortKey:pr?pr.sort:'vol',sortDir:pr?pr.dir:'desc',expanded:null}),color:on?INK:MUTED,line:on?INK:'transparent'}});
+    const leadIn=(TOP_TABS.find(t=>t.k===S.topTab)||TOP_TABS[0]).lead;
+    const showTraders=isTop&&S.topTab==='traders';
+    const wardrobeLocked=isWardrobe&&!connected;
+    const showTable=(isMarkets||isWardrobe&&connected);
+    const loading=!!P.loading&&showTable;
+    const hasRows=showTable&&!loading&&rows.length>0;
+    const showEmpty=showTable&&!loading&&rows.length===0;
+    const chipName=sel.length?sel.join(' / ')+' ':'';
+    const presetName=(PRESETS.find(p=>p.k===presetKey)||{}).l||'';
+    const padName=S.pad==='all'?'':' on '+S.pad;
+    const emptyTitle=isWardrobe?'Nothing on your watchlist yet.':'No pairs match.';
+    const emptySub=isWardrobe?'Star a token in Markets to track it here.':q?`No pair matches “${S.query}”.`:`No ${chipName}pairs${padName} match ${presetName}.`;
+    const countLabel=loading?'Loading':`${total} pair${total===1?'':'s'}`+(sel.length?' · '+(sel.length>3?sel.length+' quotes':sel.join(', ')):'');
+    const volHead=isPhone?'Vol':'Vol 24h';
+    const cols=isPhone?'minmax(0,1fr) 76px 54px 60px':isTablet?'22px minmax(104px,1fr) 22px 56px 78px 54px 54px 80px 76px 74px 88px':'28px minmax(120px,1fr) 22px 64px 92px 62px 62px 90px 90px 90px 90px 68px 44px 96px';
+    const trCols=isPhone?'28px minmax(0,1fr) 84px 60px 80px':'32px minmax(0,1fr) 120px 90px 140px';
+    const skeletons=[0,1,2,3,4,5,6,7].map(i=>({a:90+(i*37)%70,b:60+(i*23)%40,c:50+(i*31)%50,d:70+(i*17)%40}));
+    // token
+    const qUsd=QUSD[tok.q]||1, pn=tok.p/qUsd, buy=S.side==='buy';
+    const bal={q:connected?1250:0,t:connected?125000:0};
+    const payAsset=buy?tok.q:tok.t, recvAsset=buy?tok.t:tok.q, payBalN=buy?bal.q:bal.t;
+    const amt=parseFloat(S.amount)||0;
+    let payAmt,recvAmt; if(buy){if(S.denom==='quote'){payAmt=amt;recvAmt=amt/pn}else{recvAmt=amt;payAmt=amt*pn}}else{if(S.denom==='token'){payAmt=amt;recvAmt=amt*pn}else{recvAmt=amt;payAmt=amt/pn}}
+    const denomAsset=S.denom==='quote'?tok.q:tok.t, denomIsPay=denomAsset===payAsset;
+    const outAsset=denomIsPay?recvAsset:payAsset, outN=denomIsPay?recvAmt:payAmt;
+    const payUsd=payAmt*(buy?qUsd:tok.p);
+    const impact=tok.liq?payUsd/(tok.liq/2)*100:0;
+    const poolPct=tok.pad==='Pons'?1.0:0.3;
+    const minRecv=recvAmt*(1-S.slip/100-poolPct/100);
+    const untradeable=!!tok.untradeable, tradeable=!untradeable;
+    let btn='ok',reason=''; if(!connected){btn='off';reason='Connect a wallet to trade.'}else if(!amt){btn='off';reason='Enter an amount.'}else if(payAmt>payBalN){btn='off';reason=`Insufficient ${payAsset} balance.`} if(S.tx==='pending')btn='pending';
+    const recvStr=fmtAmt(recvAmt,recvAmt>=1000?0:undefined), payStr=fmtAmt(payAmt,payAmt>=1000?0:undefined);
+    const ctx={buy,recvStr,payStr,recvAsset,payAsset};
+    const breakdown=[{label:'Rate',value:`1 ${tok.t} = ${fmtQ(pn)} ${tok.q}`,color:INK},{label:'Price impact',value:amt?(impact<0.01?'< 0.01%':impact.toFixed(2)+'%'):'—',color:impact>3?DOWN:INK},{label:'Router fee',value:isHolder?'0% · Suit holder':'0.5%',color:isHolder?CREAM:INK},{label:'Pool fee',value:poolPct.toFixed(2)+'%'+(tok.pad==='Pons'?' · MemeHook':tok.pad==='LONG'?' · Doppler':''),color:INK},{label:'Min. received',value:amt?fmtAmt(minRecv,minRecv>=1000?0:undefined)+' '+recvAsset:'—',color:INK},{label:'Network',value:'Robinhood Chain · < $0.01',color:INK}];
+    const quicks=[25,50,75,100].map(pc=>({label:pc===100?'Max':pc+'%',set:()=>this.setState({amount:payBalN?String(+(payBalN*pc/100).toFixed(buy?2:0)):'',denom:buy?'quote':'token'})}));
+    const slipOpts=[{l:'Auto',v:0.5,auto:true},{l:'0.1%',v:0.1},{l:'0.5%',v:0.5},{l:'1%',v:1}].map(o=>{const on=o.auto?S.slipAuto:(!S.slipAuto&&S.slip===o.v&&!S.slipCustom);return{label:o.l,set:()=>this.setState({slip:o.v,slipAuto:!!o.auto,slipCustom:''}),bg:on?'rgba(244,238,218,0.1)':'transparent',color:on?CREAM:'rgba(232,228,220,0.65)',border:on?'rgba(244,238,218,0.5)':HAIR}});
+    const twoCol=w>=960&&view==='app';
+    const chartW=Math.max(280,twoCol?w-2*pad-360-32:w-2*pad);
+    const axW=64, plotW=chartW-axW, n=72, step=plotW/n, cw=Math.max(2,Math.floor(step*0.66)); this._step=step;
+    const cd=this.candles(tok,S.interval);
+    let lo=Infinity,hi=-Infinity,vmax=0; cd.forEach(x=>{if(x.l<lo)lo=x.l;if(x.h>hi)hi=x.h;if(x.v>vmax)vmax=x.v});
+    const range=(hi-lo)||1, top=70, ph=200, y=v=>top+(hi-v)/range*ph, vBase=306, vh=60, chartH=332;
+    const candles=cd.map((x,i)=>{const up=x.c>=x.o,col=up?UP:DOWN,cx=i*step+step/2,by=y(Math.max(x.o,x.c)),bh=Math.max(1,Math.abs(y(x.o)-y(x.c))),vhh=x.v/vmax*vh;return{cx:+cx.toFixed(1),x:+(cx-cw/2).toFixed(1),w:cw,hy:+y(x.h).toFixed(1),ly:+y(x.l).toFixed(1),by:+by.toFixed(1),bh:+bh.toFixed(1),vy:+(vBase-vhh).toFixed(1),vh:+vhh.toFixed(1),fill:col,vfill:up?'rgba(93,190,138,0.26)':'rgba(212,106,99,0.26)'}});
+    const grid=[0,1,2,3,4,5].map(i=>{const v=hi-range*i/5,yy=y(v);return{y:+yy.toFixed(1),top:+(yy-8.5).toFixed(1),label:fmtPrice(v).replace('$','')}});
+    const stepMin={'1m':1,'5m':5,'15m':15,'1h':60,'1d':1440}[S.interval]||15, endT=new Date(2026,8,12,13,45).getTime();
+    const tLabel=i=>{const d=new Date(endT-(n-1-i)*stepMin*60000);return stepMin>=1440?d.toLocaleDateString('en-US',{month:'short',day:'numeric'}):(d.getHours()<10?'0':'')+d.getHours()+':'+(d.getMinutes()<10?'0':'')+d.getMinutes()};
+    const times=[]; for(let i=6;i<n-4;i+=12) times.push({x:+(i*step+step/2).toFixed(1),label:tLabel(i)});
+    const hovering=S.hover>=0&&S.hover<n, hc=cd[hovering?S.hover:n-1], legColor=hc.c>=hc.o?UP:DOWN, chg=hc.c-hc.o;
+    const last=cd[n-1], lastY=+y(last.c).toFixed(1), lastFill=last.c>=last.o?UP:DOWN;
+    const hy=Math.max(top,Math.min(top+ph,S.hoverY));
+    const hyLabel=fmtPrice(hi-(hy-top)/ph*range).replace('$','');
+    const intervals=['1m','5m','15m','1h','1d'].map(k=>({label:k,select:()=>this.setState({interval:k,hover:-1}),bg:S.interval===k?'rgba(244,238,218,0.1)':'transparent',color:S.interval===k?CREAM:'rgba(232,228,220,0.5)'}));
+    const tabs=[['trades','Trades'],['holders','Holders'],['info','Info']].map(([k,l])=>({label:l,select:()=>this.setState({tab:k}),color:S.tab===k?INK:MUTED,line:S.tab===k?INK:'transparent'}));
+    const g=this.gen(tok);
+    const voted=S.votes[tok.t], tStarred=S.stars.includes(tok.t);
+    const tape=[{label:'Price',value:fmtPrice(tok.p),color:INK,size:15},{label:'24h',value:fmtPct(tok.h24),color:pctColor(tok.h24),size:15},{label:'1h',value:fmtPct(tok.h1),color:pctColor(tok.h1),size:13},{label:'Vol 24h',value:fmtUsd(tok.vol),color:INK,size:13},{label:'FDV',value:fmtUsd(tok.fdv),color:INK,size:13},{label:'Liquidity',value:fmtUsd(tok.liq),color:INK,size:13},{label:'Holders',value:fmtInt(tok.holders),color:INK,size:13},{label:'Age',value:fmtAge(tok.age),color:INK,size:13}];
+    const toasts=S.toasts.map(t=>({t:t.t,hash:t.hash,pending:t.kind==='pending',success:t.kind==='success',failed:t.kind==='failed',kindLabel:t.kind==='pending'?'Pending':t.kind==='success'?'Confirmed':'Failed',dismiss:()=>this.setState(s=>({toasts:s.toasts.filter(x=>x.id!==t.id)}))}));
+    const wallets=WALLETS.map(wl=>({name:wl.name,initial:wl.name[0],recent:!!wl.recent,bg:logoShade(wl.name),connect:()=>{const a=S.pending,k=S.pendingKind;this.setState({wallet:P.connectAs||'holder',modal:null,pending:null});if(a)this._t3=setTimeout(()=>this.gate(a,k),120)}}));
+    const minH=view==='app'?(isPhone?'760px':'720px'):view==='toasts'?'300px':'0';
+    return {
+      rootRef:this.rootRef, minH, pad, showChrome, notPhone, isPhone, isDesktop, isTablet, nav, query:S.query, setQuery:e=>this.setState({query:e.target.value,expanded:null}), searchW:isDesktop?220:160,
+      toggleSearch:()=>this.setState(s=>({searchOpen:!s.searchOpen})), searchOpen:S.searchOpen,
+      walletClick:()=>{if(connected)this.setState({wallet:'none',signed:false});else this.setState({modal:'connect',pending:null})}, walletLabel:connected?short(USER):'Connect Wallet', walletTitle:connected?'Disconnect':'', isHolder, tip:S.tip, tipOn:()=>this.setState({tip:true}), tipOff:()=>this.setState({tip:false}),
+      showChips:showChrome&&!isToken, chips, picker:S.picker, togglePicker:()=>this.setState(s=>({picker:!s.picker,pickerQ:''})), moreLabel:`+${Math.max(0,QUOTES.length-visible.length)} more ${S.picker?'▴':'▾'}`, moreBorder:S.picker?'rgba(244,238,218,0.6)':'rgba(240,232,214,0.28)', moreColor:S.picker?CREAM:'rgba(232,228,220,0.6)', hasSel:sel.length>0, clearQuotes:()=>this.setState({quotes:[],expanded:null}),
+      pads, never:false, pickSort:{sym:()=>this.setPickSort('sym'),pairs:()=>this.setPickSort('pairs'),vol:()=>this.setPickSort('vol')}, pickInd:{sym:pk==='sym'?(pdir>0?'▲':'▼'):'',pairs:pk==='pairs'?(pdir>0?'▲':'▼'):'',vol:pk==='vol'?(pdir>0?'▲':'▼'):''},
+      pickerQ:S.pickerQ, setPickerQ:e=>this.setState({pickerQ:e.target.value}), quoteCount:QUOTES.length, pickerRows, pickerEmpty:pickerRows.length===0, selSummary:sel.length?`${sel.length} selected · ${sel.join(', ')}`:'Showing every quote asset',
+      showListPage:!isToken&&view!=='toasts', isTop, isWardrobe, topTabs, leadIn, wardrobeCount:connected?`${total} token${total===1?'':'s'}`:'', showPresets:isMarkets||isWardrobe&&connected, presets, countLabel,
+      wardrobeLocked, openConnect:()=>this.setState({modal:'connect',pending:null}), showTraders, traders:this.traders(), trCols, rowH,
+      showTable, cols, volHead, sortBy, ind, loading, skeletons, hasRows, rows, rowBorder, logoSize, showName, showEmpty, emptyTitle, emptySub, emptyReset:!isWardrobe, resetFilters:()=>this.setState({quotes:[],pad:'all',preset:'all',query:'',sortKey:'vol',sortDir:'desc'}),
+      placeholderNote:isMarkets&&view==='app'&&!loading&&sel.length===0&&!q&&rows.length>8,
+      isToken, goMarkets:e=>{e&&e.preventDefault&&e.preventDefault();this.go('markets')},
+      hdrLedger:hdr==='ledger'&&view!=='panel', hdrMasthead:hdr==='masthead'&&view!=='panel', hdrTape:hdr==='tape'&&view!=='panel', showChart:view!=='panel', hdrDir:w<1000?'column':'row', hdrAlign:w<1000?'stretch':'center', hdrGap:w<1000?18:24, hdrRightDir:isPhone?'column':'row', hdrRightAlign:isPhone?'flex-start':'center', hdrRightGap:isPhone?14:28, hdrPriceAlign:'left', mastAlign:w<1000?'stretch':'flex-end', mastRightAlign:isPhone?'flex-start':'flex-end', mastSize:isPhone?40:56, mastPriceSize:isPhone?28:40,
+      tTicker:tok.t, tName:tok.n, tPair:tok.t+' / '+tok.q, tPad:tok.pad.toUpperCase(), tPadName:tok.pad, tAddr:short(tok.addr||hexAddr(rng(hash(tok.t)))), tInitial:tok.t[0], tLogoBg:logoShade(tok.t), tPrice:fmtPrice(tok.p), tPriceQ:fmtQ(pn)+' '+tok.q, tChange:fmtPct(tok.h24), tChangeColor:pctColor(tok.h24), tBull:fmtInt(tok.bull+(voted==='bull'?1:0)), tBear:fmtInt(tok.bear+(voted==='bear'?1:0)),
+      copyLabel:S.copied?'Copied':'Copy', copyAddr:()=>{this.setState({copied:true});clearTimeout(this._t3);this._t3=setTimeout(()=>this.setState({copied:false}),1400)},
+      tStar:tStarred?'★':'☆', tStarColor:tStarred?CREAM:'rgba(232,228,220,0.4)', toggleStarTok:()=>this.toggleStar(tok.t),
+      voteBull:()=>this.vote(tok.t,'bull'), voteBear:()=>this.vote(tok.t,'bear'), bullBorder:voted==='bull'?'rgba(244,238,218,0.6)':HAIR, bullColor:voted==='bull'?CREAM:INK, bearBorder:voted==='bear'?'rgba(244,238,218,0.6)':HAIR, bearColor:voted==='bear'?CREAM:INK, tape,
+      showBody:view!=='header', colDir:twoCol?'row':'column', colGap:twoCol?32:24, chartOrder:twoCol?0:1, panelOrder:twoCol?1:0, panelW:twoCol?'360px':'100%', bodyTop:view==='panel'?0:20,
+      intervals, intervalLabel:S.interval, chartW, chartH, axW, plotW:+plotW.toFixed(1), axisX:+(plotW+6).toFixed(1), grid, times, vBase, timeBoxY:vBase+5, wmTop:+(top+ph/2-19).toFixed(1),
+      candles, lastY, lastFill, lastBoxY:+(lastY-8.5).toFixed(1), lastLabel:fmtPrice(last.c).replace('$',''),
+      legColor, legO:fmtPrice(hc.o).replace('$',''), legH:fmtPrice(hc.h).replace('$',''), legL:fmtPrice(hc.l).replace('$',''), legC:fmtPrice(hc.c).replace('$',''), legChg:(chg>=0?'+':'−')+fmtPrice(Math.abs(chg)).replace('$','')+' ('+fmtPct(hc.o?chg/hc.o*100:0)+')', legV:fmtUsd(hc.v),
+      hovering, hx:hovering?candles[S.hover].cx:0, hTime:hovering?tLabel(S.hover):'', hy:+hy.toFixed(1), hyBoxY:+(hy-8.5).toFixed(1), hyLabel,
+      chartMove:e=>{const r=e.currentTarget.getBoundingClientRect();const x=e.clientX-r.left,yy=e.clientY-r.top;const idx=Math.max(0,Math.min(n-1,Math.floor(x/this._step)));if(idx!==S.hover||Math.abs(yy-S.hoverY)>1)this.setState({hover:idx,hoverY:yy})}, chartLeave:()=>this.setState({hover:-1}),
+      tabs, tabTrades:S.tab==='trades', tabHolders:S.tab==='holders', tabInfo:S.tab==='info', tdCols:isPhone?'64px 40px minmax(0,1fr) minmax(0,1fr) 24px':'72px 44px minmax(0,1fr) minmax(0,1fr) 110px 24px', trades:g.trades, holders:g.holders, info:g.info,
+      untradeable, tradeable, pvTicket:pv==='ticket', pvTabs:pv!=='ticket', pvStacked:pv!=='compact', pvCompact:pv==='compact', pvReceipt:pv==='receipt',
+      setBuy:()=>this.setState({side:'buy',amount:'',denom:'quote'}), setSell:()=>this.setState({side:'sell',amount:'',denom:'token'}),
+      buyBg:buy?'rgba(244,238,218,0.1)':'transparent', buyColor:buy?CREAM:MUTED, sellBg:!buy?'rgba(244,238,218,0.1)':'transparent', sellColor:!buy?CREAM:MUTED, buyLine:buy?INK:'transparent', sellLine:!buy?INK:'transparent', buyTabColor:buy?INK:MUTED, sellTabColor:!buy?INK:MUTED,
+      inLabel:denomIsPay?'You pay':'You receive', outLabel:denomIsPay?'You receive':'You pay', payBal:fmtAmt(payBalN,buy?2:0), payAsset, amount:S.amount, setAmount:e=>{const v=e.target.value;if(/^\d*\.?\d*$/.test(v))this.setState({amount:v})}, denomAsset, toggleDenom:()=>this.setState(s=>({denom:s.denom==='quote'?'token':'quote',amount:''})),
+      quicks, outAmt:amt?fmtAmt(outN,outN>=1000?0:undefined):'0.00', outAsset, outUsd:amt?'≈ '+fmtUsd(denomIsPay?recvAmt*(buy?tok.p:qUsd):payUsd):'',
+      breakdown, showBreakdownList:pv==='ticket'||(pv==='receipt'&&S.detailsOpen), leader:pv==='receipt'?'rgba(240,232,214,0.22)':'transparent', toggleDetails:()=>this.setState(s=>({detailsOpen:!s.detailsOpen})), detailsGlyph:S.detailsOpen?'▴':'▾', receiptSummary:`${fmtQ(pn)} ${tok.q} · fee ${isHolder?'0%':'0.5%'}`,
+      slipLabel:S.slipAuto?'Auto · 0.5%':S.slip+'%', slipColor:S.slip>1?DOWN:'rgba(232,228,220,0.7)', slipOpen:S.slipOpen, toggleSlip:()=>this.setState(s=>({slipOpen:!s.slipOpen})), slipOpts, slipCustom:S.slipCustom, setSlipCustom:e=>{const v=e.target.value;if(/^\d*\.?\d*$/.test(v)){const num=parseFloat(v);this.setState(num>0&&num<50?{slipCustom:v,slip:num,slipAuto:false}:{slipCustom:v})}}, slipNote:S.slip>1?'High slippage. Your trade may fill at a worse price than quoted.':'Your trade reverts if the price moves more than this before it confirms.',
+      btnEnabled:btn==='ok', btnDisabled:btn==='off', btnPending:btn==='pending', btnLabel:(buy?'Buy ':'Sell ')+tok.t, reason, submit:()=>this.submit(ctx),
+      hasToasts:toasts.length>0, toasts, toastW:isPhone?'100%':'320px',
+      modalConnect:S.modal==='connect', modalSign:S.modal==='sign', closeModal:()=>this.setState({modal:null,pending:null}), stop, connectW:isPhone?400:720, connectDir:isPhone?'column':'row', connectDivider:isPhone?'transparent':'rgba(240,232,214,0.09)', connectAsidePad:isPhone?'0 0 8px':'0 8px', wallets,
+      signTitle:S.pendingKind==='vote'?'Sign to cast your vote':'Sign to save your watchlist', nonce:String(hash(String(S.stars.length)+S.token)).slice(0,8), doSign:()=>{const a=S.pending;this.setState({signed:true,modal:null,pending:null});if(a)a()},
+    };
+  }
+}
+</script>
+</body>
+</html>
