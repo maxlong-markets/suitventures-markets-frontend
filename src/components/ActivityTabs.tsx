@@ -63,9 +63,11 @@ function TradesTable({ pair }: { pair: TokenPair }) {
       {isPending ? (
         <RowsSkeleton rows={8} />
       ) : (
-        data?.map((t) => (
+        // One transaction can hold several swaps on the pool (routed trades),
+        // so the hash alone is not a unique key on live data.
+        data?.map((t, i) => (
           <div
-            key={t.tx}
+            key={`${t.tx}:${i}`}
             className={`${TRADE_COLS} h-8 whitespace-nowrap border-b border-hairline-soft hover:bg-hover-soft`}
           >
             <div className="text-ink-55">{fmtClock(t.t)}</div>

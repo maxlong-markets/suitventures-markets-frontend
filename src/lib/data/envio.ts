@@ -1,89 +1,56 @@
-import type {
-  Address,
-  Candle,
-  Denom,
-  Holder,
-  Interval,
-  MarketsDataSource,
-  Quote,
-  QuoteAsset,
-  Side,
-  TokenPair,
-  Trade,
-  VoteDir,
-} from "@/lib/types";
+import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, TokenPair, Trade, VoteDir } from "@/lib/types";
+import { localQuote } from "@/lib/quote";
+import { LocalWatchStore } from "./localStore";
 
-/**
- * Live data layer — Envio HyperIndex behind Next.js route handlers, quotes
- * from the Uniswap v4 Quoter via Alchemy. Every method is a TODO; the mock
- * source is used until this lands (M1/M2 in the project README).
- *
- * Planned mapping:
- * - pairs()      → Envio `Token` + `Pool` entities (LONG launches, Pons
- *                  `PoolRegistered`, SV factory launches, the curated SUIT
- *                  pool), joined with 1h/24h candles for change and volume.
- * - quotes()     → allowlisted numeraires with USD prices (USDG pools first,
- *                  external API fallback — README §4).
- * - candles()    → Envio candle entities per poolId and interval.
- * - trades()     → PoolManager `Swap` events for the poolId.
- * - holders()    → balances from the token's `Transfer` events.
- * - quoteSwap()  → V4 Quoter `quoteExactInputSingle` through the SVRouter
- *                  path, plus the router and hook fees.
- * - watchlist(), setWatch(), vote(), votes() → route handlers keyed by
- *                  address, authorised by the session signature.
- */
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return (await res.json()) as T;
+}
+
+/** Live data through the app's own route handlers (the only Envio clients). */
 export class EnvioDataSource implements MarketsDataSource {
   readonly kind = "envio" as const;
+  private readonly store = new LocalWatchStore();
+  private pairsCache: { at: number; list: TokenPair[] } | null = null;
 
-  private todo(method: string): never {
-    throw new Error(`EnvioDataSource.${method} is not implemented yet.`);
+  async pairs(): Promise<TokenPair[]> {
+    const list = await getJson<TokenPair[]>("/api/pairs");
+    this.pairsCache = { at: Date.now(), list };
+    return list;
   }
-
   quotes(): Promise<QuoteAsset[]> {
-    return this.todo("quotes");
+    return getJson("/api/quotes");
   }
-  pairs(): Promise<TokenPair[]> {
-    return this.todo("pairs");
+  candles(id: string, interval: Interval): Promise<Candle[]> {
+    return getJson(`/api/tokens/${id}/candles?interval=${interval}`);
   }
-  candles(_id: string, _interval: Interval): Promise<Candle[]> {
-    return this.todo("candles");
+  trades(id: string): Promise<Trade[]> {
+    return getJson(`/api/tokens/${id}/trades`);
   }
-  trades(_id: string): Promise<Trade[]> {
-    return this.todo("trades");
+  async holders(id: string): Promise<Holder[]> {
+    return (await getJson<{ holders: Holder[] }>(`/api/tokens/${id}/holders`)).holders;
   }
-  holders(_id: string): Promise<Holder[]> {
-    return this.todo("holders");
+
+  async quoteSwap(id: string, side: Side, amount: number, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
+    const fresh = this.pairsCache && Date.now() - this.pairsCache.at < 30_000 ? this.pairsCache.list : await this.pairs();
+    const pair = fresh.find((p) => p.id === id.toLowerCase());
+    if (!pair) throw new Error(`Unknown token ${id}`);
+    return localQuote(pair, side, amount, denom, isSuitHolder, slippagePct);
   }
-  quoteSwap(
-    _id: string,
-    _side: Side,
-    _amount: number,
-    _denom: Denom,
-    _isSuitHolder: boolean,
-    _slippagePct: number,
-  ): Promise<Quote> {
-    return this.todo("quoteSwap");
+
+  async watchlist(address: Address): Promise<string[]> {
+    return this.store.watchlist(address);
   }
-  watchlist(_address: Address): Promise<string[]> {
-    return this.todo("watchlist");
+  async setWatch(address: Address, id: string, on: boolean, signature: string): Promise<void> {
+    if (!signature) throw new Error("A session signature is required.");
+    this.store.setWatch(address, id, on);
   }
-  setWatch(
-    _address: Address,
-    _id: string,
-    _on: boolean,
-    _signature: string,
-  ): Promise<void> {
-    return this.todo("setWatch");
+  async votes(address: Address): Promise<Record<string, VoteDir>> {
+    return this.store.votes(address);
   }
-  vote(
-    _address: Address,
-    _id: string,
-    _dir: VoteDir,
-    _signature: string,
-  ): Promise<void> {
-    return this.todo("vote");
-  }
-  votes(_address: Address): Promise<Record<string, VoteDir>> {
-    return this.todo("votes");
+  async vote(address: Address, id: string, dir: VoteDir, signature: string): Promise<void> {
+    if (!signature) throw new Error("A session signature is required.");
+    this.store.vote(address, id, dir);
   }
 }

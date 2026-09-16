@@ -125,11 +125,6 @@ export const FEE_TIER_BY_ORIGIN: Record<Origin, string> = {
   Other: "0.30%",
 };
 
-/** Pool fee the router quotes against, in percent. */
-export function poolFeePct(origin: Origin): number {
-  return origin === "Pons" ? 1.0 : 0.3;
-}
-
 export function quoteUsd(symbol: string): number {
   return QUOTE_USD[symbol] ?? 1;
 }

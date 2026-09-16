@@ -13,8 +13,9 @@ import type {
   VoteDir,
 } from "@/lib/types";
 import { hash } from "@/lib/format";
+import { localQuote } from "@/lib/quote";
 import { hexAddr, hexBytes32, normal, rng } from "./random";
-import { buildPairs, buildQuotes, poolFeePct, quoteUsd } from "./seed";
+import { buildPairs, buildQuotes } from "./seed";
 
 /**
  * Deterministic, seeded mock of the markets data layer. Shapes come from the
@@ -232,38 +233,14 @@ export class MockDataSource implements MarketsDataSource {
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote> {
-    const pair = this.pair(id);
-    const pn = pair.priceQuote;
-    const buy = side === "buy";
-    let pay: number;
-    let receive: number;
-    if (buy) {
-      if (denom === "quote") {
-        pay = amount;
-        receive = amount / pn;
-      } else {
-        receive = amount;
-        pay = amount * pn;
-      }
-    } else if (denom === "token") {
-      pay = amount;
-      receive = amount * pn;
-    } else {
-      receive = amount;
-      pay = amount / pn;
-    }
-    const payUsd = pay * (buy ? quoteUsd(pair.quote) : pair.priceUsd);
-    // Constant-product approximation: impact against half the pool's USD depth.
-    const impact = pair.liquidity ? (payUsd / (pair.liquidity / 2)) * 100 : 0;
-    const poolFee = poolFeePct(pair.origin);
-    return {
-      payAmount: pay,
-      receiveAmount: receive,
-      priceImpactPct: impact,
-      routerFeePct: isSuitHolder ? 0 : 0.5,
-      poolFeePct: poolFee,
-      minReceived: receive * (1 - slippagePct / 100 - poolFee / 100),
-    };
+    return localQuote(
+      this.pair(id),
+      side,
+      amount,
+      denom,
+      isSuitHolder,
+      slippagePct,
+    );
   }
 
   private loadWatch(address: Address): string[] {

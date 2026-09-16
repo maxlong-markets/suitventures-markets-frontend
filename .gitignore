@@ -45,3 +45,6 @@ next-env.d.ts
 
 # Claude Code agent worktrees (never source)
 .claude/worktrees/
+
+# Smoke-test screenshots (evidence, not source)
+.shots/
