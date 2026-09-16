@@ -113,7 +113,7 @@ create table market.holder_refresh (token_id text primary key, refreshed_at int 
 
 create table market.sync_state (
   job text primary key, cursor int not null default 0, cursor2 int not null default 0,
-  phase text not null default '', last_run_at int, last_ok_at int, last_error text,
+  cursor_text text not null default '', phase text not null default '', last_run_at int, last_ok_at int, last_error text,
   rows_written int not null default 0, queries_used int not null default 0,
   lease_until int not null default 0, lease_owner text
 );
@@ -155,7 +155,7 @@ Budget: about 40 queries per cycle at today's volume (1 quotes + 1 to 3 pool pag
 
 ### 5.3 Nightly (job `nightly`)
 
-Full re-pull of `Token` (131 pages) and `Pool` (235 pages) by keyset on id, upsert, then recompute `listed_pool_id` for every token. This catches what the market cycle cannot see: TVL changes from liquidity events on pools that did not trade, metadata that loaded late, holder counts of tokens that only transferred. About 370 queries; it fits in one invocation and is resumable by phase and cursor in `sync_state` if it does not.
+Full re-pull of `Token` (131 pages) and `Pool` (235 pages) by keyset on id, upsert, then recompute `listed_pool_id` for every token. This catches what the market cycle cannot see: TVL changes from liquidity events on pools that did not trade, metadata that loaded late, holder counts of tokens that only transferred. About 370 queries; it fits in one invocation and is resumable by `phase` and `cursor_text` (the last id of the completed page) in `sync_state` if it does not.
 
 ### 5.4 Holders, read-through
 
