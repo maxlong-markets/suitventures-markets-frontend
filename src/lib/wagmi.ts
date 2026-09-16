@@ -2,6 +2,7 @@ import { cookieStorage, createStorage } from "wagmi";
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import {
   coinbaseWallet,
+  injectedWallet,
   metaMaskWallet,
   rabbyWallet,
   walletConnectWallet,
@@ -25,10 +26,19 @@ export const wagmiConfig = getDefaultConfig({
   projectId,
   chains: [robinhoodChain],
   // The connect modal lists exactly these, in this order (handoff spec).
+  // `injectedWallet` leads as the "Browser Wallet" fallback for any browser
+  // wallet: it connects straight to whatever `window.ethereum` the page has,
+  // so an extension the branded tiles below fail to detect still works.
   wallets: [
     {
       groupName: "Popular",
-      wallets: [metaMaskWallet, rabbyWallet, coinbaseWallet, walletConnectWallet],
+      wallets: [
+        injectedWallet,
+        metaMaskWallet,
+        rabbyWallet,
+        coinbaseWallet,
+        walletConnectWallet,
+      ],
     },
   ],
   ssr: true,
