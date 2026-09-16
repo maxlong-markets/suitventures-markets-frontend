@@ -44,16 +44,22 @@ query Pairs($limit: Int!) {
   ${QUOTE_PRICES}
 }`;
 
+// Filtering on `Token.origin` is filtering on the resolved pool's origin: the indexer keeps the
+// two equal (verified, zero mismatches), and this document only admits a sane primary pool.
 export const PAIRS_LAUNCHPAD_QUERY = `
 query PairsLaunchpad($limit: Int!) {
   Token(where: { origin: { _in: [LONG, Pons] }, primaryPool: { swapCount: { _gt: 0 }, ${SANE_PRICE} } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
   ${QUOTE_PRICES}
 }`;
 
-/** Tokens the main query drops because their primary pool is broken, but which still trade somewhere sane. */
+/**
+ * Tokens the main query drops because their primary pool is broken, but which still trade
+ * somewhere sane. Ordered by the newest swap across a token's pools so that `$limit` takes the
+ * most recently traded candidates rather than an arbitrary slice of the thousand-odd matches.
+ */
 export const PAIRS_RECOVERY_QUERY = `
 query PairsRecovery($since: Int!, $limit: Int!) {
-  Token(where: { ${BROKEN_PRIMARY}, pools: { ${SANE_PRICE}, swapCount: { _gt: 0 }, lastSwapAt: { _gte: $since } } }, limit: $limit) {
+  Token(where: { ${BROKEN_PRIMARY}, pools: { ${SANE_PRICE}, swapCount: { _gt: 0 }, lastSwapAt: { _gte: $since } } }, order_by: { pools_aggregate: { max: { lastSwapAt: desc } } }, limit: $limit) {
     ${TOKEN_FIELDS}
     ${FALLBACK_POOL}
   }
@@ -62,7 +68,7 @@ query PairsRecovery($since: Int!, $limit: Int!) {
 
 export const PAIRS_RECOVERY_LAUNCHPAD_QUERY = `
 query PairsRecoveryLaunchpad($since: Int!, $limit: Int!) {
-  Token(where: { ${BROKEN_PRIMARY}, pools: { ${SANE_PRICE}, swapCount: { _gt: 0 }, lastSwapAt: { _gte: $since }, origin: { _in: [LONG, Pons] } } }, limit: $limit) {
+  Token(where: { ${BROKEN_PRIMARY}, pools: { ${SANE_PRICE}, swapCount: { _gt: 0 }, lastSwapAt: { _gte: $since }, origin: { _in: [LONG, Pons] } } }, order_by: { pools_aggregate: { max: { lastSwapAt: desc } } }, limit: $limit) {
     ${TOKEN_FIELDS}
     fallbackPool: pools(where: { swapCount: { _gt: 0 }, ${SANE_PRICE}, origin: { _in: [LONG, Pons] } }, order_by: { swapCount: desc }, limit: 1) { ${POOL_FIELDS} }
   }

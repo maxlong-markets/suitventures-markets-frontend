@@ -1,4 +1,4 @@
-import { nowSec } from "@/app/api/_lib/respond";
+import { nowSec } from "@/lib/time";
 import { ttlCache } from "./cache";
 import { gql } from "./client";
 import {
@@ -9,7 +9,8 @@ import { resolvePool, shapePairs, usdMap, windowStats } from "./shape";
 
 /** Seconds; also the pairs route's `s-maxage`. */
 export const PAIRS_TTL = 30;
-const LIMIT = 500;
+/** Rows the merged list is capped at. Exported for the merge tests, which must build exactly this many. */
+export const PAIRS_LIMIT = 500;
 const WINDOW_BATCH = 50; // pools per aliased window request; 0.4 s measured
 const WINDOW_CONCURRENCY = 3;
 
@@ -33,22 +34,36 @@ async function loadWindowRows(poolIds: string[], now: number): Promise<WindowRow
 type PairsRows = { Token: TokenRow[]; QuotePrice: QuotePriceRow[] };
 
 const RECOVERY_WINDOW_SEC = 7 * 86400;
+/** Candidates to consider; the ordered recovery query makes the cut deterministic, not the limit. */
+const RECOVERY_LIMIT = 1000;
+
+/**
+ * The cutoff the recovery query has to beat: the oldest swap the main list still shows. A token
+ * quieter than that would not have made the list on its own merits, so it is not worth recovering.
+ * A short main list has no meaningful cutoff, so fall back to a fixed window.
+ */
+function recoverySince(main: TokenRow[], now: number): number {
+  const last = main.length >= PAIRS_LIMIT ? main[main.length - 1] : undefined;
+  return last?.primaryPool?.lastSwapAt ?? now - RECOVERY_WINDOW_SEC;
+}
 
 /**
  * Shared by the pairs and quotes routes, so a quotes request reuses the cached pair set.
  *
- * Two queries in parallel: the main list, plus the tokens the main list cannot see because
- * the indexer's `primaryPool` points at a dead pool. Merging them and re-sorting on the
- * *resolved* pool is what puts AI and its ~1000 siblings back on the table.
+ * Two queries: the main list, then the tokens the main list cannot see because the indexer's
+ * `primaryPool` points at a dead pool. They run in sequence because the second one's cutoff comes
+ * from the first one's tail. Merging them and re-sorting on the *resolved* pool is what puts AI
+ * and its ~1000 siblings back on the table.
  */
 export async function loadPairs(scope: PairsScope = "all") {
   return ttlCache(`pairs:${scope}`, PAIRS_TTL * 1000, async () => {
     const now = nowSec();
     const launchpad = scope === "launchpad";
-    const [main, recovery] = await Promise.all([
-      gql<PairsRows>(launchpad ? PAIRS_LAUNCHPAD_QUERY : PAIRS_QUERY, { limit: LIMIT }),
-      gql<PairsRows>(launchpad ? PAIRS_RECOVERY_LAUNCHPAD_QUERY : PAIRS_RECOVERY_QUERY, { since: now - RECOVERY_WINDOW_SEC, limit: LIMIT }),
-    ]);
+    const main = await gql<PairsRows>(launchpad ? PAIRS_LAUNCHPAD_QUERY : PAIRS_QUERY, { limit: PAIRS_LIMIT });
+    const recovery = await gql<PairsRows>(launchpad ? PAIRS_RECOVERY_LAUNCHPAD_QUERY : PAIRS_RECOVERY_QUERY, {
+      since: recoverySince(main.Token, now),
+      limit: RECOVERY_LIMIT,
+    });
 
     // Same token can appear in both; the main row wins because its pool is already sane.
     const byId = new Map<string, TokenRow>();
@@ -63,7 +78,7 @@ export async function loadPairs(scope: PairsScope = "all") {
     // The main query's own order_by ranks on the primary pool, which is the wrong pool for
     // every recovered row, so the merged list is ranked here on the resolved pool instead.
     resolved.sort((a, b) => (b.pool.lastSwapAt ?? -1) - (a.pool.lastSwapAt ?? -1));
-    const top = resolved.slice(0, LIMIT);
+    const top = resolved.slice(0, PAIRS_LIMIT);
 
     const rows = await loadWindowRows(top.map((r) => r.pool.id), now);
     const prices = new Map<string, QuotePriceRow>();
