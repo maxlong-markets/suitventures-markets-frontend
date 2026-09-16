@@ -368,7 +368,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
           </span>
           <span className="text-[12px] text-ink-55">{outAsset}</span>
           <span className="ml-auto text-[11px] text-ink-40">
-            {amountNum ? `≈ ${fmtUsd(outUsd)}` : ""}
+            {amountNum ? (pair.stale ? "—" : `≈ ${fmtUsd(outUsd)}`) : ""}
           </span>
         </div>
       </div>

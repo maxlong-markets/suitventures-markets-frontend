@@ -6,6 +6,7 @@ import { shapeQuotes, usdMap } from "@/lib/envio/shape";
 import { cached, failure, nowSec } from "../_lib/respond";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
 const TTL = 30;
 
 export async function GET() {

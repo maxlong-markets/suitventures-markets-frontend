@@ -77,7 +77,7 @@ function TradesTable({ pair }: { pair: TokenPair }) {
             <div className="text-right">
               {fmtAmt(t.amount, 0)} {pair.ticker}
             </div>
-            <div className="text-right">{fmtPrice(t.priceUsd)}</div>
+            <div className="text-right">{pair.stale ? "—" : fmtPrice(t.priceUsd)}</div>
             <div className="hidden text-right text-ink-55 tablet:block">{short(t.wallet)}</div>
             <a
               href={txUrl(t.tx)}

@@ -90,6 +90,11 @@ export default function CandleChart({ pair, interval, onIntervalChange }: Props)
       </div>
       <div className="relative h-[332px]">
         <ChartLegend pairLabel={pairLabel} interval={interval} candle={shown} />
+        {pair.stale ? (
+          <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center px-4 text-center font-mono text-[11px] text-ink-50">
+            No USD price feed for {pair.quote}: chart unavailable
+          </div>
+        ) : null}
         <CandleChartInner
           candles={candles ?? []}
           interval={interval}

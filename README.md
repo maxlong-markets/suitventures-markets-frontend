@@ -24,7 +24,7 @@ npm run dev                  # http://localhost:3000
 |---|---|
 | `/` | Markets — quote chips, presets, launchpad filter, pairs table |
 | `/watchlist` | Starred pairs (needs a connected wallet) |
-| `/t/[ticker]` | Token page — chart, trades / holders / info, trade panel |
+| `/t/[address]` | Token page — chart, trades / holders / info, trade panel |
 
 ## Data layer
 
@@ -58,7 +58,7 @@ not follow the wallet to another device, and vote counts read 0 until the
 signed API lands in M2.
 
 Two methods were added beyond the handoff interface: `votes(address)` (the
-caller's current vote per ticker) — see the comment in `types.ts`.
+caller's current vote per token address) — see the comment in `types.ts`.
 
 ## Stubs still to wire (M2)
 
