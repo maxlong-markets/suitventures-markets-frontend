@@ -52,6 +52,11 @@ approximation until the v4 Quoter lands in M2.
 `GET /api/health` reports indexer lag (chain head minus last processed block)
 and which quote-asset USD prices are stale.
 
+`GET /api/tokens/[address]/logo` proxies the token's logo, resolved per token
+from the contract's `logo()` (Pons), its `tokenURI()` JSON (LONG) or
+DexScreener, and cached; the optional server-only `ROBINHOOD_RPC_URL` picks the
+RPC those reads use, defaulting to the public one.
+
 Watchlist and votes are browser-local in live mode
 (`src/lib/data/localStore.ts`, `localStorage` keyed by wallet address): they do
 not follow the wallet to another device, and vote counts read 0 until the

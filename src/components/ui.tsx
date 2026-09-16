@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { logoShade } from "@/lib/format";
 
 /** The Suits mark, always a circle with a hairline ring. */
@@ -41,7 +41,11 @@ export function Badge({
   );
 }
 
-/** Token avatar: the logo when the indexer has one, else the initial on a logo shade. */
+/**
+ * Token avatar: the logo proxy when the row carries one, else the initial on a logo shade.
+ * The proxy answers 404 for a token with no logo anywhere, which is the common case, so the
+ * letter has to be a fallback and not just a placeholder.
+ */
 export function Avatar({
   ticker,
   logoUrl,
@@ -55,14 +59,20 @@ export function Avatar({
   fontSize: number;
   className?: string;
 }) {
-  if (logoUrl) {
+  // The URL that failed, not a bare "it failed": a re-sorted or re-filtered table reuses this
+  // component for another token, and a boolean would hold the letter over the new logo.
+  const [failed, setFailed] = useState<string | null>(null);
+  if (logoUrl && failed !== logoUrl) {
     return (
-      // eslint-disable-next-line @next/next/no-img-element -- logo hosts come from the indexer and are not known ahead of time
+      // eslint-disable-next-line @next/next/no-img-element -- the proxy streams whatever the logo host sent; next/image would re-encode it
       <img
         src={logoUrl}
         alt=""
         width={size}
         height={size}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(logoUrl)}
         className={`flex-none rounded-full object-cover ${className}`}
         style={{ width: size, height: size }}
       />

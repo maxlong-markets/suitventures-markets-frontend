@@ -121,6 +121,9 @@ export function shapePairs(
       ticker: t.symbol,
       name: t.name,
       address: t.address as `0x${string}`,
+      // Same-origin proxy, resolved per token at request time; nothing on chain or in the
+      // indexer carries a logo URL. A token without one answers 404 and the UI keeps its letter.
+      logoUrl: `/api/tokens/${t.id}/logo`,
       quote: p.quote.symbol,
       origin,
       tradeable: true, // Quoter simulation lands in M2

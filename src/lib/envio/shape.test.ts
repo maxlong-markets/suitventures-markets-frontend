@@ -44,6 +44,8 @@ describe("shapePairs", () => {
     expect(pair!.poolId).toBe(POOL);
     expect(pair!.tradeable).toBe(true);
     expect(pair!.stale).toBe(false);
+    // Every row points at the proxy; the route decides whether a logo exists.
+    expect(pair!.logoUrl).toBe(`/api/tokens/${AI}/logo`);
   });
   it("converts to USD", () => {
     expect(pair!.priceUsd).toBeCloseTo(0.000866 * 224.4, 9);
