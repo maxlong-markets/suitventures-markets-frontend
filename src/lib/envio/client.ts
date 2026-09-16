@@ -1,3 +1,5 @@
+import "server-only";
+
 export class EnvioUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -18,7 +20,14 @@ export async function gql<T>(query: string, variables: Record<string, unknown> =
     throw new EnvioUnavailableError(`indexer unreachable: ${String(err)}`);
   }
   if (!res.ok) throw new EnvioUnavailableError(`indexer responded ${res.status}`);
-  const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
+  // A gateway can answer 200 with an HTML error page; every indexer failure has to
+  // surface as EnvioUnavailableError so the routes can answer 503, not 500.
+  let body: { data?: T; errors?: { message: string }[] };
+  try {
+    body = (await res.json()) as { data?: T; errors?: { message: string }[] };
+  } catch (err) {
+    throw new EnvioUnavailableError(`indexer returned a non-JSON body: ${String(err)}`);
+  }
   if (body.errors?.length || !body.data) {
     throw new EnvioUnavailableError(`indexer query failed: ${body.errors?.map((e) => e.message).join("; ") ?? "no data"}`);
   }

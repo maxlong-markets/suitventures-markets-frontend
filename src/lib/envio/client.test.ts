@@ -21,4 +21,8 @@ describe("gql", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 502 })));
     await expect(gql("query { x }")).rejects.toBeInstanceOf(EnvioUnavailableError);
   });
+  it("throws EnvioUnavailableError when a 200 carries a non-JSON body", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>gateway</html>", { status: 200 })));
+    await expect(gql("query { x }")).rejects.toBeInstanceOf(EnvioUnavailableError);
+  });
 });
