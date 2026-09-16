@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { gql } from "@/lib/envio/client";
 import { ttlCache } from "@/lib/envio/cache";
 import { CANDLES_QUERY, TOKEN_QUERY, type CandleRow, type QuotePriceRow, type TokenRow } from "@/lib/envio/queries";
-import { shapeCandles, usdMap } from "@/lib/envio/shape";
+import { resolvePool, shapeCandles, usdMap } from "@/lib/envio/shape";
 import { cached, failure, nowSec } from "../../../_lib/respond";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +18,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
     const data = await ttlCache(`candles:${id}:${interval}`, TTL * 1000, async () => {
       const now = nowSec();
       const t = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
-      const pool = t.Token[0]?.primaryPool;
+      const token = t.Token[0];
+      const pool = token ? resolvePool(token) : null;
       if (!pool) return [];
       const rows = await gql<{ Candle: CandleRow[] }>(CANDLES_QUERY, { pool: pool.id, like: `${pool.id}-${interval}-%`, limit: 300 });
       // One current USD price per quote in M1; per-candle history is an M6 refinement.

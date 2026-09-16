@@ -1,32 +1,72 @@
-export type QuotePriceRow = { id: string; usdPrice: number; updatedAt: number; aggregator: string };
+/**
+ * Hasura serialises every `numeric` column as a JSON string, so a Float-derived field
+ * arrives as `"0.000866"`, not `0.000866`. Int columns (swapCount, lastSwapAt, updatedAt,
+ * timestamp, holdersCount) really are numbers, and BigInt columns stay decimal strings.
+ * Shaping funnels every one of these through `num()`.
+ */
+export type Numeric = number | string;
+
+export type QuotePriceRow = { id: string; usdPrice: Numeric; updatedAt: number; aggregator: string };
 export type QuoteRow = { id: string; symbol: string; name: string; decimals: number; address: string };
 export type PoolRow = {
   id: string; quote_id: string; tokenIsCurrency0: boolean; hooks: string; fee: number; tickSpacing: number;
-  origin: string; createdAt: number; priceQuote: number; tvlToken: string | null; tvlQuote: string | null;
+  origin: string; createdAt: number; priceQuote: Numeric; tvlToken: string | null; tvlQuote: string | null;
   swapCount: number; lastSwapAt: number | null; quote: { symbol: string; decimals: number };
 };
 export type TokenRow = {
   id: string; address: string; symbol: string; name: string; decimals: number; totalSupply: string;
   holdersCount: number; origin: string; createdAt: number; primaryPool: PoolRow | null;
+  /** Best sane pool by swap count, selected only by the queries that can recover a broken primary. */
+  fallbackPool?: PoolRow[];
 };
-export type WindowRow = { pool_id: string; t: number; open: number; close: number; volumeQuote: number };
-export type CandleRow = { t: number; open: number; high: number; low: number; close: number; volumeQuote: number };
-export type SwapRow = { timestamp: number; side: "buy" | "sell"; amountToken: number; priceQuote: number; wallet: string; txHash: string };
+export type WindowRow = { pool_id: string; t: number; open: Numeric; close: Numeric; volumeQuote: Numeric };
+export type CandleRow = { t: number; open: Numeric; high: Numeric; low: Numeric; close: Numeric; volumeQuote: Numeric };
+export type SwapRow = { timestamp: number; side: "buy" | "sell"; amountToken: Numeric; priceQuote: Numeric; wallet: string; txHash: string };
 export type BalanceRow = { holder: string; balance: string };
 
 const POOL_FIELDS = "id quote_id tokenIsCurrency0 hooks fee tickSpacing origin createdAt priceQuote tvlToken tvlQuote swapCount lastSwapAt quote { symbol decimals }";
 const TOKEN_FIELDS = `id address symbol name decimals totalSupply holdersCount origin createdAt primaryPool { ${POOL_FIELDS} }`;
+const QUOTE_PRICES = "QuotePrice { id usdPrice updatedAt aggregator }";
+
+/**
+ * The indexer ranks `primaryPool` by TVL, which picks dead pools parked at a tick boundary
+ * for more than a thousand tokens (AI, CASHCAT, DINO, GOOGL). Those quote around 3.4e50 or
+ * about 0, so every document here filters them out and the API resolves the pool itself.
+ */
+const SANE_PRICE = 'priceQuote: { _gt: "1e-24", _lt: "1e18" }';
+/** The mirror image: a primary pool that sits at one of those boundaries. */
+const BROKEN_PRIMARY = 'primaryPool: { _or: [{ priceQuote: { _gte: "1e18" } }, { priceQuote: { _lte: "1e-24" } }] }';
+const FALLBACK_POOL = `fallbackPool: pools(where: { swapCount: { _gt: 0 }, ${SANE_PRICE} }, order_by: { swapCount: desc }, limit: 1) { ${POOL_FIELDS} }`;
 
 export const PAIRS_QUERY = `
 query Pairs($limit: Int!) {
-  Token(where: { primaryPool: { swapCount: { _gt: 0 } } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
-  QuotePrice { id usdPrice updatedAt aggregator }
+  Token(where: { primaryPool: { swapCount: { _gt: 0 }, ${SANE_PRICE} } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
+  ${QUOTE_PRICES}
 }`;
 
 export const PAIRS_LAUNCHPAD_QUERY = `
 query PairsLaunchpad($limit: Int!) {
-  Token(where: { origin: { _in: [LONG, Pons] }, primaryPool: { swapCount: { _gt: 0 } } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
-  QuotePrice { id usdPrice updatedAt aggregator }
+  Token(where: { origin: { _in: [LONG, Pons] }, primaryPool: { swapCount: { _gt: 0 }, ${SANE_PRICE} } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
+  ${QUOTE_PRICES}
+}`;
+
+/** Tokens the main query drops because their primary pool is broken, but which still trade somewhere sane. */
+export const PAIRS_RECOVERY_QUERY = `
+query PairsRecovery($since: Int!, $limit: Int!) {
+  Token(where: { ${BROKEN_PRIMARY}, pools: { ${SANE_PRICE}, swapCount: { _gt: 0 }, lastSwapAt: { _gte: $since } } }, limit: $limit) {
+    ${TOKEN_FIELDS}
+    ${FALLBACK_POOL}
+  }
+  ${QUOTE_PRICES}
+}`;
+
+export const PAIRS_RECOVERY_LAUNCHPAD_QUERY = `
+query PairsRecoveryLaunchpad($since: Int!, $limit: Int!) {
+  Token(where: { ${BROKEN_PRIMARY}, pools: { ${SANE_PRICE}, swapCount: { _gt: 0 }, lastSwapAt: { _gte: $since }, origin: { _in: [LONG, Pons] } } }, limit: $limit) {
+    ${TOKEN_FIELDS}
+    fallbackPool: pools(where: { swapCount: { _gt: 0 }, ${SANE_PRICE}, origin: { _in: [LONG, Pons] } }, order_by: { swapCount: desc }, limit: 1) { ${POOL_FIELDS} }
+  }
+  ${QUOTE_PRICES}
 }`;
 
 const POOL_ID = /^0x[0-9a-f]{64}$/;
@@ -47,7 +87,7 @@ export function windowQuery(poolIds: string[], sinceSec: number): string {
 }
 
 export const QUOTES_QUERY = `
-query Quotes { Quote { id symbol name decimals address } QuotePrice { id usdPrice updatedAt aggregator } }`;
+query Quotes { Quote { id symbol name decimals address } ${QUOTE_PRICES} }`;
 
 export const CANDLES_QUERY = `
 query Candles($pool: String!, $like: String!, $limit: Int!) {
@@ -56,8 +96,11 @@ query Candles($pool: String!, $like: String!, $limit: Int!) {
 
 export const TOKEN_QUERY = `
 query Token($id: String!) {
-  Token(where: { id: { _eq: $id } }, limit: 1) { ${TOKEN_FIELDS} }
-  QuotePrice { id usdPrice updatedAt aggregator }
+  Token(where: { id: { _eq: $id } }, limit: 1) {
+    ${TOKEN_FIELDS}
+    ${FALLBACK_POOL}
+  }
+  ${QUOTE_PRICES}
 }`;
 
 export const TRADES_QUERY = `

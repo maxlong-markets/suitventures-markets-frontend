@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { usdMap, windowStats, shapePairs, shapeQuotes, shapeCandles, shapeTrades, shapeHolders, hookLabel, feeTierLabel } from "./shape";
-import { AI, NVDA, USDG, POOL, NOW, aiToken, prices, windowRows, quotes, candles, swaps, balances } from "./fixtures";
+import { usdMap, windowStats, shapePairs, shapeQuotes, shapeCandles, shapeTrades, shapeHolders, hookLabel, feeTierLabel, isSanePool, resolvePool } from "./shape";
+import {
+  AI, NVDA, USDG, POOL, BROKEN_POOL, NOW, aiToken, prices, windowRows, quotes, candles, swaps, balances,
+  aiTokenAsStrings, aiTokenBroken, brokenPool, candlesAsStrings, pricesAsStrings, swapsAsStrings, windowRowsAsStrings,
+} from "./fixtures";
 
 describe("usdMap", () => {
   it("nulls stale quotes", () => {
@@ -117,5 +120,76 @@ describe("shapeCandles / shapeTrades / shapeHolders", () => {
     expect(out[0]!.share).toBeCloseTo(8.4684155, 6);
     expect(out[1]!.tag).toBeUndefined();
     expect(out[0]!.balance).toBeCloseTo(84_684_155, 3);
+  });
+});
+
+// Hasura sends every numeric column as a string. Before coercion `vol24h += r.volumeQuote`
+// concatenated ("0" + "10" + "8.6") and landed on NaN, and priceQuote/usdPrice/amount reached
+// the API as strings. Each case pairs the wire shape against the numeric fixture.
+describe("numeric strings from the indexer", () => {
+  it("usdMap coerces a string price", () => {
+    expect(usdMap(pricesAsStrings, NOW).get(NVDA)).toBe(224.4);
+    expect(usdMap(pricesAsStrings, NOW).get(USDG)).toBe(1);
+    expect(usdMap(pricesAsStrings, NOW).get("0xstale")).toBeNull();
+  });
+  it("windowStats sums string volumes instead of concatenating them", () => {
+    const w = windowStats(windowRowsAsStrings, NOW).get(POOL)!;
+    expect(w.vol24h).toBeCloseTo(18.6, 9);
+    expect(w).toEqual(windowStats(windowRows, NOW).get(POOL));
+  });
+  it("shapePairs produces the same pair from string rows", () => {
+    const [fromStrings] = shapePairs([aiTokenAsStrings], usdMap(pricesAsStrings, NOW), windowStats(windowRowsAsStrings, NOW));
+    const [fromNumbers] = shapePairs([aiToken], usdMap(prices, NOW), windowStats(windowRows, NOW));
+    expect(fromStrings).toEqual(fromNumbers);
+    expect(fromStrings!.priceQuote).toBe(0.000866);
+    expect(Number.isFinite(fromStrings!.vol24h)).toBe(true);
+  });
+  it("shapeQuotes sums a numeric 24h volume from string rows", () => {
+    const pairs = shapePairs([aiTokenAsStrings], usdMap(pricesAsStrings, NOW), windowStats(windowRowsAsStrings, NOW));
+    const [q] = shapeQuotes(quotes, pairs, usdMap(pricesAsStrings, NOW), pricesAsStrings, NOW);
+    expect(q!.usdPrice).toBe(224.4);
+    expect(q!.vol24h).toBeCloseTo(18.6 * 224.4, 6);
+  });
+  it("shapeCandles and shapeTrades coerce their string rows", () => {
+    expect(shapeCandles(candlesAsStrings, () => 224.4)).toEqual(shapeCandles(candles, () => 224.4));
+    const [t] = shapeTrades(swapsAsStrings, 224.4, "AI");
+    expect(t!.amount).toBe(15749);
+    expect(t!.priceUsd).toBeCloseTo(0.000865 * 224.4, 9);
+  });
+});
+
+describe("resolvePool", () => {
+  it("rejects prices at the tick boundaries", () => {
+    expect(isSanePool(aiToken.primaryPool!)).toBe(true);
+    expect(isSanePool(brokenPool)).toBe(false);
+    expect(isSanePool({ ...brokenPool, priceQuote: 0 })).toBe(false);
+    expect(isSanePool({ ...brokenPool, priceQuote: 1e-24 })).toBe(false); // exclusive
+    expect(isSanePool({ ...brokenPool, priceQuote: 1e18 })).toBe(false); // exclusive
+    expect(isSanePool({ ...brokenPool, priceQuote: "1e-23" })).toBe(true);
+    expect(isSanePool({ ...brokenPool, priceQuote: "1e17" })).toBe(true);
+  });
+  it("keeps a sane primary pool and ignores the fallback", () => {
+    const t = { ...aiToken, fallbackPool: [brokenPool] };
+    expect(resolvePool(t)!.id).toBe(POOL);
+  });
+  it("falls back when the primary is parked at a boundary", () => {
+    expect(resolvePool(aiTokenBroken)!.id).toBe(POOL);
+  });
+  it("returns null when the primary is broken and nothing sane is offered", () => {
+    expect(resolvePool({ ...aiTokenBroken, fallbackPool: undefined })).toBeNull();
+    expect(resolvePool({ ...aiTokenBroken, fallbackPool: [] })).toBeNull();
+    expect(resolvePool({ ...aiTokenBroken, fallbackPool: [brokenPool] })).toBeNull();
+    expect(resolvePool({ ...aiToken, primaryPool: null })).toBeNull();
+  });
+  it("shapePairs prices a recovered token off the fallback pool", () => {
+    // Without recovery AI reads as a USDG pair at 3.4e50; with it, the real LONG/NVDA pool.
+    const [p] = shapePairs([aiTokenBroken], usdMap(prices, NOW), windowStats(windowRows, NOW));
+    expect(p!.poolId).toBe(POOL);
+    expect(p!.poolId).not.toBe(BROKEN_POOL);
+    expect(p!.origin).toBe("LONG");
+    expect(p!.quote).toBe("NVDA");
+    expect(p!.priceQuote).toBe(0.000866);
+    expect(p!.priceUsd).toBeCloseTo(0.000866 * 224.4, 9);
+    expect(shapePairs([{ ...aiTokenBroken, fallbackPool: [] }], usdMap(prices, NOW), new Map())).toHaveLength(0);
   });
 });

@@ -1,10 +1,29 @@
 import type { Candle, Holder, Origin, QuoteAsset, TokenPair, Trade } from "@/lib/types";
-import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "./queries";
+import type { BalanceRow, CandleRow, Numeric, PoolRow, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "./queries";
 
 export const STALE_AFTER_SEC = 259_200; // 3 days: distinguishes a dead aggregator from an off-hours hold
 const POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951";
 const DYNAMIC_FEE_FLAG = 8388608;
 const ORIGINS = new Set<Origin>(["LONG", "Pons", "Uniswap", "Other", "SUIT", "SV"]);
+
+/**
+ * Every Float-derived column arrives from Hasura as a string. `+` would concatenate them,
+ * so nothing may read one of these fields without passing it through here first.
+ */
+const num = (v: Numeric): number => (typeof v === "number" ? v : Number(v));
+
+/** A pool parked at a tick boundary quotes ~3.4e50 or ~0; both are unusable as a price. */
+export function isSanePool(p: PoolRow): boolean {
+  const q = num(p.priceQuote);
+  return q > 1e-24 && q < 1e18;
+}
+
+/** The indexer's TVL-ranked `primaryPool` is wrong for 1000+ tokens; prefer it only when it prices sanely. */
+export function resolvePool(t: TokenRow): PoolRow | null {
+  if (t.primaryPool && isSanePool(t.primaryPool)) return t.primaryPool;
+  const fallback = t.fallbackPool?.[0];
+  return fallback && isSanePool(fallback) ? fallback : null;
+}
 
 function toOrigin(s: string): Origin {
   return ORIGINS.has(s as Origin) ? (s as Origin) : "Other";
@@ -40,7 +59,7 @@ export function isStale(p: { updatedAt: number; aggregator: string }, nowSec: nu
 /** quote id → USD price, null when the feed is stale. */
 export function usdMap(prices: QuotePriceRow[], nowSec: number): Map<string, number | null> {
   const m = new Map<string, number | null>();
-  for (const p of prices) m.set(p.id, isStale(p, nowSec) ? null : p.usdPrice);
+  for (const p of prices) m.set(p.id, isStale(p, nowSec) ? null : num(p.usdPrice));
   return m;
 }
 
@@ -53,10 +72,10 @@ const DAY = 86400;
 function refAt(rows: WindowRow[], t: number): number | null {
   const bucket = Math.floor(t / HOUR) * HOUR;
   const exact = rows.find((r) => r.t === bucket);
-  if (exact) return exact.open;
+  if (exact) return num(exact.open);
   let last: WindowRow | undefined;
   for (const r of rows) if (r.t < bucket && (!last || r.t > last.t)) last = r;
-  return last ? last.close : null;
+  return last ? num(last.close) : null;
 }
 
 /** Per-pool 1h and 24h reference prices and 24h quote volume from that pool's h1 candles, in any order. */
@@ -70,7 +89,7 @@ export function windowStats(rows: WindowRow[], nowSec: number): Map<string, Wind
   const out = new Map<string, WindowStats>();
   for (const [poolId, list] of byPool) {
     let vol24h = 0;
-    for (const r of list) if (r.t >= nowSec - DAY) vol24h += r.volumeQuote;
+    for (const r of list) if (r.t >= nowSec - DAY) vol24h += num(r.volumeQuote);
     out.set(poolId, { ref1h: refAt(list, nowSec - HOUR), ref24h: refAt(list, nowSec - DAY), vol24h });
   }
   return out;
@@ -83,15 +102,16 @@ export function shapePairs(
 ): TokenPair[] {
   const out: TokenPair[] = [];
   for (const t of tokens) {
-    const p = t.primaryPool;
+    const p = resolvePool(t);
     if (!p) continue;
+    const priceQuote = num(p.priceQuote);
     const q = usd.get(p.quote_id) ?? null;
     const usdPrice = q ?? 0; // stale or unknown quote: USD figures read 0, liquidity null
-    const priceUsd = p.priceQuote * usdPrice;
+    const priceUsd = priceQuote * usdPrice;
     const supply = Number(BigInt(t.totalSupply)) / 10 ** t.decimals;
     const tvlQuote = units(p.tvlQuote, p.quote.decimals);
     const tvlToken = units(p.tvlToken, t.decimals);
-    const liquidity = q === null || tvlQuote === null || tvlToken === null ? null : (tvlQuote + tvlToken * p.priceQuote) * q;
+    const liquidity = q === null || tvlQuote === null || tvlToken === null ? null : (tvlQuote + tvlToken * priceQuote) * q;
     const w = windows.get(p.id);
     const ref1 = w?.ref1h ?? undefined;
     const ref24 = w?.ref24h ?? undefined;
@@ -105,9 +125,9 @@ export function shapePairs(
       origin,
       tradeable: true, // Quoter simulation lands in M2
       priceUsd,
-      priceQuote: p.priceQuote,
-      change1h: ref1 !== undefined && ref1 > 0 ? (p.priceQuote / ref1 - 1) * 100 : null,
-      change24h: ref24 !== undefined && ref24 > 0 ? (p.priceQuote / ref24 - 1) * 100 : null,
+      priceQuote,
+      change1h: ref1 !== undefined && ref1 > 0 ? (priceQuote / ref1 - 1) * 100 : null,
+      change24h: ref24 !== undefined && ref24 > 0 ? (priceQuote / ref24 - 1) * 100 : null,
       vol24h: (w?.vol24h ?? 0) * usdPrice,
       mcap: priceUsd * supply,
       fdv: priceUsd * supply,
@@ -158,7 +178,7 @@ export function shapeCandles(rows: CandleRow[], usdAtTime: (t: number) => number
       const u = usdAtTime(c.t);
       // No USD price for this candle: an empty chart beats a chart drawn on the floor.
       if (u === null) return [];
-      return [{ t: c.t * 1000, o: c.open * u, h: c.high * u, l: c.low * u, c: c.close * u, v: c.volumeQuote * u }];
+      return [{ t: c.t * 1000, o: num(c.open) * u, h: num(c.high) * u, l: num(c.low) * u, c: num(c.close) * u, v: num(c.volumeQuote) * u }];
     });
 }
 
@@ -167,8 +187,8 @@ export function shapeTrades(rows: SwapRow[], usd: number | null, _ticker: string
   return rows.map((s) => ({
     t: s.timestamp * 1000,
     side: s.side,
-    amount: s.amountToken,
-    priceUsd: s.priceQuote * u,
+    amount: num(s.amountToken),
+    priceUsd: num(s.priceQuote) * u,
     wallet: s.wallet as `0x${string}`,
     tx: s.txHash as `0x${string}`,
   }));

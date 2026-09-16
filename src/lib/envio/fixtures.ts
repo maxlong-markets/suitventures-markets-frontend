@@ -1,8 +1,9 @@
-import type { TokenRow, QuotePriceRow, WindowRow, CandleRow, SwapRow, BalanceRow, QuoteRow } from "./queries";
+import type { TokenRow, PoolRow, QuotePriceRow, WindowRow, CandleRow, SwapRow, BalanceRow, QuoteRow } from "./queries";
 
 export const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 export const AI = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18";
 export const POOL = "0xcbdfea90430a30ee4469c9902e120a77e7c7e4711d5643671c1d1957f2f1ce27";
+export const BROKEN_POOL = "0x5987ac847e19ced8820853d43c831f9e845ede88c17f841754fb2bc46222efb2";
 export const NOW = 1_757_700_000;
 
 export const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
@@ -39,3 +40,28 @@ export const balances: BalanceRow[] = [
   { holder: "0x8366a39cc670b4001a1121b8f6a443a643e40951", balance: "84684155000000000000000000" },
   { holder: "0xb12e000000000000000000000000000000005020", balance: "84242846000000000000000000" },
 ];
+
+/**
+ * The same rows as the indexer really sends them: Hasura serialises every numeric column as a
+ * string. Derived from the numeric fixtures above so the two sets cannot drift — the paired
+ * tests assert both produce identical numbers, which is what the old `+` concatenation broke.
+ */
+const str = <T, K extends keyof T>(row: T, keys: K[]): T => {
+  const out = { ...row };
+  for (const k of keys) out[k] = String(row[k]) as T[K];
+  return out;
+};
+
+export const pricesAsStrings: QuotePriceRow[] = prices.map((p) => str(p, ["usdPrice"]));
+export const windowRowsAsStrings: WindowRow[] = windowRows.map((r) => str(r, ["open", "close", "volumeQuote"]));
+export const candlesAsStrings: CandleRow[] = candles.map((c) => str(c, ["open", "high", "low", "close", "volumeQuote"]));
+export const swapsAsStrings: SwapRow[] = swaps.map((s) => str(s, ["amountToken", "priceQuote"]));
+export const aiTokenAsStrings: TokenRow = { ...aiToken, primaryPool: str(aiToken.primaryPool!, ["priceQuote"]) };
+
+/** A pool parked at a tick boundary. The indexer ranks it primary by TVL; it prices at 3.4e50. */
+export const brokenPool: PoolRow = {
+  ...aiToken.primaryPool!, id: BROKEN_POOL, priceQuote: "3.4025678683638813e+50", origin: "Uniswap",
+  quote_id: USDG, quote: { symbol: "USDG", decimals: 6 }, lastSwapAt: NOW - 3_500_000,
+};
+/** AI as the indexer really returns it: broken primary, the real LONG/NVDA pool only as fallback. */
+export const aiTokenBroken: TokenRow = { ...aiToken, primaryPool: brokenPool, fallbackPool: [aiToken.primaryPool!] };
