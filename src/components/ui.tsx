@@ -24,7 +24,7 @@ export function SuitsMark({
   );
 }
 
-/** Launchpad / holder tag: mono 8.5px, 0.14em, 1px hairline-strong border. */
+/** Origin / holder tag: mono 8.5px, 0.14em, 1px hairline-strong border. */
 export function Badge({
   children,
   className = "",

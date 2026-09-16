@@ -17,8 +17,8 @@ import {
   DEFAULT_FILTERS,
   applyPreset,
   toggleSort,
-  type LaunchpadFilter,
   type MarketFilters,
+  type OriginFilter,
   type PresetKey,
   type SortKey,
 } from "@/lib/markets";
@@ -51,7 +51,7 @@ export interface AppState {
   filters: MarketFilters;
   toggleQuote(symbol: string): void;
   clearQuotes(): void;
-  setLaunchpad(l: LaunchpadFilter): void;
+  setOrigin(o: OriginFilter): void;
   setPreset(p: PresetKey): void;
   sortBy(key: SortKey): void;
   setQuery(q: string): void;
@@ -59,9 +59,9 @@ export interface AppState {
 
   stars: ReadonlySet<string>;
   watchlistLoading: boolean;
-  toggleStar(ticker: string): void;
+  toggleStar(id: string): void;
   votes: Readonly<Record<string, VoteDir>>;
-  vote(ticker: string, dir: VoteDir): void;
+  vote(id: string, dir: VoteDir): void;
 
   signModal: { kind: GateKind } | null;
   completeSign(signature: string): void;
@@ -98,8 +98,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     () => setFilters((f) => ({ ...f, quotes: [] })),
     [],
   );
-  const setLaunchpad = useCallback(
-    (launchpad: LaunchpadFilter) => setFilters((f) => ({ ...f, launchpad })),
+  const setOrigin = useCallback(
+    (origin: OriginFilter) => setFilters((f) => ({ ...f, origin })),
     [],
   );
   const setPreset = useCallback(
@@ -179,16 +179,16 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   const toggleStar = useCallback(
-    (ticker: string) => {
+    (id: string) => {
       gate("star", async ({ address: addr, signature }) => {
         const key = keys.watchlist(addr);
         const current = qc.getQueryData<string[]>(key) ?? [];
-        const on = !current.includes(ticker);
+        const on = !current.includes(id);
         qc.setQueryData<string[]>(key, (old = []) =>
-          on ? [...old.filter((t) => t !== ticker), ticker] : old.filter((t) => t !== ticker),
+          on ? [...old.filter((t) => t !== id), id] : old.filter((t) => t !== id),
         );
         try {
-          await ds.setWatch(addr, ticker, on, signature);
+          await ds.setWatch(addr, id, on, signature);
         } finally {
           void qc.invalidateQueries({ queryKey: key });
         }
@@ -202,18 +202,18 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const votes = useMemo(() => votesQuery.data ?? {}, [votesQuery.data]);
 
   const vote = useCallback(
-    (ticker: string, dir: VoteDir) => {
+    (id: string, dir: VoteDir) => {
       gate("vote", async ({ address: addr, signature }) => {
         const voteKey = keys.votes(addr);
         const book = qc.getQueryData<Record<string, VoteDir>>(voteKey) ?? {};
-        const prev = book[ticker];
+        const prev = book[id];
         const next = { ...book };
-        if (prev === dir) delete next[ticker];
-        else next[ticker] = dir;
+        if (prev === dir) delete next[id];
+        else next[id] = dir;
         qc.setQueryData(voteKey, next);
         qc.setQueryData<TokenPair[]>(keys.pairs, (old) =>
           old?.map((p) => {
-            if (p.ticker !== ticker) return p;
+            if (p.id !== id) return p;
             const updated = { ...p };
             if (prev) updated[prev] -= 1;
             if (prev !== dir) updated[dir] += 1;
@@ -221,7 +221,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           }),
         );
         try {
-          await ds.vote(addr, ticker, dir, signature);
+          await ds.vote(addr, id, dir, signature);
         } finally {
           void qc.invalidateQueries({ queryKey: voteKey });
           void qc.invalidateQueries({ queryKey: keys.pairs });
@@ -263,7 +263,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       filters,
       toggleQuote,
       clearQuotes,
-      setLaunchpad,
+      setOrigin,
       setPreset,
       sortBy,
       setQuery,
@@ -289,7 +289,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       filters,
       toggleQuote,
       clearQuotes,
-      setLaunchpad,
+      setOrigin,
       setPreset,
       sortBy,
       setQuery,

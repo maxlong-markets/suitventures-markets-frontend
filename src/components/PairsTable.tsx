@@ -9,10 +9,11 @@ import {
   ageHours,
   fmtAge,
   fmtInt,
-  fmtPct,
+  fmtPctOrDash,
   fmtPrice,
   fmtUsd,
-  toneClass,
+  fmtUsdOrDash,
+  toneClassOrFlat,
 } from "@/lib/format";
 import { isPhoneNow } from "@/hooks/useBreakpoint";
 import { Avatar, Badge } from "./ui";
@@ -37,7 +38,7 @@ export interface PairsTableProps {
   /** Reference time for ages; fixed per data load so rows don't drift mid-render. */
   now: number;
   stars: ReadonlySet<string>;
-  onToggleStar(ticker: string): void;
+  onToggleStar(id: string): void;
   sortKey: SortKey;
   sortDir: SortDir;
   onSort(key: SortKey): void;
@@ -123,8 +124,8 @@ interface RowProps {
   now: number;
   starred: boolean;
   expanded: boolean;
-  onToggleExpand(ticker: string): void;
-  onToggleStar(ticker: string): void;
+  onToggleExpand(id: string): void;
+  onToggleStar(id: string): void;
 }
 
 function Detail({ label, children }: { label: string; children: React.ReactNode }) {
@@ -146,13 +147,13 @@ const PairRow = memo(function PairRow({
   onToggleStar,
 }: RowProps) {
   const router = useRouter();
-  const href = `/t/${pair.ticker}`;
+  const href = `/t/${pair.id}`;
   const age = fmtAge(ageHours(pair.createdAt, now));
-  const pad = pair.launchpad.toUpperCase();
+  const pad = pair.origin.toUpperCase();
 
   const open = () => {
     // Phone rows expand in place; larger screens go straight to the token.
-    if (isPhoneNow()) onToggleExpand(pair.ticker);
+    if (isPhoneNow()) onToggleExpand(pair.id);
     else router.push(href);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -163,7 +164,7 @@ const PairRow = memo(function PairRow({
   };
   const star = (e: MouseEvent) => {
     e.stopPropagation();
-    onToggleStar(pair.ticker);
+    onToggleStar(pair.id);
   };
 
   return (
@@ -212,16 +213,20 @@ const PairRow = memo(function PairRow({
           / {pair.quote}
         </div>
         <div className="text-right">{fmtPrice(pair.priceUsd)}</div>
-        <div className={`hidden text-right tablet:block ${toneClass(pair.change1h)}`}>
-          {fmtPct(pair.change1h)}
+        <div
+          className={`hidden text-right tablet:block ${toneClassOrFlat(pair.change1h)}`}
+        >
+          {fmtPctOrDash(pair.change1h)}
         </div>
-        <div className={`text-right ${toneClass(pair.change24h)}`}>
-          {fmtPct(pair.change24h)}
+        <div className={`text-right ${toneClassOrFlat(pair.change24h)}`}>
+          {fmtPctOrDash(pair.change24h)}
         </div>
         <div className="text-right">{fmtUsd(pair.vol24h)}</div>
         <div className="hidden text-right tablet:block">{fmtUsd(pair.mcap)}</div>
         <div className="hidden text-right desktop:block">{fmtUsd(pair.fdv)}</div>
-        <div className="hidden text-right tablet:block">{fmtUsd(pair.liquidity)}</div>
+        <div className="hidden text-right tablet:block">
+          {fmtUsdOrDash(pair.liquidity)}
+        </div>
         <div className="hidden text-right desktop:block">{fmtInt(pair.holders)}</div>
         <div className="hidden text-right text-ink-60 desktop:block">{age}</div>
         <div className="hidden grid-cols-2 gap-2 text-[11px] tablet:grid">
@@ -239,11 +244,13 @@ const PairRow = memo(function PairRow({
         <div className="pb-[14px] pl-8 pt-[6px] font-mono text-[12px] tabular-nums tablet:hidden">
           <div className="grid grid-cols-2 gap-x-4 gap-y-2">
             <Detail label="1h">
-              <span className={toneClass(pair.change1h)}>{fmtPct(pair.change1h)}</span>
+              <span className={toneClassOrFlat(pair.change1h)}>
+                {fmtPctOrDash(pair.change1h)}
+              </span>
             </Detail>
             <Detail label="Mcap">{fmtUsd(pair.mcap)}</Detail>
             <Detail label="FDV">{fmtUsd(pair.fdv)}</Detail>
-            <Detail label="Liquidity">{fmtUsd(pair.liquidity)}</Detail>
+            <Detail label="Liquidity">{fmtUsdOrDash(pair.liquidity)}</Detail>
             <Detail label="Holders">{fmtInt(pair.holders)}</Detail>
             <Detail label="Age">{age}</Detail>
             <Detail label="Votes">
@@ -286,7 +293,8 @@ export default function PairsTable({
   empty,
 }: PairsTableProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const toggleExpand = (t: string) => setExpanded((cur) => (cur === t ? null : t));
+  const toggleExpand = (id: string) =>
+    setExpanded((cur) => (cur === id ? null : id));
   const th = { sortKey, sortDir, onSort };
 
   return (
@@ -323,12 +331,12 @@ export default function PairsTable({
       ) : (
         rows.map((p, i) => (
           <PairRow
-            key={p.ticker}
+            key={p.id}
             pair={p}
             rank={i + 1}
             now={now}
-            starred={stars.has(p.ticker)}
-            expanded={expanded === p.ticker}
+            starred={stars.has(p.id)}
+            expanded={expanded === p.id}
             onToggleExpand={toggleExpand}
             onToggleStar={onToggleStar}
           />

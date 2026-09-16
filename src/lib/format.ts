@@ -149,3 +149,16 @@ export function priceMinMove(p: number): number {
   if (p >= 0.0001) return 0.000001;
   return 0.00000001;
 }
+
+/** The null-tolerant pair of fmtPct/fmtUsd/toneClass: an em dash for "unknown". */
+export function fmtPctOrDash(v: number | null): string {
+  return v === null ? "—" : fmtPct(v);
+}
+
+export function fmtUsdOrDash(v: number | null): string {
+  return v === null ? "—" : fmtUsd(v);
+}
+
+export function toneClassOrFlat(v: number | null): string {
+  return v === null ? "text-ink-50" : toneClass(v);
+}

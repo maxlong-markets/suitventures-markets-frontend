@@ -5,7 +5,7 @@
  * handoff README; additions are marked at the bottom.
  */
 
-export type Launchpad = "LONG" | "Pons" | "Bags" | "SV";
+export type Origin = "LONG" | "Pons" | "Uniswap" | "Other" | "SUIT" | "SV";
 export type Address = `0x${string}`;
 export type Interval = "1m" | "5m" | "15m" | "1h" | "1d";
 export type Side = "buy" | "sell";
@@ -21,28 +21,32 @@ export interface QuoteAsset {
   usdPrice: number;
   pairs: number;
   vol24h: number;
+  /** true when `usdPrice` is the last known price, not a fresh one. */
+  stale?: boolean;
 }
 
 export interface TokenPair {
+  /** Token contract address, lowercase. The canonical key: thousands of memecoins share tickers. */
+  id: string;
   ticker: string;
   name: string;
   address: Address;
   logoUrl?: string;
   /** QuoteAsset.symbol */
   quote: string;
-  launchpad: Launchpad;
+  origin: Origin;
   /** false → "Not tradeable here yet" card */
   tradeable: boolean;
   priceUsd: number;
   priceQuote: number;
-  /** percent */
-  change1h: number;
-  /** percent */
-  change24h: number;
+  /** percent; null when no candle exists before the window ("new") */
+  change1h: number | null;
+  change24h: number | null;
   vol24h: number;
   mcap: number;
   fdv: number;
-  liquidity: number;
+  /** USD; null while liquidity accounting is unavailable */
+  liquidity: number | null;
   holders: number;
   /** unix ms → age */
   createdAt: number;
@@ -95,22 +99,22 @@ export interface Quote {
 export interface MarketsDataSource {
   quotes(): Promise<QuoteAsset[]>;
   pairs(): Promise<TokenPair[]>;
-  candles(ticker: string, interval: Interval): Promise<Candle[]>;
-  trades(ticker: string): Promise<Trade[]>;
-  holders(ticker: string): Promise<Holder[]>;
+  candles(id: string, interval: Interval): Promise<Candle[]>;
+  trades(id: string): Promise<Trade[]>;
+  holders(id: string): Promise<Holder[]>;
   quoteSwap(
-    ticker: string,
+    id: string,
     side: Side,
     amount: number,
     denom: Denom,
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote>;
-  /** tickers */
+  /** token addresses */
   watchlist(address: Address): Promise<string[]>;
   setWatch(
     address: Address,
-    ticker: string,
+    id: string,
     on: boolean,
     signature: string,
   ): Promise<void>;
@@ -120,7 +124,7 @@ export interface MarketsDataSource {
    */
   vote(
     address: Address,
-    ticker: string,
+    id: string,
     dir: VoteDir,
     signature: string,
   ): Promise<void>;
@@ -128,8 +132,9 @@ export interface MarketsDataSource {
   // --- Additions beyond the handoff interface ---------------------------
 
   /**
-   * The caller's current vote per ticker. Not in the handoff interface; the
-   * token page needs it to render the voted state after a reload.
+   * The caller's current vote per token address. Not in the handoff
+   * interface; the token page needs it to render the voted state after a
+   * reload.
    */
   votes(address: Address): Promise<Record<string, VoteDir>>;
 }

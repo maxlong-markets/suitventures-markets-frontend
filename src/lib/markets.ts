@@ -1,4 +1,4 @@
-import type { Launchpad, TokenPair } from "./types";
+import type { Origin, TokenPair } from "./types";
 
 /** Pure filter/sort logic for the Markets and Watchlist tables. */
 
@@ -16,7 +16,7 @@ export type SortKey =
   | "holders"
   | "age";
 export type SortDir = "asc" | "desc";
-export type LaunchpadFilter = "all" | Launchpad;
+export type OriginFilter = "all" | Origin;
 
 export interface Preset {
   key: PresetKey;
@@ -33,20 +33,20 @@ export const PRESETS: readonly Preset[] = [
   { key: "holders", label: "Most holders", sort: "holders", dir: "desc" },
 ];
 
-export const LAUNCHPAD_OPTIONS: ReadonlyArray<{
-  key: LaunchpadFilter;
+export const ORIGIN_OPTIONS: ReadonlyArray<{
+  key: OriginFilter;
   label: string;
 }> = [
   { key: "all", label: "All" },
   { key: "LONG", label: "LONG" },
   { key: "Pons", label: "PONS" },
-  { key: "Bags", label: "BAGS" },
-  { key: "SV", label: "SV" },
+  { key: "Uniswap", label: "UNISWAP" },
+  { key: "Other", label: "OTHER" },
 ];
 
 export interface MarketFilters {
   quotes: string[];
-  launchpad: LaunchpadFilter;
+  origin: OriginFilter;
   preset: PresetKey;
   sortKey: SortKey;
   sortDir: SortDir;
@@ -55,7 +55,7 @@ export interface MarketFilters {
 
 export const DEFAULT_FILTERS: MarketFilters = {
   quotes: [],
-  launchpad: "all",
+  origin: "all",
   preset: "all",
   sortKey: "vol",
   sortDir: "desc",
@@ -96,7 +96,7 @@ export function matchesQuery(p: TokenPair, query: string): boolean {
 }
 
 export interface SelectOptions {
-  /** Restrict to these tickers (the watchlist). */
+  /** Restrict to these ids (the watchlist). */
   only?: ReadonlySet<string>;
 }
 
@@ -109,13 +109,18 @@ export function filterPairs(
   const quotes = f.quotes.length ? new Set(f.quotes) : null;
   const out: TokenPair[] = [];
   for (const p of pairs) {
-    if (opts.only && !opts.only.has(p.ticker)) continue;
+    if (opts.only && !opts.only.has(p.id)) continue;
     if (quotes && !quotes.has(p.quote)) continue;
-    if (f.launchpad !== "all" && p.launchpad !== f.launchpad) continue;
+    if (f.origin !== "all" && p.origin !== f.origin) continue;
     if (!matchesQuery(p, f.query)) continue;
     if (
       f.preset === "gainers" &&
-      !(p.change24h > 0 && p.liquidity > GAINERS_MIN_LIQUIDITY)
+      !(
+        p.change24h !== null &&
+        p.change24h > 0 &&
+        p.liquidity !== null &&
+        p.liquidity > GAINERS_MIN_LIQUIDITY
+      )
     )
       continue;
     if (f.preset === "new" && now - p.createdAt > NEW_MAX_AGE_MS) continue;
@@ -124,7 +129,12 @@ export function filterPairs(
   return out;
 }
 
-function sortValue(p: TokenPair, key: SortKey, now: number): number | string {
+/** null sorts last in both directions (see sortPairs). */
+function sortValue(
+  p: TokenPair,
+  key: SortKey,
+  now: number,
+): number | string | null {
   switch (key) {
     case "ticker":
       return p.ticker;
@@ -161,6 +171,9 @@ export function sortPairs(
   return [...pairs].sort((a, b) => {
     const av = sortValue(a, key, now);
     const bv = sortValue(b, key, now);
+    if (av === null && bv === null) return b.vol24h - a.vol24h;
+    if (av === null) return 1;
+    if (bv === null) return -1;
     let c: number;
     if (typeof av === "string" && typeof bv === "string") {
       c = av.localeCompare(bv);

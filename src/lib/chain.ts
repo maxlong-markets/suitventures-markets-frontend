@@ -1,4 +1,5 @@
 import { defineChain } from "viem";
+import type { Origin } from "./types";
 
 /** Robinhood Chain — Arbitrum Orbit L2, chain id 4663, gas in ETH. */
 export const robinhoodChain = defineChain({
@@ -32,7 +33,5 @@ export function addressUrl(address: string): string {
   return `${EXPLORER_URL}/address/${address}`;
 }
 
-/** Where an untradeable pool sends the user instead. Bags has no known URL yet. */
-export const LAUNCHPAD_URLS: Record<string, string | undefined> = {
-  Bags: undefined, // TODO: Bags dapp URL once confirmed
-};
+/** Where an untradeable pool sends the user instead; no origin has a URL yet. */
+export const ORIGIN_URLS: Partial<Record<Origin, string>> = {};

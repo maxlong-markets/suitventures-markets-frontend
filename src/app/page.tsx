@@ -27,7 +27,7 @@ export default function MarketsPage() {
   const emptySub = query
     ? `No pair matches “${query}”.`
     : `No ${filters.quotes.length ? filters.quotes.join(" / ") + " " : ""}pairs${
-        filters.launchpad !== "all" ? ` on ${filters.launchpad}` : ""
+        filters.origin !== "all" ? ` on ${filters.origin}` : ""
       } match ${presetLabel(filters.preset)}.`;
   const showMockNote =
     isMockSource(ds) &&

@@ -60,7 +60,7 @@ function ChartLegend({
 }
 
 export default function CandleChart({ pair, interval, onIntervalChange }: Props) {
-  const { data: candles } = useCandles(pair.ticker, interval);
+  const { data: candles } = useCandles(pair.id, interval);
   const [hover, setHover] = useState<Candle | null>(null);
   const pairLabel = `${pair.ticker} / ${pair.quote}`;
   const shown = hover ?? (candles && candles.length ? candles[candles.length - 1] : null);

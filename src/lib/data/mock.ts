@@ -38,7 +38,8 @@ const STEP_MS: Record<Interval, number> = {
   "1h": 3_600_000,
   "1d": 86_400_000,
 };
-const DEFAULT_WATCHLIST = ["SUIT", "AI"];
+/** Starred out of the box; resolved to token ids in the constructor. */
+const DEFAULT_WATCHLIST_TICKERS = ["SUIT", "AI"];
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -156,22 +157,26 @@ export class MockDataSource implements MarketsDataSource {
   private readonly holderCache = new Map<string, Holder[]>();
   private readonly watchBook = new Map<string, string[]>();
   private readonly voteBook = new Map<string, Record<string, VoteDir>>();
+  private readonly defaultWatchlist: string[];
 
   constructor(opts: MockOptions = {}) {
     this.latencyMs = opts.latencyMs ?? 350;
     this.now = Date.now();
     this.pairList = buildPairs(this.now);
     this.quoteList = buildQuotes(this.pairList);
+    this.defaultWatchlist = DEFAULT_WATCHLIST_TICKERS.flatMap((t) =>
+      this.pairList.filter((p) => p.ticker === t).map((p) => p.id),
+    );
   }
 
   private async delay(): Promise<void> {
     if (this.latencyMs > 0) await sleep(this.latencyMs);
   }
 
-  private pair(ticker: string): TokenPair {
-    const key = ticker.toLowerCase();
-    const found = this.pairList.find((p) => p.ticker.toLowerCase() === key);
-    if (!found) throw new Error(`Unknown pair: ${ticker}`);
+  private pair(id: string): TokenPair {
+    const key = id.toLowerCase();
+    const found = this.pairList.find((p) => p.id === key);
+    if (!found) throw new Error(`Unknown pair: ${id}`);
     return found;
   }
 
@@ -185,9 +190,9 @@ export class MockDataSource implements MarketsDataSource {
     return this.pairList.map((p) => ({ ...p }));
   }
 
-  async candles(ticker: string, interval: Interval): Promise<Candle[]> {
-    const pair = this.pair(ticker);
-    const key = `${pair.ticker}|${interval}`;
+  async candles(id: string, interval: Interval): Promise<Candle[]> {
+    const pair = this.pair(id);
+    const key = `${pair.id}|${interval}`;
     let out = this.candleCache.get(key);
     if (!out) {
       out = generateCandles(pair, interval, this.now);
@@ -197,37 +202,37 @@ export class MockDataSource implements MarketsDataSource {
     return out.map((c) => ({ ...c }));
   }
 
-  async trades(ticker: string): Promise<Trade[]> {
-    const pair = this.pair(ticker);
-    let out = this.tradeCache.get(pair.ticker);
+  async trades(id: string): Promise<Trade[]> {
+    const pair = this.pair(id);
+    let out = this.tradeCache.get(pair.id);
     if (!out) {
       out = generateTrades(pair, this.now);
-      this.tradeCache.set(pair.ticker, out);
+      this.tradeCache.set(pair.id, out);
     }
     await this.delay();
     return out.map((t) => ({ ...t }));
   }
 
-  async holders(ticker: string): Promise<Holder[]> {
-    const pair = this.pair(ticker);
-    let out = this.holderCache.get(pair.ticker);
+  async holders(id: string): Promise<Holder[]> {
+    const pair = this.pair(id);
+    let out = this.holderCache.get(pair.id);
     if (!out) {
       out = generateHolders(pair);
-      this.holderCache.set(pair.ticker, out);
+      this.holderCache.set(pair.id, out);
     }
     await this.delay();
     return out.map((h) => ({ ...h }));
   }
 
   async quoteSwap(
-    ticker: string,
+    id: string,
     side: Side,
     amount: number,
     denom: Denom,
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote> {
-    const pair = this.pair(ticker);
+    const pair = this.pair(id);
     const pn = pair.priceQuote;
     const buy = side === "buy";
     let pay: number;
@@ -250,7 +255,7 @@ export class MockDataSource implements MarketsDataSource {
     const payUsd = pay * (buy ? quoteUsd(pair.quote) : pair.priceUsd);
     // Constant-product approximation: impact against half the pool's USD depth.
     const impact = pair.liquidity ? (payUsd / (pair.liquidity / 2)) * 100 : 0;
-    const poolFee = poolFeePct(pair.launchpad);
+    const poolFee = poolFeePct(pair.origin);
     return {
       payAmount: pay,
       receiveAmount: receive,
@@ -267,7 +272,7 @@ export class MockDataSource implements MarketsDataSource {
     if (!list) {
       list =
         readStore<string[]>(storageKey("watch", address)) ?? [
-          ...DEFAULT_WATCHLIST,
+          ...this.defaultWatchlist,
         ];
       this.watchBook.set(key, list);
     }
@@ -281,17 +286,17 @@ export class MockDataSource implements MarketsDataSource {
 
   async setWatch(
     address: Address,
-    ticker: string,
+    id: string,
     on: boolean,
     signature: string,
   ): Promise<void> {
     requireSignature(signature);
     const list = this.loadWatch(address);
     const next = on
-      ? list.includes(ticker)
+      ? list.includes(id)
         ? list
-        : [...list, ticker]
-      : list.filter((t) => t !== ticker);
+        : [...list, id]
+      : list.filter((t) => t !== id);
     this.watchBook.set(address.toLowerCase(), next);
     writeStore(storageKey("watch", address), next);
     await this.delay();
@@ -314,19 +319,19 @@ export class MockDataSource implements MarketsDataSource {
 
   async vote(
     address: Address,
-    ticker: string,
+    id: string,
     dir: VoteDir,
     signature: string,
   ): Promise<void> {
     requireSignature(signature);
-    const pair = this.pair(ticker);
+    const pair = this.pair(id);
     const book = { ...this.loadVotes(address) };
-    const prev = book[pair.ticker];
+    const prev = book[pair.id];
     if (prev) pair[prev] -= 1;
     if (prev === dir) {
-      delete book[pair.ticker];
+      delete book[pair.id];
     } else {
-      book[pair.ticker] = dir;
+      book[pair.id] = dir;
       pair[dir] += 1;
     }
     this.voteBook.set(address.toLowerCase(), book);

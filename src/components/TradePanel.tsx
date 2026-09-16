@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppState } from "@/context/AppState";
 import { usePairBalances } from "@/hooks/useTokenBalance";
 import { useSwapQuote } from "@/hooks/useMarketsData";
-import { LAUNCHPAD_URLS } from "@/lib/chain";
+import { ORIGIN_URLS } from "@/lib/chain";
 import { fmtAmt, fmtQuote, fmtTradeAmt, fmtUsd } from "@/lib/format";
 import { executeSwap, SwapFailedError } from "@/lib/swap";
 import type { Denom, Side, TokenPair } from "@/lib/types";
@@ -32,11 +32,11 @@ const DEFAULT_SLIPPAGE: Slippage = { value: AUTO_SLIPPAGE, auto: true, custom: "
 export default function TradePanel({ pair }: { pair: TokenPair }) {
   if (!pair.tradeable) return <UntradeableCard pair={pair} />;
   // Keyed so every pair starts from a clean form.
-  return <TradeForm key={pair.ticker} pair={pair} />;
+  return <TradeForm key={pair.id} pair={pair} />;
 }
 
 function UntradeableCard({ pair }: { pair: TokenPair }) {
-  const url = LAUNCHPAD_URLS[pair.launchpad];
+  const url = ORIGIN_URLS[pair.origin];
   return (
     <div className="border border-hairline px-[22px] py-[34px] text-center">
       <div className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-ink-40">
@@ -44,17 +44,18 @@ function UntradeableCard({ pair }: { pair: TokenPair }) {
       </div>
       <div className="mb-2 mt-3 text-[17px]">Not tradeable here yet</div>
       <div className="text-pretty text-[12.5px] leading-[1.5] text-ink-50">
-        This {pair.launchpad} pool can&apos;t be routed through the SuitVentures swap.
-        Trade it on {pair.launchpad} for now.
+        This pool can&apos;t be routed through the SuitVentures swap yet.
       </div>
-      <a
-        href={url ?? "#"}
-        target={url ? "_blank" : undefined}
-        rel="noreferrer"
-        className="mt-5 inline-flex h-[34px] items-center border border-wallet-border px-4 font-mono text-[9.5px] uppercase tracking-[0.22em] hover:border-wallet-border-hover hover:bg-wallet-hover"
-      >
-        <span className="whitespace-nowrap">Trade on {pair.launchpad} ↗</span>
-      </a>
+      {url ? (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-5 inline-flex h-[34px] items-center border border-wallet-border px-4 font-mono text-[9.5px] uppercase tracking-[0.22em] hover:border-wallet-border-hover hover:bg-wallet-hover"
+        >
+          <span className="whitespace-nowrap">Trade on {pair.origin} ↗</span>
+        </a>
+      ) : null}
     </div>
   );
 }
@@ -188,7 +189,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   const quoteUsd = pair.priceUsd / pair.priceQuote;
 
   const quoteQuery = useSwapQuote({
-    ticker: pair.ticker,
+    id: pair.id,
     side,
     amount: amountNum,
     denom,
@@ -215,9 +216,9 @@ function TradeForm({ pair }: { pair: TokenPair }) {
     poolFee == null
       ? "—"
       : `${poolFee.toFixed(2)}%` +
-        (pair.launchpad === "Pons"
+        (pair.origin === "Pons"
           ? " · MemeHook"
-          : pair.launchpad === "LONG"
+          : pair.origin === "LONG"
             ? " · Doppler"
             : "");
 

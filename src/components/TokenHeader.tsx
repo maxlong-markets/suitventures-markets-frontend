@@ -3,7 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppState } from "@/context/AppState";
 import type { TokenPair } from "@/lib/types";
-import { fmtPct, fmtPrice, fmtQuote, short, toneClass } from "@/lib/format";
+import {
+  fmtPctOrDash,
+  fmtPrice,
+  fmtQuote,
+  short,
+  toneClassOrFlat,
+} from "@/lib/format";
 import { Avatar, Badge } from "./ui";
 import VoteButtons from "./VoteButtons";
 
@@ -13,8 +19,8 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
   const { stars, toggleStar, votes, vote } = useAppState();
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
-  const starred = stars.has(pair.ticker);
-  const voted = votes[pair.ticker];
+  const starred = stars.has(pair.id);
+  const voted = votes[pair.id];
 
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
@@ -50,7 +56,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             <span className="text-ink-65">
               {pair.ticker} / {pair.quote}
             </span>
-            <Badge>{pair.launchpad.toUpperCase()}</Badge>
+            <Badge>{pair.origin.toUpperCase()}</Badge>
             <span>{short(pair.address)}</span>
             <button
               type="button"
@@ -68,7 +74,9 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             {fmtPrice(pair.priceUsd)}
           </div>
           <div className="mt-[5px] whitespace-nowrap text-[11.5px]">
-            <span className={toneClass(pair.change24h)}>{fmtPct(pair.change24h)}</span>{" "}
+            <span className={toneClassOrFlat(pair.change24h)}>
+              {fmtPctOrDash(pair.change24h)}
+            </span>{" "}
             <span className="ml-[6px] text-ink-40">
               24h · {fmtQuote(pair.priceQuote)} {pair.quote}
             </span>
@@ -77,7 +85,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => toggleStar(pair.ticker)}
+            onClick={() => toggleStar(pair.id)}
             aria-label={starred ? "Remove from watchlist" : "Add to watchlist"}
             aria-pressed={starred}
             className={`h-[34px] w-[34px] border border-hairline-strong bg-transparent text-[15px] hover:border-[rgba(240,232,214,0.4)] ${
@@ -90,7 +98,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             bull={pair.bull}
             bear={pair.bear}
             voted={voted}
-            onVote={(dir) => vote(pair.ticker, dir)}
+            onVote={(dir) => vote(pair.id, dir)}
           />
         </div>
       </div>

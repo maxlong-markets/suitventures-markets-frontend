@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { usePair } from "@/hooks/useMarketsData";
+import { short } from "@/lib/format";
 import type { Interval } from "@/lib/types";
 import ActivityTabs, { type ActivityTab } from "./ActivityTabs";
 import CandleChart from "./CandleChart";
@@ -36,8 +37,8 @@ function TokenSkeleton() {
   );
 }
 
-export default function TokenView({ ticker }: { ticker: string }) {
-  const { pair, isPending, dataUpdatedAt } = usePair(ticker);
+export default function TokenView({ address }: { address: string }) {
+  const { pair, isPending, dataUpdatedAt } = usePair(address);
   const [interval, setChartInterval] = useState<Interval>("15m");
   const [tab, setTab] = useState<ActivityTab>("trades");
 
@@ -55,9 +56,9 @@ export default function TokenView({ ticker }: { ticker: string }) {
       <section className={GUTTER}>
         <BackLink />
         <div className="px-4 py-16 text-center">
-          <div className="text-[16px]">No pair called {ticker.toUpperCase()}.</div>
+          <div className="text-[16px]">No token at {short(address)}.</div>
           <div className="mt-[6px] text-[12.5px] text-ink-50">
-            It may not be indexed yet, or the ticker is wrong.
+            It may not be indexed yet, or the address is wrong.
           </div>
         </div>
       </section>

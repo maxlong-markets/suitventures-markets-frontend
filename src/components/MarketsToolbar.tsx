@@ -1,7 +1,7 @@
 "use client";
 
 import { useAppState } from "@/context/AppState";
-import { LAUNCHPAD_OPTIONS, PRESETS } from "@/lib/markets";
+import { ORIGIN_OPTIONS, PRESETS } from "@/lib/markets";
 
 interface Props {
   total: number;
@@ -9,7 +9,7 @@ interface Props {
 }
 
 export default function MarketsToolbar({ total, loading }: Props) {
-  const { filters, setPreset, setLaunchpad } = useAppState();
+  const { filters, setPreset, setOrigin } = useAppState();
   const sel = filters.quotes;
   const count = loading
     ? "Loading"
@@ -51,16 +51,16 @@ export default function MarketsToolbar({ total, loading }: Props) {
           role="group"
           aria-label="Launchpad"
         >
-          {LAUNCHPAD_OPTIONS.map((o, i) => {
-            const on = filters.launchpad === o.key;
+          {ORIGIN_OPTIONS.map((o, i) => {
+            const on = filters.origin === o.key;
             return (
               <button
                 key={o.key}
                 type="button"
-                onClick={() => setLaunchpad(o.key)}
+                onClick={() => setOrigin(o.key)}
                 aria-pressed={on}
                 className={`h-7 whitespace-nowrap px-[10px] font-mono text-[9.5px] tracking-[0.14em] hover:text-white ${
-                  i < LAUNCHPAD_OPTIONS.length - 1
+                  i < ORIGIN_OPTIONS.length - 1
                     ? "border-r border-hairline-mid"
                     : ""
                 } ${on ? "bg-chalk-10 text-chalk" : "bg-transparent text-ink-60"}`}

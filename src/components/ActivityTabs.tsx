@@ -11,6 +11,7 @@ import {
   fmtISODate,
   fmtPrice,
   fmtUsd,
+  fmtUsdOrDash,
   short,
 } from "@/lib/format";
 import { Badge } from "./ui";
@@ -47,7 +48,7 @@ const TRADE_COLS =
   "grid grid-cols-[64px_40px_minmax(0,1fr)_minmax(0,1fr)_24px] items-center gap-[10px] tablet:grid-cols-[72px_44px_minmax(0,1fr)_minmax(0,1fr)_110px_24px]";
 
 function TradesTable({ pair }: { pair: TokenPair }) {
-  const { data, isPending } = useTrades(pair.ticker);
+  const { data, isPending } = useTrades(pair.id);
   return (
     <>
       <div
@@ -97,7 +98,7 @@ const HOLDER_COLS =
   "grid grid-cols-[32px_minmax(0,1fr)_120px_90px] items-center gap-[10px]";
 
 function HoldersTable({ pair }: { pair: TokenPair }) {
-  const { data, isPending } = useHolders(pair.ticker);
+  const { data, isPending } = useHolders(pair.id);
   return (
     <>
       <div
@@ -132,6 +133,7 @@ function HoldersTable({ pair }: { pair: TokenPair }) {
 
 function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
   const quoteUsd = pair.priceUsd / pair.priceQuote;
+  const liquidity = fmtUsdOrDash(pair.liquidity);
   const rows: Array<[string, string]> = [
     ["Pool", short(pair.poolId)],
     ["Hook", pair.hook],
@@ -139,7 +141,9 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
     ["Created", `${fmtISODate(pair.createdAt)} · ${fmtAge(ageHours(pair.createdAt, now))} ago`],
     [
       "Liquidity",
-      `${fmtUsd(pair.liquidity)} · ${fmtAmt(pair.liquidity / 2 / quoteUsd, 2)} ${pair.quote}`,
+      pair.liquidity === null
+        ? liquidity
+        : `${liquidity} · ${fmtAmt(pair.liquidity / 2 / quoteUsd, 2)} ${pair.quote}`,
     ],
     ["Quote", `${pair.quote} · ${fmtUsd(quoteUsd)}`],
   ];

@@ -45,17 +45,17 @@ export class EnvioDataSource implements MarketsDataSource {
   pairs(): Promise<TokenPair[]> {
     return this.todo("pairs");
   }
-  candles(_ticker: string, _interval: Interval): Promise<Candle[]> {
+  candles(_id: string, _interval: Interval): Promise<Candle[]> {
     return this.todo("candles");
   }
-  trades(_ticker: string): Promise<Trade[]> {
+  trades(_id: string): Promise<Trade[]> {
     return this.todo("trades");
   }
-  holders(_ticker: string): Promise<Holder[]> {
+  holders(_id: string): Promise<Holder[]> {
     return this.todo("holders");
   }
   quoteSwap(
-    _ticker: string,
+    _id: string,
     _side: Side,
     _amount: number,
     _denom: Denom,
@@ -69,7 +69,7 @@ export class EnvioDataSource implements MarketsDataSource {
   }
   setWatch(
     _address: Address,
-    _ticker: string,
+    _id: string,
     _on: boolean,
     _signature: string,
   ): Promise<void> {
@@ -77,7 +77,7 @@ export class EnvioDataSource implements MarketsDataSource {
   }
   vote(
     _address: Address,
-    _ticker: string,
+    _id: string,
     _dir: VoteDir,
     _signature: string,
   ): Promise<void> {

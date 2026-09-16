@@ -1,4 +1,4 @@
-import type { Address, Launchpad, QuoteAsset, TokenPair } from "@/lib/types";
+import type { Address, Origin, QuoteAsset, TokenPair } from "@/lib/types";
 import { hash } from "@/lib/format";
 import { hexAddr, hexBytes32, rng } from "./random";
 
@@ -63,7 +63,7 @@ interface SeedToken {
   t: string;
   n: string;
   q: string;
-  pad: Launchpad;
+  pad: Origin;
   p: number;
   h1: number;
   h24: number;
@@ -89,7 +89,7 @@ export const SEED_TOKENS: readonly SeedToken[] = [
   { t: "MOO", n: "Moo", q: "TSLA", pad: "LONG", p: 0.0512, h1: 0.32, h24: -4.18, vol: 918400, fdv: 51200000, liq: 2210000, holders: 7940, age: 1900, bull: 640, bear: 210 },
   { t: "CASHCAT", n: "Cash Cat", q: "ETH", pad: "Pons", p: 0.00174, h1: -1.4, h24: -9.6, vol: 402300, fdv: 1740000, liq: 186400, holders: 1980, age: 300, bull: 220, bear: 88 },
   { t: "TENDIES", n: "Tendies", q: "ETH", pad: "Pons", p: 0.000612, h1: 2.9, h24: 44.2, vol: 388900, fdv: 612000, liq: 98200, holders: 1120, age: 38, bull: 310, bear: 42 },
-  { t: "STONKBROKER", n: "Stonkbroker", q: "USDG", pad: "Bags", p: 0.0000482, h1: 0, h24: -2.1, vol: 12400, fdv: 48200, liq: 9100, holders: 214, age: 14, bull: 12, bear: 9, untradeable: true },
+  { t: "STONKBROKER", n: "Stonkbroker", q: "USDG", pad: "Other", p: 0.0000482, h1: 0, h24: -2.1, vol: 12400, fdv: 48200, liq: 9100, holders: 214, age: 14, bull: 12, bear: 9, untradeable: true },
   { t: "PRINTER", n: "Money Printer", q: "NVDA", pad: "Pons", p: 0.00263, h1: -3.1, h24: 8.2, vol: 264100, fdv: 2630000, liq: 141000, holders: 1640, age: 520, bull: 198, bear: 76, ph: true },
   { t: "GAINZ", n: "Gainz", q: "SPY", pad: "Pons", p: 0.0117, h1: -0.6, h24: -12.8, vol: 146800, fdv: 11700000, liq: 612000, holders: 2890, age: 2100, bull: 150, bear: 171, ph: true },
   { t: "DIAMONDHANDS", n: "Diamond Hands", q: "TSLA", pad: "Pons", p: 0.000934, h1: 1.8, h24: 3.3, vol: 98400, fdv: 934000, liq: 72400, holders: 860, age: 190, bull: 96, bear: 31, ph: true },
@@ -107,31 +107,27 @@ export const PLACEHOLDER_TICKERS: ReadonlySet<string> = new Set(
   SEED_TOKENS.filter((t) => t.ph).map((t) => t.t),
 );
 
-export const HOOK_BY_LAUNCHPAD: Record<Launchpad, string> = {
+export const HOOK_BY_ORIGIN: Record<Origin, string> = {
   LONG: "Doppler shared v4 hook",
   Pons: "Pons MemeHook · afterSwap",
+  Uniswap: "None",
+  SUIT: "None",
   SV: "None",
-  Bags: "Unknown",
+  Other: "Unknown hook",
 };
 
-export const FEE_TIER_BY_LAUNCHPAD: Record<Launchpad, string> = {
+export const FEE_TIER_BY_ORIGIN: Record<Origin, string> = {
   LONG: "Dynamic · 0.30% now",
   Pons: "1.00% hook fee",
+  Uniswap: "0.30%",
+  SUIT: "0.30%",
   SV: "0.30%",
-  Bags: "0.30%",
+  Other: "0.30%",
 };
 
 /** Pool fee the router quotes against, in percent. */
-export function poolFeePct(launchpad: Launchpad): number {
-  return launchpad === "Pons" ? 1.0 : 0.3;
-}
-
-/** Pool-fee label in the trade breakdown: `0.30% · Doppler` / `1.00% · MemeHook` / `0.30%`. */
-export function poolFeeLabel(launchpad: Launchpad): string {
-  const pct = poolFeePct(launchpad).toFixed(2) + "%";
-  if (launchpad === "Pons") return pct + " · MemeHook";
-  if (launchpad === "LONG") return pct + " · Doppler";
-  return pct;
+export function poolFeePct(origin: Origin): number {
+  return origin === "Pons" ? 1.0 : 0.3;
 }
 
 export function quoteUsd(symbol: string): number {
@@ -141,12 +137,14 @@ export function quoteUsd(symbol: string): number {
 export function buildPairs(now: number): TokenPair[] {
   return SEED_TOKENS.map((s) => {
     const r = rng(hash("pair|" + s.t));
+    const address = s.addr ?? hexAddr(r);
     return {
+      id: address.toLowerCase(),
       ticker: s.t,
       name: s.n,
-      address: s.addr ?? hexAddr(r),
+      address,
       quote: s.q,
-      launchpad: s.pad,
+      origin: s.pad,
       tradeable: !s.untradeable,
       priceUsd: s.p,
       priceQuote: s.p / quoteUsd(s.q),
@@ -161,8 +159,8 @@ export function buildPairs(now: number): TokenPair[] {
       bull: s.bull,
       bear: s.bear,
       poolId: hexBytes32(r),
-      hook: HOOK_BY_LAUNCHPAD[s.pad],
-      feeTier: FEE_TIER_BY_LAUNCHPAD[s.pad],
+      hook: HOOK_BY_ORIGIN[s.pad],
+      feeTier: FEE_TIER_BY_ORIGIN[s.pad],
     };
   });
 }
