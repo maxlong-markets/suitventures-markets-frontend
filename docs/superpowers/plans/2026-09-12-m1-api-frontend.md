@@ -10,9 +10,22 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-12-m1-live-data-design.md` (sections 6 to 8). Depends on the indexer plan `docs/superpowers/plans/2026-09-12-m1-indexer.md` for the GraphQL schema (entity and field names are copied from it).
 
+## Amendments, 16 September 2026
+
+Measured against the full Envio Cloud deployment (commit 2fa2043, 859 M events, 234,945 pools, 130,226 tokens) after its sync finished. The plan had not been executed, so the changes below replace the original text in place.
+
+- The endpoint requires an API key (`ENVIO_GRAPHQL_KEY`, server-only); the HyperSync token is not used by the frontend.
+- No `Candle.interval` filter anywhere: it fails on the deployed schema. Candles are selected by pool id plus an id pattern; window stats are per-pool `h1` lookups in batches, not a global scan (`WINDOW_QUERY` removed, `windowQuery()` and `windowStats()` added).
+- `Token_by_pk` replaced by a filtered `Token` query (composite key).
+- Pairs: `LIMIT` 500, TTL 30 s, optional `?scope=launchpad` (Pons and LONG tokens only; 0.5 s against 4 s for all origins). Change figures use hourly buckets: price now against the open of the hour bucket 1 h and 24 h ago, falling back to the last close before that bucket.
+- The indexer's Envio release branch is `envio`; pushes to `main` no longer deploy.
+
 ## Global Constraints
 
-- The frontend never calls Envio directly: only route handlers read `ENVIO_GRAPHQL_URL` and `ENVIO_API_TOKEN` (server-only, no `NEXT_PUBLIC_` prefix).
+- The frontend never calls Envio directly: only route handlers read `ENVIO_GRAPHQL_URL` and `ENVIO_GRAPHQL_KEY` (server-only, no `NEXT_PUBLIC_` prefix). `ENVIO_GRAPHQL_KEY` is the endpoint API key from Envio Cloud's Security tab (`envio-cloud indexer security api-key list suitventures-indexer kobesergio --show-tokens`), sent as `Authorization: Bearer`; it is not the HyperSync `ENVIO_API_TOKEN` the indexer uses.
+- Never filter `Candle` on `interval`: on the deployed schema every such filter fails with `database query error` (the enum is named `Interval`, which collides with a Postgres type). Candles are selected by `pool_id` plus an id pattern `<pool>-<interval>-%` (ids are `<pool>-<interval>-<bucket>`), never by a global scan: window stats come from each pool's own `h1` candles, fetched in aliased batches of 50 pools.
+- Composite primary keys: `Token_by_pk` needs `chainId` on this deployment, so single-token reads use `Token(where: { id: { _eq: $id } }, limit: 1)`.
+- Measured on the full deployment (16 Sep 2026): pairs list 4 s for 200 rows over all origins, 0.5 s launchpad-only; candles by id pattern 0.3 to 1.2 s; h1 window rows for 50 pools 0.4 s; trades and holders 0.3 s. The endpoint allows 250 queries a minute; the pairs route stays under 25 a minute.
 - USD conversion happens only in `src/lib/envio/shape.ts` using `QuotePrice` rows: `priceUsd = priceQuote * usdPrice`, `fdv = priceUsd * totalSupply / 10^decimals`, `mcap = fdv`, `liquidity = (tvlQuote/10^qDec + tvlToken/10^tDec * priceQuote) * usdPrice` (null when TVL is null), `vol24h = volumeQuote24h * usdPrice`.
 - Tokens are keyed by **address** (`TokenPair.id`, lowercase). Routes are `/t/[address]`.
 - `Origin` = `"LONG" | "Pons" | "Uniswap" | "Other" | "SUIT" | "SV"` replaces `Launchpad` everywhere. `tradeable` is `true` for every pool in M1 (the Quoter check is M2).
@@ -224,7 +237,7 @@ import { gql, EnvioUnavailableError } from "./client";
 describe("gql", () => {
   beforeEach(() => {
     process.env.ENVIO_GRAPHQL_URL = "https://indexer.test/v1/graphql";
-    process.env.ENVIO_API_TOKEN = "tok";
+    process.env.ENVIO_GRAPHQL_KEY = "tok";
   });
   it("posts the query with the bearer token and returns data", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: { Pool: [{ id: "0x1" }] } }), { status: 200 }));
@@ -289,7 +302,7 @@ export async function gql<T>(query: string, variables: Record<string, unknown> =
   const url = process.env.ENVIO_GRAPHQL_URL;
   if (!url) throw new EnvioUnavailableError("ENVIO_GRAPHQL_URL is not set");
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (process.env.ENVIO_API_TOKEN) headers.Authorization = `Bearer ${process.env.ENVIO_API_TOKEN}`;
+  if (process.env.ENVIO_GRAPHQL_KEY) headers.Authorization = `Bearer ${process.env.ENVIO_GRAPHQL_KEY}`;
   let res: Response;
   try {
     res = await fetch(url, { method: "POST", headers, body: JSON.stringify({ query, variables }), cache: "no-store" });
@@ -341,9 +354,9 @@ export function clearTtlCache(): void {
 
 Append to `.env.example`:
 ```
-# Server-only. The indexer's GraphQL endpoint and token from Envio Cloud.
+# Server-only. The indexer's GraphQL endpoint and its API key from Envio Cloud (Security tab), not the HyperSync token.
 ENVIO_GRAPHQL_URL=
-ENVIO_API_TOKEN=
+ENVIO_GRAPHQL_KEY=
 ```
 
 - [ ] **Step 3: Run the tests, commit**
@@ -368,8 +381,8 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 **Interfaces:**
 - Consumes: `TokenPair`, `QuoteAsset`, `Candle`, `Trade`, `Holder`, `Origin` (Task 1).
 - Produces:
-  - `queries.ts`: `PAIRS_QUERY`, `WINDOW_QUERY`, `QUOTES_QUERY`, `CANDLES_QUERY`, `TOKEN_QUERY`, `TRADES_QUERY`, `HOLDERS_QUERY`, `HEALTH_QUERY` and row types `QuotePriceRow`, `QuoteRow`, `PoolRow`, `TokenRow`, `RefRow`, `VolRow`, `CandleRow`, `SwapRow`, `BalanceRow`.
-  - `shape.ts`: `STALE_AFTER_SEC`; `usdMap(prices, nowSec): Map<string, number | null>`; `shapePairs(tokens, usd, refs1h, refs24h, vol5m): TokenPair[]`; `shapeQuotes(quotes, pairs, usd, prices, nowSec): QuoteAsset[]`; `shapeCandles(rows, usdAtTime): Candle[]`; `shapeTrades(rows, usd, ticker): Trade[]`; `shapeHolders(rows, decimals, totalSupply): Holder[]`; `hookLabel(origin)`; `feeTierLabel(fee)`.
+  - `queries.ts`: `PAIRS_QUERY`, `PAIRS_LAUNCHPAD_QUERY`, `windowQuery(poolIds, sinceSec)`, `QUOTES_QUERY`, `CANDLES_QUERY`, `TOKEN_QUERY`, `TRADES_QUERY`, `HOLDERS_QUERY`, `HEALTH_QUERY` and row types `QuotePriceRow`, `QuoteRow`, `PoolRow`, `TokenRow`, `WindowRow`, `CandleRow`, `SwapRow`, `BalanceRow`.
+  - `shape.ts`: `STALE_AFTER_SEC`; `usdMap(prices, nowSec): Map<string, number | null>`; `WindowStats`; `windowStats(rows, nowSec): Map<string, WindowStats>`; `shapePairs(tokens, usd, windows): TokenPair[]`; `shapeQuotes(quotes, pairs, usd, prices, nowSec): QuoteAsset[]`; `shapeCandles(rows, usdAtTime): Candle[]`; `shapeTrades(rows, usd, ticker): Trade[]`; `shapeHolders(rows, decimals, totalSupply): Holder[]`; `hookLabel(origin)`; `feeTierLabel(fee)`.
 
 - [ ] **Step 1: Write the queries**
 
@@ -386,8 +399,7 @@ export type TokenRow = {
   id: string; address: string; symbol: string; name: string; decimals: number; totalSupply: string;
   holdersCount: number; origin: string; createdAt: number; primaryPool: PoolRow | null;
 };
-export type RefRow = { pool_id: string; close: number };
-export type VolRow = { pool_id: string; volumeQuote: number };
+export type WindowRow = { pool_id: string; t: number; open: number; close: number; volumeQuote: number };
 export type CandleRow = { t: number; open: number; high: number; low: number; close: number; volumeQuote: number };
 export type SwapRow = { timestamp: number; side: "buy" | "sell"; amountToken: number; priceQuote: number; wallet: string; txHash: string };
 export type BalanceRow = { holder: string; balance: string };
@@ -401,24 +413,38 @@ query Pairs($limit: Int!) {
   QuotePrice { id usdPrice updatedAt }
 }`;
 
-export const WINDOW_QUERY = `
-query Window($h1: Int!, $d1: Int!) {
-  ref1h: Candle(where: { interval: { _eq: "m1" }, t: { _lt: $h1 } }, distinct_on: [pool_id], order_by: [{ pool_id: asc }, { t: desc }]) { pool_id close }
-  ref24h: Candle(where: { interval: { _eq: "m1" }, t: { _lt: $d1 } }, distinct_on: [pool_id], order_by: [{ pool_id: asc }, { t: desc }]) { pool_id close }
-  vol24h: Candle(where: { interval: { _eq: "m5" }, t: { _gte: $d1 } }) { pool_id volumeQuote }
+export const PAIRS_LAUNCHPAD_QUERY = `
+query PairsLaunchpad($limit: Int!) {
+  Token(where: { origin: { _in: [LONG, Pons] }, primaryPool: { swapCount: { _gt: 0 } } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
+  QuotePrice { id usdPrice updatedAt }
 }`;
+
+const POOL_ID = /^0x[0-9a-f]{64}$/;
+
+/**
+ * One aliased selection per pool: its h1 candles since `sinceSec`, oldest first.
+ * Never filters on `interval` (broken on the deployed schema); the id pattern does that job.
+ * Pool ids are validated before interpolation, so nothing user-supplied reaches the document.
+ */
+export function windowQuery(poolIds: string[], sinceSec: number): string {
+  const parts = poolIds.map((id, i) => {
+    if (!POOL_ID.test(id)) throw new Error(`bad pool id ${id}`);
+    return `w${i}: Candle(where: { pool_id: { _eq: "${id}" }, id: { _like: "${id}-h1-%" }, t: { _gte: ${Math.floor(sinceSec)} } }, order_by: { t: asc }) { pool_id t open close volumeQuote }`;
+  });
+  return `query Window { ${parts.join(" ")} }`;
+}
 
 export const QUOTES_QUERY = `
 query Quotes { Quote { id symbol name decimals address } QuotePrice { id usdPrice updatedAt } }`;
 
 export const CANDLES_QUERY = `
-query Candles($pool: String!, $interval: String!, $limit: Int!) {
-  Candle(where: { pool_id: { _eq: $pool }, interval: { _eq: $interval } }, order_by: { t: desc }, limit: $limit) { t open high low close volumeQuote }
+query Candles($pool: String!, $like: String!, $limit: Int!) {
+  Candle(where: { pool_id: { _eq: $pool }, id: { _like: $like } }, order_by: { t: desc }, limit: $limit) { t open high low close volumeQuote }
 }`;
 
 export const TOKEN_QUERY = `
 query Token($id: String!) {
-  Token_by_pk(id: $id) { ${TOKEN_FIELDS} }
+  Token(where: { id: { _eq: $id } }, limit: 1) { ${TOKEN_FIELDS} }
   QuotePrice { id usdPrice updatedAt }
 }`;
 
@@ -435,13 +461,13 @@ query Holders($token: String!) {
 export const HEALTH_QUERY = `
 query Health { chain_metadata { chain_id latest_processed_block block_height } QuotePrice { id updatedAt } }`;
 ```
-If the Hasura console exposes `interval` as a GraphQL enum rather than text, remove the quotes from the two `_eq` literals (`m1`, `m5`) and declare `$interval: Interval_enum!` in `CANDLES_QUERY`; Task 4 step 4 is where this shows up.
+Do not reintroduce an `interval` filter or `Token_by_pk`: both fail on the deployed schema (see Global Constraints). `windowQuery` builds the document itself because Hasura has no variable type for a list of aliased selections; the regex check is what keeps that safe.
 
 - [ ] **Step 2: Write the fixture and the failing shaping tests**
 
 `src/lib/envio/fixtures.ts`:
 ```ts
-import type { TokenRow, QuotePriceRow, RefRow, VolRow, CandleRow, SwapRow, BalanceRow, QuoteRow } from "./queries";
+import type { TokenRow, QuotePriceRow, WindowRow, CandleRow, SwapRow, BalanceRow, QuoteRow } from "./queries";
 
 export const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 export const AI = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18";
@@ -464,9 +490,12 @@ export const aiToken: TokenRow = {
   },
 };
 
-export const refs1h: RefRow[] = [{ pool_id: POOL, close: 0.00088 }];
-export const refs24h: RefRow[] = [{ pool_id: POOL, close: 0.001 }];
-export const vol5m: VolRow[] = [{ pool_id: POOL, volumeQuote: 10 }, { pool_id: POOL, volumeQuote: 8.6 }];
+// h1 candles for POOL. NOW sits on an hour boundary, so the 1h bucket is NOW - 3600 and the 24h bucket is NOW - 86400.
+export const windowRows: WindowRow[] = [
+  { pool_id: POOL, t: NOW - 86400, open: 0.001, close: 0.00095, volumeQuote: 0 },
+  { pool_id: POOL, t: NOW - 7200, open: 0.0009, close: 0.00089, volumeQuote: 8.6 },
+  { pool_id: POOL, t: NOW - 3600, open: 0.00088, close: 0.00087, volumeQuote: 10 },
+];
 export const quotes: QuoteRow[] = [{ id: NVDA, symbol: "NVDA", name: "NVIDIA Robinhood Token", decimals: 18, address: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC" }];
 export const candles: CandleRow[] = [
   { t: NOW - 900, open: 0.0009, high: 0.00092, low: 0.00088, close: 0.0009, volumeQuote: 3 },
@@ -482,8 +511,8 @@ export const balances: BalanceRow[] = [
 `src/lib/envio/shape.test.ts`:
 ```ts
 import { describe, it, expect } from "vitest";
-import { usdMap, shapePairs, shapeQuotes, shapeCandles, shapeTrades, shapeHolders, hookLabel, feeTierLabel } from "./shape";
-import { AI, NVDA, POOL, NOW, aiToken, prices, refs1h, refs24h, vol5m, quotes, candles, swaps, balances } from "./fixtures";
+import { usdMap, windowStats, shapePairs, shapeQuotes, shapeCandles, shapeTrades, shapeHolders, hookLabel, feeTierLabel } from "./shape";
+import { AI, NVDA, POOL, NOW, aiToken, prices, windowRows, quotes, candles, swaps, balances } from "./fixtures";
 
 describe("usdMap", () => {
   it("nulls stale quotes", () => {
@@ -493,8 +522,26 @@ describe("usdMap", () => {
   });
 });
 
+describe("windowStats", () => {
+  it("takes the open of the hour bucket an hour and a day ago and sums 24h volume", () => {
+    const w = windowStats(windowRows, NOW).get(POOL)!;
+    expect(w.ref1h).toBe(0.00088);
+    expect(w.ref24h).toBe(0.001);
+    expect(w.vol24h).toBeCloseTo(18.6, 9);
+  });
+  it("falls back to the last close before a missing bucket", () => {
+    const rows = windowRows.filter((r) => r.t !== NOW - 3600);
+    const w = windowStats(rows, NOW).get(POOL)!;
+    expect(w.ref1h).toBe(0.00089); // close of the NOW - 7200 candle
+    expect(w.ref24h).toBe(0.001);
+  });
+  it("has no entry for a pool without candles", () => {
+    expect(windowStats([], NOW).has(POOL)).toBe(false);
+  });
+});
+
 describe("shapePairs", () => {
-  const [pair] = shapePairs([aiToken], usdMap(prices, NOW), refs1h, refs24h, vol5m);
+  const [pair] = shapePairs([aiToken], usdMap(prices, NOW), windowStats(windowRows, NOW));
   it("keys by address and carries origin", () => {
     expect(pair!.id).toBe(AI);
     expect(pair!.origin).toBe("LONG");
@@ -509,20 +556,20 @@ describe("shapePairs", () => {
     // liquidity = (10000 NVDA + 1,000,000 AI * 0.000866) * 224.4
     expect(pair!.liquidity).toBeCloseTo((10_000 + 1_000_000 * 0.000866) * 224.4, 3);
   });
-  it("computes changes from the last close before each window", () => {
+  it("computes changes against the hour buckets an hour and a day ago", () => {
     expect(pair!.change1h).toBeCloseTo((0.000866 / 0.00088 - 1) * 100, 9);
     expect(pair!.change24h).toBeCloseTo((0.000866 / 0.001 - 1) * 100, 9);
   });
   it("marks a pool with no reference candle as new", () => {
-    const [p] = shapePairs([aiToken], usdMap(prices, NOW), [], [], []);
+    const [p] = shapePairs([aiToken], usdMap(prices, NOW), new Map());
     expect(p!.change1h).toBeNull();
     expect(p!.change24h).toBeNull();
     expect(p!.vol24h).toBe(0);
   });
   it("drops tokens without a primary pool and zeroes USD on a stale quote", () => {
     const stale = { ...aiToken, primaryPool: { ...aiToken.primaryPool!, quote_id: "0xstale" } };
-    expect(shapePairs([{ ...aiToken, primaryPool: null }, stale], usdMap(prices, NOW), [], [], [])).toHaveLength(1);
-    const [p] = shapePairs([stale], usdMap(prices, NOW), [], [], []);
+    expect(shapePairs([{ ...aiToken, primaryPool: null }, stale], usdMap(prices, NOW), new Map())).toHaveLength(1);
+    const [p] = shapePairs([stale], usdMap(prices, NOW), new Map());
     expect(p!.priceUsd).toBe(0);
     expect(p!.liquidity).toBeNull();
   });
@@ -538,7 +585,7 @@ describe("shapePairs", () => {
 
 describe("shapeQuotes", () => {
   it("counts pairs and sums 24h USD volume per quote", () => {
-    const pairs = shapePairs([aiToken], usdMap(prices, NOW), refs1h, refs24h, vol5m);
+    const pairs = shapePairs([aiToken], usdMap(prices, NOW), windowStats(windowRows, NOW));
     const [q] = shapeQuotes(quotes, pairs, usdMap(prices, NOW), prices, NOW);
     expect(q!.symbol).toBe("NVDA");
     expect(q!.pairs).toBe(1);
@@ -579,7 +626,7 @@ Expected: FAIL, module missing.
 `src/lib/envio/shape.ts`:
 ```ts
 import type { Candle, Holder, Origin, QuoteAsset, TokenPair, Trade } from "@/lib/types";
-import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, RefRow, SwapRow, TokenRow, VolRow } from "./queries";
+import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "./queries";
 
 export const STALE_AFTER_SEC = 259_200; // 3 days: distinguishes a dead aggregator from an off-hours hold
 const POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951";
@@ -619,17 +666,43 @@ export function usdMap(prices: QuotePriceRow[], nowSec: number): Map<string, num
   return m;
 }
 
+export type WindowStats = { ref1h: number | null; ref24h: number | null; vol24h: number };
+
+const HOUR = 3600;
+const DAY = 86400;
+
+/** Price at time t from h1 candles: the open of t's hour bucket, else the last close before that bucket, else null. */
+function refAt(rows: WindowRow[], t: number): number | null {
+  const bucket = Math.floor(t / HOUR) * HOUR;
+  const exact = rows.find((r) => r.t === bucket);
+  if (exact) return exact.open;
+  let last: WindowRow | undefined;
+  for (const r of rows) if (r.t < bucket && (!last || r.t > last.t)) last = r;
+  return last ? last.close : null;
+}
+
+/** Per-pool 1h and 24h reference prices and 24h quote volume from that pool's h1 candles, in any order. */
+export function windowStats(rows: WindowRow[], nowSec: number): Map<string, WindowStats> {
+  const byPool = new Map<string, WindowRow[]>();
+  for (const r of rows) {
+    const list = byPool.get(r.pool_id) ?? [];
+    list.push(r);
+    byPool.set(r.pool_id, list);
+  }
+  const out = new Map<string, WindowStats>();
+  for (const [poolId, list] of byPool) {
+    let vol24h = 0;
+    for (const r of list) if (r.t >= nowSec - DAY) vol24h += r.volumeQuote;
+    out.set(poolId, { ref1h: refAt(list, nowSec - HOUR), ref24h: refAt(list, nowSec - DAY), vol24h });
+  }
+  return out;
+}
+
 export function shapePairs(
   tokens: TokenRow[],
   usd: Map<string, number | null>,
-  refs1h: RefRow[],
-  refs24h: RefRow[],
-  vol5m: VolRow[],
+  windows: Map<string, WindowStats>,
 ): TokenPair[] {
-  const r1 = new Map(refs1h.map((r) => [r.pool_id, r.close]));
-  const r24 = new Map(refs24h.map((r) => [r.pool_id, r.close]));
-  const vol = new Map<string, number>();
-  for (const v of vol5m) vol.set(v.pool_id, (vol.get(v.pool_id) ?? 0) + v.volumeQuote);
   const out: TokenPair[] = [];
   for (const t of tokens) {
     const p = t.primaryPool;
@@ -641,8 +714,9 @@ export function shapePairs(
     const tvlQuote = units(p.tvlQuote, p.quote.decimals);
     const tvlToken = units(p.tvlToken, t.decimals);
     const liquidity = q === null || tvlQuote === null || tvlToken === null ? null : (tvlQuote + tvlToken * p.priceQuote) * q;
-    const ref1 = r1.get(p.id);
-    const ref24 = r24.get(p.id);
+    const w = windows.get(p.id);
+    const ref1 = w?.ref1h ?? undefined;
+    const ref24 = w?.ref24h ?? undefined;
     const origin = toOrigin(p.origin);
     out.push({
       id: t.id,
@@ -656,7 +730,7 @@ export function shapePairs(
       priceQuote: p.priceQuote,
       change1h: ref1 !== undefined && ref1 > 0 ? (p.priceQuote / ref1 - 1) * 100 : null,
       change24h: ref24 !== undefined && ref24 > 0 ? (p.priceQuote / ref24 - 1) * 100 : null,
-      vol24h: (vol.get(p.id) ?? 0) * usdPrice,
+      vol24h: (w?.vol24h ?? 0) * usdPrice,
       mcap: priceUsd * supply,
       fdv: priceUsd * supply,
       liquidity,
@@ -785,28 +859,45 @@ export const nowSec = () => Math.floor(Date.now() / 1000);
 ```ts
 import { gql } from "@/lib/envio/client";
 import { ttlCache } from "@/lib/envio/cache";
-import { PAIRS_QUERY, WINDOW_QUERY, type QuotePriceRow, type RefRow, type TokenRow, type VolRow } from "@/lib/envio/queries";
-import { shapePairs, usdMap } from "@/lib/envio/shape";
+import { PAIRS_QUERY, PAIRS_LAUNCHPAD_QUERY, windowQuery, type QuotePriceRow, type TokenRow, type WindowRow } from "@/lib/envio/queries";
+import { shapePairs, usdMap, windowStats } from "@/lib/envio/shape";
 import { cached, failure, nowSec } from "../_lib/respond";
 
 export const dynamic = "force-dynamic";
-const TTL = 15;
-const LIMIT = 1000;
+const TTL = 30;
+const LIMIT = 500;
+const WINDOW_BATCH = 50; // pools per aliased window request; 0.4 s measured
+const WINDOW_CONCURRENCY = 3;
 
-export async function loadPairs() {
-  return ttlCache("pairs", TTL * 1000, async () => {
+export type PairsScope = "all" | "launchpad";
+
+/** h1 candles for every pool, from a day before the 24h bucket so the day-ago reference has a fallback. */
+async function loadWindowRows(poolIds: string[], now: number): Promise<WindowRow[]> {
+  const since = Math.floor((now - 86400) / 3600) * 3600 - 86400;
+  const batches: string[][] = [];
+  for (let i = 0; i < poolIds.length; i += WINDOW_BATCH) batches.push(poolIds.slice(i, i + WINDOW_BATCH));
+  const rows: WindowRow[] = [];
+  for (let i = 0; i < batches.length; i += WINDOW_CONCURRENCY) {
+    const results = await Promise.all(batches.slice(i, i + WINDOW_CONCURRENCY).map((b) => gql<Record<string, WindowRow[]>>(windowQuery(b, since))));
+    for (const r of results) for (const list of Object.values(r)) rows.push(...list);
+  }
+  return rows;
+}
+
+export async function loadPairs(scope: PairsScope = "all") {
+  return ttlCache(`pairs:${scope}`, TTL * 1000, async () => {
     const now = nowSec();
-    const [tokens, window] = await Promise.all([
-      gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(PAIRS_QUERY, { limit: LIMIT }),
-      gql<{ ref1h: RefRow[]; ref24h: RefRow[]; vol24h: VolRow[] }>(WINDOW_QUERY, { h1: now - 3600, d1: now - 86400 }),
-    ]);
-    return shapePairs(tokens.Token, usdMap(tokens.QuotePrice, now), window.ref1h, window.ref24h, window.vol24h);
+    const tokens = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(scope === "launchpad" ? PAIRS_LAUNCHPAD_QUERY : PAIRS_QUERY, { limit: LIMIT });
+    const poolIds = tokens.Token.flatMap((t) => (t.primaryPool ? [t.primaryPool.id] : []));
+    const rows = await loadWindowRows(poolIds, now);
+    return shapePairs(tokens.Token, usdMap(tokens.QuotePrice, now), windowStats(rows, now));
   });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  const scope: PairsScope = new URL(req.url).searchParams.get("scope") === "launchpad" ? "launchpad" : "all";
   try {
-    return cached(await loadPairs(), TTL);
+    return cached(await loadPairs(scope), TTL);
   } catch (err) {
     return failure(err);
   }
@@ -862,10 +953,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
   try {
     const data = await ttlCache(`candles:${id}:${interval}`, TTL * 1000, async () => {
       const now = nowSec();
-      const t = await gql<{ Token_by_pk: TokenRow | null; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
-      const pool = t.Token_by_pk?.primaryPool;
+      const t = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
+      const pool = t.Token[0]?.primaryPool;
       if (!pool) return [];
-      const rows = await gql<{ Candle: CandleRow[] }>(CANDLES_QUERY, { pool: pool.id, interval, limit: 300 });
+      const rows = await gql<{ Candle: CandleRow[] }>(CANDLES_QUERY, { pool: pool.id, like: `${pool.id}-${interval}-%`, limit: 300 });
       // One current USD price per quote in M1; per-candle history is an M6 refinement.
       const usd = usdMap(t.QuotePrice, now).get(pool.quote_id) ?? null;
       return shapeCandles(rows.Candle, () => usd);
@@ -893,8 +984,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
   const id = address.toLowerCase();
   try {
     const data = await ttlCache(`trades:${id}`, TTL * 1000, async () => {
-      const t = await gql<{ Token_by_pk: TokenRow | null; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
-      const token = t.Token_by_pk;
+      const t = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
+      const token = t.Token[0];
       if (!token?.primaryPool) return [];
       const rows = await gql<{ Swap: SwapRow[] }>(TRADES_QUERY, { pool: token.primaryPool.id });
       return shapeTrades(rows.Swap, usdMap(t.QuotePrice, nowSec()).get(token.primaryPool.quote_id) ?? null, token.symbol);
@@ -922,8 +1013,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
   const id = address.toLowerCase();
   try {
     const data = await ttlCache(`holders:${id}`, TTL * 1000, async () => {
-      const t = await gql<{ Token_by_pk: TokenRow | null; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
-      const token = t.Token_by_pk;
+      const t = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
+      const token = t.Token[0];
       if (!token) return { holders: [], count: 0 };
       const rows = await gql<{ TokenBalance: BalanceRow[] }>(HOLDERS_QUERY, { token: id });
       return { holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)), count: token.holdersCount };
@@ -967,16 +1058,17 @@ export async function GET() {
 
 - [ ] **Step 4: Verify against the running indexer**
 
-With `ENVIO_GRAPHQL_URL` and `ENVIO_API_TOKEN` in `.env.local` pointing at the local (`http://localhost:8080/v1/graphql`) or cloud indexer, run `npm run dev` and:
+With `ENVIO_GRAPHQL_URL` and `ENVIO_GRAPHQL_KEY` in `.env.local` pointing at the cloud deployment (`https://indexer.hyperindex.xyz/37bf377/v1/graphql`; the key comes from `envio-cloud indexer security api-key list suitventures-indexer kobesergio --show-tokens`, a local `http://localhost:8080/v1/graphql` needs none), run `npm run dev` and:
 ```bash
 curl -s localhost:3000/api/health
 curl -s localhost:3000/api/pairs | head -c 600
+curl -s 'localhost:3000/api/pairs?scope=launchpad' | head -c 600
 curl -s localhost:3000/api/quotes | head -c 400
 curl -s "localhost:3000/api/tokens/0x2e8c31162b855a2ffa90f6f8634643ad6f111e18/candles?interval=1h" | head -c 400
 curl -s localhost:3000/api/tokens/0x2e8c31162b855a2ffa90f6f8634643ad6f111e18/trades | head -c 400
 curl -s localhost:3000/api/tokens/0x2e8c31162b855a2ffa90f6f8634643ad6f111e18/holders | head -c 400
 ```
-Expected: health `ok: true` with a small lag; pairs includes AI with `origin: "LONG"`, a USD price near DexScreener's, and non-null changes; candles oldest-first; trades and holders non-empty. If a query errors on `interval`, apply the enum variant noted under `queries.ts`. Then confirm `npx tsc --noEmit && npx eslint . && npm run build` pass.
+Expected: health `ok: true` with a small lag; pairs includes AI with `origin: "LONG"`, a USD price near DexScreener's, and non-null changes; candles oldest-first; trades and holders non-empty. The pairs route takes about 5 s cold for all origins and under 2 s for `scope=launchpad`; a `database query error` from Envio means a query filtered on `interval` or used `Token_by_pk`, which the Global Constraints forbid. Then confirm `npx tsc --noEmit && npx eslint . && npm run build` pass.
 
 - [ ] **Step 5: Commit**
 
@@ -1181,7 +1273,7 @@ With `NEXT_PUBLIC_DATA_SOURCE=envio` and the indexer env in `.env.local`, `npm r
 
 - [ ] **Step 5: Document and commit**
 
-Add to the frontend `README.md` under Data layer: `NEXT_PUBLIC_DATA_SOURCE=envio` with `ENVIO_GRAPHQL_URL`/`ENVIO_API_TOKEN` runs the live routes; `/api/health` reports indexer lag and stale quotes; watchlist and votes are browser-local until M2.
+Add to the frontend `README.md` under Data layer: `NEXT_PUBLIC_DATA_SOURCE=envio` with `ENVIO_GRAPHQL_URL`/`ENVIO_GRAPHQL_KEY` runs the live routes; `/api/health` reports indexer lag and stale quotes; watchlist and votes are browser-local until M2.
 
 ```bash
 git add -A
@@ -1189,4 +1281,4 @@ git commit -m "Add EnvioDataSource over the route handlers with local watchlist 
 Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ```
 
-Then set `NEXT_PUBLIC_DATA_SOURCE=envio`, `ENVIO_GRAPHQL_URL` and `ENVIO_API_TOKEN` on Vercel and redeploy: that is the M1 flip.
+Then set `NEXT_PUBLIC_DATA_SOURCE=envio`, `ENVIO_GRAPHQL_URL` and `ENVIO_GRAPHQL_KEY` on Vercel and redeploy: that is the M1 flip.
