@@ -40,6 +40,7 @@ describe("shapePairs", () => {
     expect(pair!.origin).toBe("LONG");
     expect(pair!.poolId).toBe(POOL);
     expect(pair!.tradeable).toBe(true);
+    expect(pair!.stale).toBe(false);
   });
   it("converts to USD", () => {
     expect(pair!.priceUsd).toBeCloseTo(0.000866 * 224.4, 9);
@@ -63,7 +64,10 @@ describe("shapePairs", () => {
     const stale = { ...aiToken, primaryPool: { ...aiToken.primaryPool!, quote_id: "0xstale" } };
     expect(shapePairs([{ ...aiToken, primaryPool: null }, stale], usdMap(prices, NOW), new Map())).toHaveLength(1);
     const [p] = shapePairs([stale], usdMap(prices, NOW), new Map());
+    expect(p!.stale).toBe(true);
     expect(p!.priceUsd).toBe(0);
+    expect(p!.mcap).toBe(0);
+    expect(p!.vol24h).toBe(0);
     expect(p!.liquidity).toBeNull();
   });
   it("labels hooks and fee tiers", () => {
@@ -94,6 +98,12 @@ describe("shapeCandles / shapeTrades / shapeHolders", () => {
     expect(out.map((c) => c.t)).toEqual([(NOW - 1800) * 1000, (NOW - 900) * 1000]);
     expect(out[1]!.c).toBeCloseTo(0.0009 * 224.4, 9);
     expect(out[1]!.v).toBeCloseTo(3 * 224.4, 9);
+  });
+  it("drops candles with no USD price instead of drawing them at zero", () => {
+    const out = shapeCandles(candles, (t) => (t === NOW - 1800 ? null : 224.4));
+    expect(out).toHaveLength(1);
+    expect(out[0]!.t).toBe((NOW - 900) * 1000);
+    expect(out[0]!.c).toBeCloseTo(0.0009 * 224.4, 9);
   });
   it("shapes trades with USD price and tx", () => {
     const [t] = shapeTrades(swaps, 224.4, "AI");

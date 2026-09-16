@@ -10,8 +10,7 @@ import {
   fmtAge,
   fmtInt,
   fmtPctOrDash,
-  fmtPrice,
-  fmtUsd,
+  fmtPriceOrDash,
   fmtUsdOrDash,
   toneClassOrFlat,
 } from "@/lib/format";
@@ -212,7 +211,9 @@ const PairRow = memo(function PairRow({
         <div className="hidden truncate text-[11.5px] text-ink-60 tablet:block">
           / {pair.quote}
         </div>
-        <div className="text-right">{fmtPrice(pair.priceUsd)}</div>
+        <div className="text-right">
+          {fmtPriceOrDash(pair.stale ? null : pair.priceUsd)}
+        </div>
         <div
           className={`hidden text-right tablet:block ${toneClassOrFlat(pair.change1h)}`}
         >
@@ -221,9 +222,15 @@ const PairRow = memo(function PairRow({
         <div className={`text-right ${toneClassOrFlat(pair.change24h)}`}>
           {fmtPctOrDash(pair.change24h)}
         </div>
-        <div className="text-right">{fmtUsd(pair.vol24h)}</div>
-        <div className="hidden text-right tablet:block">{fmtUsd(pair.mcap)}</div>
-        <div className="hidden text-right desktop:block">{fmtUsd(pair.fdv)}</div>
+        <div className="text-right">
+          {fmtUsdOrDash(pair.stale ? null : pair.vol24h)}
+        </div>
+        <div className="hidden text-right tablet:block">
+          {fmtUsdOrDash(pair.stale ? null : pair.mcap)}
+        </div>
+        <div className="hidden text-right desktop:block">
+          {fmtUsdOrDash(pair.stale ? null : pair.fdv)}
+        </div>
         <div className="hidden text-right tablet:block">
           {fmtUsdOrDash(pair.liquidity)}
         </div>
@@ -248,8 +255,12 @@ const PairRow = memo(function PairRow({
                 {fmtPctOrDash(pair.change1h)}
               </span>
             </Detail>
-            <Detail label="Mcap">{fmtUsd(pair.mcap)}</Detail>
-            <Detail label="FDV">{fmtUsd(pair.fdv)}</Detail>
+            <Detail label="Mcap">
+              {fmtUsdOrDash(pair.stale ? null : pair.mcap)}
+            </Detail>
+            <Detail label="FDV">
+              {fmtUsdOrDash(pair.stale ? null : pair.fdv)}
+            </Detail>
             <Detail label="Liquidity">{fmtUsdOrDash(pair.liquidity)}</Detail>
             <Detail label="Holders">{fmtInt(pair.holders)}</Detail>
             <Detail label="Age">{age}</Detail>

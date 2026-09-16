@@ -112,6 +112,7 @@ export function shapePairs(
       mcap: priceUsd * supply,
       fdv: priceUsd * supply,
       liquidity,
+      stale: q === null,
       holders: t.holdersCount,
       createdAt: p.createdAt * 1000,
       bull: 0,
@@ -153,9 +154,11 @@ export function shapeQuotes(
 export function shapeCandles(rows: CandleRow[], usdAtTime: (t: number) => number | null): Candle[] {
   return [...rows]
     .sort((a, b) => a.t - b.t)
-    .map((c) => {
-      const u = usdAtTime(c.t) ?? 0;
-      return { t: c.t * 1000, o: c.open * u, h: c.high * u, l: c.low * u, c: c.close * u, v: c.volumeQuote * u };
+    .flatMap((c) => {
+      const u = usdAtTime(c.t);
+      // No USD price for this candle: an empty chart beats a chart drawn on the floor.
+      if (u === null) return [];
+      return [{ t: c.t * 1000, o: c.open * u, h: c.high * u, l: c.low * u, c: c.close * u, v: c.volumeQuote * u }];
     });
 }
 

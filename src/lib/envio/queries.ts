@@ -37,6 +37,8 @@ const POOL_ID = /^0x[0-9a-f]{64}$/;
  * Pool ids are validated before interpolation, so nothing user-supplied reaches the document.
  */
 export function windowQuery(poolIds: string[], sinceSec: number): string {
+  // An empty selection set is a parse error at the indexer, not an empty result.
+  if (poolIds.length === 0) throw new Error("windowQuery needs at least one pool id");
   const parts = poolIds.map((id, i) => {
     if (!POOL_ID.test(id)) throw new Error(`bad pool id ${id}`);
     return `w${i}: Candle(where: { pool_id: { _eq: "${id}" }, id: { _like: "${id}-h1-%" }, t: { _gte: ${Math.floor(sinceSec)} } }, order_by: { t: asc }) { pool_id t open close volumeQuote }`;

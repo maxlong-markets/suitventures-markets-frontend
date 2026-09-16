@@ -10,7 +10,6 @@ import {
   fmtClock,
   fmtISODate,
   fmtPrice,
-  fmtUsd,
   fmtUsdOrDash,
   short,
 } from "@/lib/format";
@@ -145,7 +144,7 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
         ? liquidity
         : `${liquidity} · ${fmtAmt(pair.liquidity / 2 / quoteUsd, 2)} ${pair.quote}`,
     ],
-    ["Quote", `${pair.quote} · ${fmtUsd(quoteUsd)}`],
+    ["Quote", `${pair.quote} · ${fmtUsdOrDash(pair.stale ? null : quoteUsd)}`],
   ];
   return (
     <>

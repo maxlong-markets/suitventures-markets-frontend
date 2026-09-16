@@ -47,6 +47,11 @@ export interface TokenPair {
   fdv: number;
   /** USD; null while liquidity accounting is unavailable */
   liquidity: number | null;
+  /**
+   * true when the quote has no usable USD price (no feed, or a feed older than
+   * 3 days); the USD fields then read 0 and render as a dash
+   */
+  stale?: boolean;
   holders: number;
   /** unix ms → age */
   createdAt: number;

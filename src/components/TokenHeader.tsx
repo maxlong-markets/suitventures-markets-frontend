@@ -5,7 +5,7 @@ import { useAppState } from "@/context/AppState";
 import type { TokenPair } from "@/lib/types";
 import {
   fmtPctOrDash,
-  fmtPrice,
+  fmtPriceOrDash,
   fmtQuote,
   short,
   toneClassOrFlat,
@@ -71,7 +71,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
       <div className="flex flex-none flex-col items-start gap-[14px] tablet:flex-row tablet:items-center tablet:justify-between tablet:gap-7">
         <div className="font-mono tabular-nums">
           <div className="text-[28px] leading-none tracking-[-0.01em]">
-            {fmtPrice(pair.priceUsd)}
+            {fmtPriceOrDash(pair.stale ? null : pair.priceUsd)}
           </div>
           <div className="mt-[5px] whitespace-nowrap text-[11.5px]">
             <span className={toneClassOrFlat(pair.change24h)}>
