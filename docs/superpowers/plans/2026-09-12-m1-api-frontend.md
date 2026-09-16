@@ -19,6 +19,7 @@ Measured against the full Envio Cloud deployment (commit 2fa2043, 859 M events, 
 - `Token_by_pk` replaced by a filtered `Token` query (composite key).
 - Pairs: `LIMIT` 500, TTL 30 s, optional `?scope=launchpad` (Pons and LONG tokens only; 0.5 s against 4 s for all origins). Change figures use hourly buckets: price now against the open of the hour bucket 1 h and 24 h ago, falling back to the last close before that bucket.
 - The indexer's Envio release branch is `envio`; pushes to `main` no longer deploy.
+- Staleness must exempt pinned quotes, or 44% of the table loses its USD price (see Global Constraints).
 
 ## Global Constraints
 
@@ -30,7 +31,8 @@ Measured against the full Envio Cloud deployment (commit 2fa2043, 859 M events, 
 - Tokens are keyed by **address** (`TokenPair.id`, lowercase). Routes are `/t/[address]`.
 - `Origin` = `"LONG" | "Pons" | "Uniswap" | "Other" | "SUIT" | "SV"` replaces `Launchpad` everywhere. `tradeable` is `true` for every pool in M1 (the Quoter check is M2).
 - `change1h`, `change24h` and `liquidity` are `number | null`; null renders as a dash, sorts last, and is excluded from the Gainers preset.
-- A quote whose `QuotePrice.updatedAt` is older than 3 days (259,200 s) is stale: its `usdPrice` is reported as `null` and every USD figure derived from it is `null`.
+- A quote whose `QuotePrice.updatedAt` is older than 3 days (259,200 s) is stale: its `usdPrice` is reported as `null` and every USD figure derived from it is `null`. **A pinned row is never stale**: USDG carries `aggregator: "pinned"` and `usdPrice: 1` with the `updatedAt` of the block where it was first seen, 99 days old on the deployed indexer, so the age test must skip it. Without that exemption 18,064 of the 40,643 listed tokens (44%) lose their USD price, USDG being the largest quote asset.
+- 29 of the 54 configured quote assets have no `QuotePrice` row at all, because they have no Chainlink feed on this chain (AMC, DJT, GLD, RDDT, HIMS and 24 more). That is 5,250 more listed tokens, 13%, which currently render as `$0.00`. Deciding what those rows show is an open item for MAXLONG, not a plan change; until it is decided the shaping keeps them at 0 and the table must not claim the figure is a price.
 - Cache headers on every data route: `Cache-Control: public, s-maxage=<ttl>, stale-while-revalidate=60`; in-process TTL cache with the same ttl. Envio errors return HTTP 503 with `Retry-After: 15`.
 - Keep the lint, type-check and build green after every task: `npx eslint .`, `npx tsc --noEmit`, `npm run build`.
 - Commit after every task with the trailer:
@@ -382,13 +384,13 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 - Consumes: `TokenPair`, `QuoteAsset`, `Candle`, `Trade`, `Holder`, `Origin` (Task 1).
 - Produces:
   - `queries.ts`: `PAIRS_QUERY`, `PAIRS_LAUNCHPAD_QUERY`, `windowQuery(poolIds, sinceSec)`, `QUOTES_QUERY`, `CANDLES_QUERY`, `TOKEN_QUERY`, `TRADES_QUERY`, `HOLDERS_QUERY`, `HEALTH_QUERY` and row types `QuotePriceRow`, `QuoteRow`, `PoolRow`, `TokenRow`, `WindowRow`, `CandleRow`, `SwapRow`, `BalanceRow`.
-  - `shape.ts`: `STALE_AFTER_SEC`; `usdMap(prices, nowSec): Map<string, number | null>`; `WindowStats`; `windowStats(rows, nowSec): Map<string, WindowStats>`; `shapePairs(tokens, usd, windows): TokenPair[]`; `shapeQuotes(quotes, pairs, usd, prices, nowSec): QuoteAsset[]`; `shapeCandles(rows, usdAtTime): Candle[]`; `shapeTrades(rows, usd, ticker): Trade[]`; `shapeHolders(rows, decimals, totalSupply): Holder[]`; `hookLabel(origin)`; `feeTierLabel(fee)`.
+  - `shape.ts`: `STALE_AFTER_SEC`; `isStale(row, nowSec)`; `usdMap(prices, nowSec): Map<string, number | null>`; `WindowStats`; `windowStats(rows, nowSec): Map<string, WindowStats>`; `shapePairs(tokens, usd, windows): TokenPair[]`; `shapeQuotes(quotes, pairs, usd, prices, nowSec): QuoteAsset[]`; `shapeCandles(rows, usdAtTime): Candle[]`; `shapeTrades(rows, usd, ticker): Trade[]`; `shapeHolders(rows, decimals, totalSupply): Holder[]`; `hookLabel(origin)`; `feeTierLabel(fee)`.
 
 - [ ] **Step 1: Write the queries**
 
 `src/lib/envio/queries.ts`:
 ```ts
-export type QuotePriceRow = { id: string; usdPrice: number; updatedAt: number };
+export type QuotePriceRow = { id: string; usdPrice: number; updatedAt: number; aggregator: string };
 export type QuoteRow = { id: string; symbol: string; name: string; decimals: number; address: string };
 export type PoolRow = {
   id: string; quote_id: string; tokenIsCurrency0: boolean; hooks: string; fee: number; tickSpacing: number;
@@ -410,13 +412,13 @@ const TOKEN_FIELDS = `id address symbol name decimals totalSupply holdersCount o
 export const PAIRS_QUERY = `
 query Pairs($limit: Int!) {
   Token(where: { primaryPool: { swapCount: { _gt: 0 } } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
-  QuotePrice { id usdPrice updatedAt }
+  QuotePrice { id usdPrice updatedAt aggregator }
 }`;
 
 export const PAIRS_LAUNCHPAD_QUERY = `
 query PairsLaunchpad($limit: Int!) {
   Token(where: { origin: { _in: [LONG, Pons] }, primaryPool: { swapCount: { _gt: 0 } } }, order_by: { primaryPool: { lastSwapAt: desc_nulls_last } }, limit: $limit) { ${TOKEN_FIELDS} }
-  QuotePrice { id usdPrice updatedAt }
+  QuotePrice { id usdPrice updatedAt aggregator }
 }`;
 
 const POOL_ID = /^0x[0-9a-f]{64}$/;
@@ -435,7 +437,7 @@ export function windowQuery(poolIds: string[], sinceSec: number): string {
 }
 
 export const QUOTES_QUERY = `
-query Quotes { Quote { id symbol name decimals address } QuotePrice { id usdPrice updatedAt } }`;
+query Quotes { Quote { id symbol name decimals address } QuotePrice { id usdPrice updatedAt aggregator } }`;
 
 export const CANDLES_QUERY = `
 query Candles($pool: String!, $like: String!, $limit: Int!) {
@@ -445,7 +447,7 @@ query Candles($pool: String!, $like: String!, $limit: Int!) {
 export const TOKEN_QUERY = `
 query Token($id: String!) {
   Token(where: { id: { _eq: $id } }, limit: 1) { ${TOKEN_FIELDS} }
-  QuotePrice { id usdPrice updatedAt }
+  QuotePrice { id usdPrice updatedAt aggregator }
 }`;
 
 export const TRADES_QUERY = `
@@ -459,7 +461,7 @@ query Holders($token: String!) {
 }`;
 
 export const HEALTH_QUERY = `
-query Health { chain_metadata { chain_id latest_processed_block block_height } QuotePrice { id updatedAt } }`;
+query Health { chain_metadata { chain_id latest_processed_block block_height } QuotePrice { id updatedAt aggregator } }`;
 ```
 Do not reintroduce an `interval` filter or `Token_by_pk`: both fail on the deployed schema (see Global Constraints). `windowQuery` builds the document itself because Hasura has no variable type for a list of aliased selections; the regex check is what keeps that safe.
 
@@ -474,10 +476,12 @@ export const AI = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18";
 export const POOL = "0xcbdfea90430a30ee4469c9902e120a77e7c7e4711d5643671c1d1957f2f1ce27";
 export const NOW = 1_757_700_000;
 
+export const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 export const prices: QuotePriceRow[] = [
-  { id: NVDA, usdPrice: 224.4, updatedAt: NOW - 600 },
-  { id: "0x5fc5360d0400a0fd4f2af552add042d716f1d168", usdPrice: 1, updatedAt: NOW - 10 },
-  { id: "0xstale", usdPrice: 50, updatedAt: NOW - 400_000 },
+  { id: NVDA, usdPrice: 224.4, updatedAt: NOW - 600, aggregator: "0xc9d16e4f2569b9e3ea0468fd85844953713dc2a2" },
+  // USDG is pinned at 1 and its updatedAt never moves: 99 days old on the deployed indexer.
+  { id: USDG, usdPrice: 1, updatedAt: NOW - 8_500_000, aggregator: "pinned" },
+  { id: "0xstale", usdPrice: 50, updatedAt: NOW - 400_000, aggregator: "0xdeadfeed" },
 ];
 
 export const aiToken: TokenRow = {
@@ -512,13 +516,17 @@ export const balances: BalanceRow[] = [
 ```ts
 import { describe, it, expect } from "vitest";
 import { usdMap, windowStats, shapePairs, shapeQuotes, shapeCandles, shapeTrades, shapeHolders, hookLabel, feeTierLabel } from "./shape";
-import { AI, NVDA, POOL, NOW, aiToken, prices, windowRows, quotes, candles, swaps, balances } from "./fixtures";
+import { AI, NVDA, USDG, POOL, NOW, aiToken, prices, windowRows, quotes, candles, swaps, balances } from "./fixtures";
 
 describe("usdMap", () => {
   it("nulls stale quotes", () => {
     const m = usdMap(prices, NOW);
     expect(m.get(NVDA)).toBe(224.4);
     expect(m.get("0xstale")).toBeNull();
+  });
+  it("keeps a pinned quote whatever its age", () => {
+    // USDG quotes 44% of the listed tokens; treating its frozen updatedAt as stale wipes their USD prices.
+    expect(usdMap(prices, NOW).get(USDG)).toBe(1);
   });
 });
 
@@ -659,10 +667,15 @@ export function feeTierLabel(fee: number): string {
   return fee === DYNAMIC_FEE_FLAG ? "Dynamic" : `${(fee / 10_000).toFixed(2)}%`;
 }
 
+/** A pinned row (USDG) has a frozen updatedAt and is never stale; a real feed goes stale after 3 days. */
+export function isStale(p: { updatedAt: number; aggregator: string }, nowSec: number): boolean {
+  return p.aggregator !== "pinned" && nowSec - p.updatedAt > STALE_AFTER_SEC;
+}
+
 /** quote id → USD price, null when the feed is stale. */
 export function usdMap(prices: QuotePriceRow[], nowSec: number): Map<string, number | null> {
   const m = new Map<string, number | null>();
-  for (const p of prices) m.set(p.id, nowSec - p.updatedAt > STALE_AFTER_SEC ? null : p.usdPrice);
+  for (const p of prices) m.set(p.id, isStale(p, nowSec) ? null : p.usdPrice);
   return m;
 }
 
@@ -758,14 +771,14 @@ export function shapeQuotes(
     const cur = bySymbol.get(p.quote) ?? { pairs: 0, vol: 0 };
     bySymbol.set(p.quote, { pairs: cur.pairs + 1, vol: cur.vol + p.vol24h });
   }
-  const updated = new Map(prices.map((p) => [p.id, p.updatedAt]));
+  const byId = new Map(prices.map((p) => [p.id, p]));
   return quotes.map((q) => ({
     symbol: q.symbol,
     name: q.name,
     address: q.address as `0x${string}`,
     decimals: q.decimals,
     usdPrice: usd.get(q.id) ?? 0,
-    stale: (updated.get(q.id) ?? 0) < nowSec - STALE_AFTER_SEC,
+    stale: (() => { const p = byId.get(q.id); return p ? isStale(p, nowSec) : true; })(),
     pairs: bySymbol.get(q.symbol)?.pairs ?? 0,
     vol24h: bySymbol.get(q.symbol)?.vol ?? 0,
   }));
@@ -1031,14 +1044,14 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
 import { NextResponse } from "next/server";
 import { gql } from "@/lib/envio/client";
 import { HEALTH_QUERY } from "@/lib/envio/queries";
-import { STALE_AFTER_SEC } from "@/lib/envio/shape";
+import { isStale } from "@/lib/envio/shape";
 import { nowSec } from "../_lib/respond";
 
 export const dynamic = "force-dynamic";
 
 type HealthRows = {
   chain_metadata: { chain_id: number; latest_processed_block: number; block_height: number }[];
-  QuotePrice: { id: string; updatedAt: number }[];
+  QuotePrice: { id: string; updatedAt: number; aggregator: string }[];
 };
 
 export async function GET() {
@@ -1046,7 +1059,7 @@ export async function GET() {
     const h = await gql<HealthRows>(HEALTH_QUERY);
     const chain = h.chain_metadata.find((c) => c.chain_id === 4663);
     const now = nowSec();
-    const quotes = h.QuotePrice.map((q) => ({ id: q.id, ageSec: now - q.updatedAt, stale: now - q.updatedAt > STALE_AFTER_SEC }));
+    const quotes = h.QuotePrice.map((q) => ({ id: q.id, ageSec: now - q.updatedAt, stale: isStale(q, now) }));
     const lag = chain ? chain.block_height - chain.latest_processed_block : null;
     const ok = lag !== null && lag < 500 && quotes.every((q) => !q.stale);
     return NextResponse.json({ ok, lag, quotes }, { headers: { "Cache-Control": "no-store" } });
