@@ -52,10 +52,12 @@ create table market.pools (
   swap_count int not null,
   last_swap_at int,
   volume_quote_all_time double precision not null,
-  synced_at int not null
+  synced_at int not null,
+  synced_to int not null default 0
 );
 create index pools_token_last_swap on market.pools (token_id, last_swap_at desc);
 create index pools_last_swap on market.pools (last_swap_at desc nulls last);
+create index pools_unsynced on market.pools (last_swap_at desc) where synced_to < last_swap_at;
 
 create table market.swaps (
   tx_hash text not null,
