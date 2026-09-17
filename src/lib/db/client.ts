@@ -84,7 +84,13 @@ function wrap(sql: postgres.ISql, begin: Begin, end: () => Promise<void>): Db {
 
 /** porsager `postgres` with `prepare: false` (Supavisor transaction mode), `max` default 4, `idle_timeout` 20, `connect_timeout` 10. */
 export function createDb(url: string, opts: { max?: number } = {}): Db {
-  const sql = postgres(url, { prepare: false, max: opts.max ?? 4, idle_timeout: 20, connect_timeout: 10 });
+  let sql: postgres.Sql;
+  try {
+    sql = postgres(url, { prepare: false, max: opts.max ?? 4, idle_timeout: 20, connect_timeout: 10 });
+  } catch {
+    // Node's URL parser attaches the offending string to its TypeError as `input`; nothing from the driver's error may travel, not even as a cause.
+    throw new DbUnavailableError("DATABASE_URL is not a valid connection string");
+  }
   return wrap(sql, begins(sql), () => sql.end({ timeout: 5 }));
 }
 
