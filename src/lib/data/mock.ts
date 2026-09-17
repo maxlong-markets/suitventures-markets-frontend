@@ -174,11 +174,18 @@ export class MockDataSource implements MarketsDataSource {
     if (this.latencyMs > 0) await sleep(this.latencyMs);
   }
 
-  private pair(id: string): TokenPair {
+  private pairOrThrow(id: string): TokenPair {
     const key = id.toLowerCase();
     const found = this.pairList.find((p) => p.id === key);
     if (!found) throw new Error(`Unknown pair: ${id}`);
     return found;
+  }
+
+  /** The list's own row, or null: the mock never knows a token outside its seed. */
+  async pair(id: string): Promise<TokenPair | null> {
+    await this.delay();
+    const found = this.pairList.find((p) => p.id === id.toLowerCase());
+    return found ? { ...found } : null;
   }
 
   async quotes(): Promise<QuoteAsset[]> {
@@ -192,7 +199,7 @@ export class MockDataSource implements MarketsDataSource {
   }
 
   async candles(id: string, interval: Interval): Promise<Candle[]> {
-    const pair = this.pair(id);
+    const pair = this.pairOrThrow(id);
     const key = `${pair.id}|${interval}`;
     let out = this.candleCache.get(key);
     if (!out) {
@@ -204,7 +211,7 @@ export class MockDataSource implements MarketsDataSource {
   }
 
   async trades(id: string): Promise<Trade[]> {
-    const pair = this.pair(id);
+    const pair = this.pairOrThrow(id);
     let out = this.tradeCache.get(pair.id);
     if (!out) {
       out = generateTrades(pair, this.now);
@@ -215,7 +222,7 @@ export class MockDataSource implements MarketsDataSource {
   }
 
   async holders(id: string): Promise<Holder[]> {
-    const pair = this.pair(id);
+    const pair = this.pairOrThrow(id);
     let out = this.holderCache.get(pair.id);
     if (!out) {
       out = generateHolders(pair);
@@ -234,7 +241,7 @@ export class MockDataSource implements MarketsDataSource {
     slippagePct: number,
   ): Promise<Quote> {
     return localQuote(
-      this.pair(id),
+      this.pairOrThrow(id),
       side,
       amount,
       denom,
@@ -301,7 +308,7 @@ export class MockDataSource implements MarketsDataSource {
     signature: string,
   ): Promise<void> {
     requireSignature(signature);
-    const pair = this.pair(id);
+    const pair = this.pairOrThrow(id);
     const book = { ...this.loadVotes(address) };
     const prev = book[pair.id];
     if (prev) pair[prev] -= 1;

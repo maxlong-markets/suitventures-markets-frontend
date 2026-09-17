@@ -25,11 +25,11 @@ export function resolvePool(t: TokenRow): PoolRow | null {
   return fallback && isSanePool(fallback) ? fallback : null;
 }
 
-function toOrigin(s: string): Origin {
+export function toOrigin(s: string): Origin {
   return ORIGINS.has(s as Origin) ? (s as Origin) : "Other";
 }
 
-function units(raw: string | null, decimals: number): number | null {
+export function units(raw: string | null, decimals: number): number | null {
   if (raw === null) return null;
   return Number(BigInt(raw)) / 10 ** decimals;
 }

@@ -6,6 +6,7 @@ import type { Address, Denom, Interval, Side, TokenPair } from "@/lib/types";
 
 export const keys = {
   pairs: ["pairs"] as const,
+  pair: (id: string) => ["pair", id] as const,
   quotes: ["quotes"] as const,
   candles: (id: string, interval: Interval) =>
     ["candles", id, interval] as const,
@@ -22,10 +23,21 @@ export function usePairs() {
 }
 
 export function usePair(id: string) {
+  const ds = useDataSource();
   const query = usePairs();
   const key = id.toLowerCase();
-  const pair: TokenPair | undefined = query.data?.find((p) => p.id === key);
-  return { ...query, pair };
+  const listed: TokenPair | undefined = query.data?.find((p) => p.id === key);
+  // Only once the list has settled without the id: a token outside the 500-row window still has a page.
+  const fallback = useQuery({
+    queryKey: keys.pair(key),
+    queryFn: () => ds.pair(key),
+    staleTime: 30_000,
+    enabled: !query.isPending && listed === undefined,
+  });
+  const pair: TokenPair | undefined = listed ?? fallback.data ?? undefined;
+  // TokenView reads isPending for its skeleton; both flags cover both queries, so a deep link
+  // never flashes "No token" while the fallback is still in flight.
+  return { ...query, pair, isPending: query.isPending || fallback.isLoading, isLoading: query.isLoading || fallback.isLoading };
 }
 
 export function useQuotes() {

@@ -1,8 +1,6 @@
-import { gql } from "@/lib/envio/client";
 import { ttlCache } from "@/lib/envio/cache";
-import { TRADES_QUERY, TOKEN_QUERY, type QuotePriceRow, type SwapRow, type TokenRow } from "@/lib/envio/queries";
-import { resolvePool, shapeTrades, usdMap } from "@/lib/envio/shape";
-import { badRequest, cached, failure, isAddress, nowSec } from "../../../_lib/respond";
+import { getBackend } from "@/lib/market/backend";
+import { badRequest, cached, failure, isAddress } from "../../../_lib/respond";
 
 export const dynamic = "force-dynamic";
 const TTL = 10;
@@ -12,15 +10,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
   const id = address.toLowerCase();
   if (!isAddress(id)) return badRequest("bad address");
   try {
-    const data = await ttlCache(`trades:${id}`, TTL * 1000, async () => {
-      const t = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
-      const token = t.Token[0];
-      const pool = token ? resolvePool(token) : null;
-      if (!token || !pool) return [];
-      const rows = await gql<{ Swap: SwapRow[] }>(TRADES_QUERY, { pool: pool.id });
-      return shapeTrades(rows.Swap, usdMap(t.QuotePrice, nowSec()).get(pool.quote_id) ?? null, token.symbol);
-    });
-    return cached(data, TTL);
+    return cached(await ttlCache(`trades:${id}`, TTL * 1000, () => getBackend().trades(id)), TTL);
   } catch (err) {
     return failure(err);
   }

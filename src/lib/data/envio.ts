@@ -19,6 +19,13 @@ export class EnvioDataSource implements MarketsDataSource {
     this.pairsCache = { at: Date.now(), list };
     return list;
   }
+  async pair(id: string): Promise<TokenPair | null> {
+    const key = id.toLowerCase();
+    const res = await fetch(`/api/tokens/${key}`, { cache: "no-store" });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`/api/tokens/${key}: ${res.status}`);
+    return (await res.json()) as TokenPair;
+  }
   quotes(): Promise<QuoteAsset[]> {
     return getJson("/api/quotes");
   }

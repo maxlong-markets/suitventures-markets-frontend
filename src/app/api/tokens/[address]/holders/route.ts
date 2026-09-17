@@ -1,7 +1,5 @@
-import { gql } from "@/lib/envio/client";
 import { ttlCache } from "@/lib/envio/cache";
-import { HOLDERS_QUERY, TOKEN_QUERY, type BalanceRow, type QuotePriceRow, type TokenRow } from "@/lib/envio/queries";
-import { shapeHolders } from "@/lib/envio/shape";
+import { getBackend } from "@/lib/market/backend";
 import { badRequest, cached, failure, isAddress } from "../../../_lib/respond";
 
 export const dynamic = "force-dynamic";
@@ -12,14 +10,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
   const id = address.toLowerCase();
   if (!isAddress(id)) return badRequest("bad address");
   try {
-    const data = await ttlCache(`holders:${id}`, TTL * 1000, async () => {
-      const t = await gql<{ Token: TokenRow[]; QuotePrice: QuotePriceRow[] }>(TOKEN_QUERY, { id });
-      const token = t.Token[0];
-      if (!token) return { holders: [], count: 0 };
-      const rows = await gql<{ TokenBalance: BalanceRow[] }>(HOLDERS_QUERY, { token: id });
-      return { holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)), count: token.holdersCount };
-    });
-    return cached(data, TTL);
+    return cached(await ttlCache(`holders:${id}`, TTL * 1000, () => getBackend().holders(id)), TTL);
   } catch (err) {
     return failure(err);
   }

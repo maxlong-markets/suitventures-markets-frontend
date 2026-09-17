@@ -104,6 +104,8 @@ export interface Quote {
 export interface MarketsDataSource {
   quotes(): Promise<QuoteAsset[]>;
   pairs(): Promise<TokenPair[]>;
+  /** One token by address, listed or not; null when the source does not know it. */
+  pair(id: string): Promise<TokenPair | null>;
   candles(id: string, interval: Interval): Promise<Candle[]>;
   trades(id: string): Promise<Trade[]>;
   holders(id: string): Promise<Holder[]>;
