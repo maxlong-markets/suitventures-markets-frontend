@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import { POOL_A, QUOTE, T0, TOKEN_A, TOKEN_B, addr, balanceRec, candleRec, poolId, poolRec, priceRec, quoteRec, swapRec, tokenRec, txHash } from "./testRows";
-import { insertSwaps, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
+import { insertSwaps, markSynced, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
 
 let db: Db;
 beforeAll(async () => { db = await testDb(); });
@@ -42,6 +42,27 @@ describe("upsertPools", () => {
     await upsertPools(db, [poolRec({ swapCount: 9, lastSwapAt: T0 + 900, tvlToken: null })], T0 + 1);
     expect(await db.query("select swap_count, last_swap_at, tvl_token from market.pools")).toEqual([{ swap_count: 9, last_swap_at: T0 + 900, tvl_token: null }]);
     expect(await count("pools")).toBe(1);
+  });
+  it("defaults synced_to to 0 and never touches it afterwards", async () => {
+    await upsertPools(db, [poolRec()], T0);
+    expect(await db.query("select synced_to from market.pools")).toEqual([{ synced_to: 0 }]);
+    await db.query("update market.pools set synced_to = $1", [T0 + 400]);
+    await upsertPools(db, [poolRec({ swapCount: 9 })], T0 + 1);
+    expect(await db.query("select synced_to, swap_count from market.pools")).toEqual([{ synced_to: T0 + 400, swap_count: 9 }]);
+  });
+});
+
+describe("markSynced", () => {
+  it("raises synced_to of the pools it names, never lowers it, and counts the rows it touched", async () => {
+    await upsertPools(db, [poolRec(), poolRec({ id: poolId(0x12) })], T0);
+    expect(await markSynced(db, [POOL_A], T0 + 500)).toBe(1);
+    expect(await markSynced(db, [POOL_A, poolId(0x12)], T0 + 400)).toBe(2);
+    expect(await db.query("select id, synced_to from market.pools order by id")).toEqual([
+      { id: POOL_A, synced_to: T0 + 500 },
+      { id: poolId(0x12), synced_to: T0 + 400 },
+    ]);
+    expect(await markSynced(db, [], T0 + 900)).toBe(0);
+    expect(await markSynced(db, [poolId(0x99)], T0 + 900)).toBe(0);
   });
 });
 

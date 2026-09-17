@@ -49,6 +49,7 @@ export async function upsertQuotes(db: Db, quotes: readonly QuoteRec[], prices: 
   return rows.length;
 }
 
+/** `synced_to` is deliberately absent: it belongs to markSynced and survives every upsert (0, never, on insert). */
 export async function upsertPools(db: Db, pools: readonly PoolRec[], syncedAt: number): Promise<number> {
   const rows = dedupe(pools, (p) => p.id);
   for (const c of chunks(rows)) {
@@ -75,6 +76,16 @@ export async function upsertPools(db: Db, pools: readonly PoolRec[], syncedAt: n
       ],
     );
   }
+  return rows.length;
+}
+
+/** Raises synced_to, the time up to which the pools' swaps and candles are stored, to syncedTo where it is lower; never lowers it. Returns the rows matched. */
+export async function markSynced(db: Db, poolIds: readonly string[], syncedTo: number): Promise<number> {
+  if (poolIds.length === 0) return 0;
+  const rows = await db.query(
+    "update market.pools set synced_to = greatest(synced_to, $1::int) where id = any($2::text[]) returning id",
+    [syncedTo, [...poolIds]],
+  );
   return rows.length;
 }
 
