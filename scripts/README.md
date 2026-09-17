@@ -26,7 +26,7 @@ Starting from scratch needs empty market tables, not just a deleted checkpoint: 
 phases load with COPY, which has no `on conflict`, so a fresh run over rows from an earlier attempt stops on the
 first duplicate key. A fresh start is, in the Supabase SQL editor,
 
-    truncate market.swaps, market.candles, market.token_balances, market.holder_refresh
+    truncate market.swaps, market.candles, market.token_balances, market.holder_refresh Reset the sync state in the same step, because its cursors and head-block mark never move backwards on their own: `update market.sync_state set cursor = 0, cursor2 = 0, cursor_text = '', phase = '', head_block = 0`, with both crons paused until the seed finishes.
 
 (quotes, tokens and pools are upserted and may stay), then delete `.seed/checkpoint.json` and run the seed again.
 
