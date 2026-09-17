@@ -65,8 +65,9 @@ async function upsertBalances(db: Db, rows: readonly BalanceRec[]): Promise<numb
 }
 
 /**
- * Runs the phases from checkpoint.phase; big tables walk `idRanges(workers)` concurrently with COPY per page
- * and save the last id per range after each page; "finish" trims balances to holdersKept per token, recomputes
+ * Runs the phases from checkpoint.phase, saving the checkpoint at each phase start; big tables walk
+ * `idRanges(workers)` concurrently with COPY per page and save the last id per range after each page; "finish"
+ * trims balances to holdersKept per token, recomputes
  * every listed pool, sets sync_state.market cursor and cursor2 to startedAt − 600, and marks nightly ok.
  */
 export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Promise<Checkpoint> {
@@ -84,8 +85,9 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
     const start = cp.ranges[range.key];
     if (start === RANGE_DONE) return;
     let after = start ?? range.from;
-    // A resumed range may re-read the page whose COPY landed before its checkpoint was saved.
-    let idempotent = start !== undefined;
+    // A resumed range re-reads the page whose COPY landed before its checkpoint was saved; a range without a
+    // stored cursor in a phase the checkpoint had already entered may have copied its first page the same way.
+    let idempotent = start !== undefined || opts.checkpoint.phase === phase;
     for (;;) {
       const batch = await page(after, range.to, opts.pageLimit);
       if (batch.length > 0) {
@@ -109,6 +111,8 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
   for (const phase of SEED_PHASES.slice(SEED_PHASES.indexOf(cp.phase))) {
     if (cp.done.includes(phase)) continue;
     cp.phase = phase;
+    // Saved before any page lands, so a resume knows the phase had begun and treats every first page as a replay.
+    await save();
     switch (phase) {
       case "quotes": {
         const { quotes, prices } = await source.quotes();

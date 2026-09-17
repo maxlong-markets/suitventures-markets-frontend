@@ -3,6 +3,7 @@ import type { Db } from "@/lib/db/client";
 import { FakeSource } from "@/lib/sync/fakeSource";
 import type { BalanceRec, CandleRec, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { readState } from "@/lib/sync/state";
+import { insertSwaps } from "@/lib/sync/writers";
 import { testDb } from "@/test/db";
 import { idRanges, newCheckpoint, runSeed, SEED_PHASES, type Checkpoint } from "./seed";
 
@@ -93,6 +94,23 @@ describe("runSeed", () => {
     expect(await fresh.query("select tx_hash from market.swaps order by tx_hash")).toEqual([{ tx_hash: hex("d", 64) }, { tx_hash: hex("e", 64) }]);
     expect(cp.done).toEqual([...SEED_PHASES]);
     expect(await count(fresh, "candles")).toBe(4);
+    await fresh.end();
+  });
+
+  it("resumes a phase whose ranges have no stored cursor without copying a landed page twice", async () => {
+    const fresh = await testDb();
+    // The crash: r1's only page and r2's first page were COPYed, then the process died before either range saved
+    // its cursor; the file holds the phase-start checkpoint plus r0's "done".
+    await insertSwaps(fresh, [swap(hex("7", 64)), swap(hex("c", 64)), swap(hex("d", 64))]);
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "swaps", ranges: { r0: "done" }, done: ["quotes", "tokens", "pools"] };
+    const saves: Checkpoint[] = [];
+    const cp = await runSeed(fresh, new FakeSource(data), seedOpts(checkpoint, saves));
+    expect(cp.done).toEqual([...SEED_PHASES]);
+    // Each landed row once, r2's second page (0xe…) copied fresh, r0 untouched.
+    expect(await fresh.query("select tx_hash from market.swaps order by tx_hash")).toEqual([hex("7", 64), hex("c", 64), hex("d", 64), hex("e", 64)].map((tx_hash) => ({ tx_hash })));
+    // The checkpoint is saved at phase start, before any page lands, so the next run knows the phase had begun.
+    expect(saves[0]).toEqual(checkpoint);
+    expect(saves.find((c) => c.phase === "candles")).toEqual({ startedAt: NOW, phase: "candles", ranges: {}, done: ["quotes", "tokens", "pools", "swaps"] });
     await fresh.end();
   });
 });
