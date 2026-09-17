@@ -14,6 +14,8 @@ if (!url) {
 
 function differs(a: unknown, b: unknown): boolean {
   if (typeof a === "number" && typeof b === "number") {
+    // NaN compares unequal to everything, the ratio below included, so drift on either side must not read as parity.
+    if (Number.isNaN(a) || Number.isNaN(b)) return true;
     if (a === b) return false;
     return Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b)) > TOLERANCE;
   }
@@ -29,7 +31,8 @@ function report(scope: PairsScope, envio: TokenPair[], store: TokenPair[]): void
   for (const [id, a] of e) {
     const b = s.get(id);
     if (!b) continue;
-    for (const key of Object.keys(a) as (keyof TokenPair)[]) {
+    // The union of both sides' fields: one present on the store side only (logoUrl in practice) must show too.
+    for (const key of new Set([...Object.keys(a), ...Object.keys(b)] as (keyof TokenPair)[])) {
       if (!differs(a[key], b[key])) continue;
       fields += 1;
       console.log(`${scope} ${id} ${key}: envio=${String(a[key])} store=${String(b[key])}`);

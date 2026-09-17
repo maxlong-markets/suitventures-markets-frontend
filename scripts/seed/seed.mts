@@ -12,13 +12,26 @@ if (!url) {
   process.exit(1);
 }
 
+/** Only the message travels to the log, never the error object. */
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 async function loadCheckpoint(): Promise<Checkpoint> {
+  let text: string;
   try {
-    const cp = JSON.parse(await readFile(CHECKPOINT, "utf8")) as Checkpoint;
+    text = await readFile(CHECKPOINT, "utf8");
+  } catch (err) {
+    // Only a missing file is a fresh start: a torn or unreadable checkpoint must never restart the seed onto populated tables.
+    if ((err as { code?: unknown } | null)?.code === "ENOENT") return newCheckpoint(Math.floor(Date.now() / 1000));
+    console.error(`cannot read ${CHECKPOINT}: ${message(err)}`);
+    process.exit(1);
+  }
+  try {
+    const cp = JSON.parse(text) as Checkpoint;
     console.log(`resuming: phase ${cp.phase}, done ${cp.done.join(",") || "-"}`);
     return cp;
-  } catch {
-    return newCheckpoint(Math.floor(Date.now() / 1000));
+  } catch (err) {
+    console.error(`${CHECKPOINT} is not a checkpoint: ${message(err)}`);
+    process.exit(1);
   }
 }
 

@@ -19,7 +19,8 @@ Seed, on a laptop that must not sleep:
 It prints one line per page: `swaps r2 pages=1234 rows=1234000 queries=1240 elapsed=372s`. Progress is
 checkpointed to `.seed/checkpoint.json` at the start of every phase and after every page. If it stops for any
 reason, a resume is the normal path and needs nothing: run the same command again and it continues at the saved
-phase and range cursors, re-reading at most one page per range through the idempotent writers.
+phase and range cursors, re-reading at most one page per range through the idempotent writers. Keep the worker
+count (3 in `seed.mts`) unchanged between a seed's start and its finish: the checkpoint's range keys are positional.
 
 Starting from scratch needs empty market tables, not just a deleted checkpoint: the swaps, candles and balances
 phases load with COPY, which has no `on conflict`, so a fresh run over rows from an earlier attempt stops on the
