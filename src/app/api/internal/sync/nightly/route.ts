@@ -14,11 +14,12 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export async function GET(req: Request) {
   if (!isCronAuthorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401, headers: NO_STORE });
   try {
-    const { db, source } = syncDeps();
-    // One pass per invocation: the runner breaks after a nightly result, so intervalSec is never used.
+    const { db, source } = syncDeps("nightly");
+    // One pass per invocation: the runner breaks after a nightly result, so intervalSec is never used. The window
+    // fits the walk at the nightly's 120 requests a minute and stays inside maxDuration.
     const report = await runSync(db, source, {
       job: "nightly", owner: randomUUID(), now: Date.now, sleep,
-      windowSec: 250, intervalSec: 250, queryBudget: 400, leaseSec: 300,
+      windowSec: 280, intervalSec: 280, queryBudget: 400, leaseSec: 300,
     });
     return NextResponse.json(report, { headers: NO_STORE });
   } catch (err) {

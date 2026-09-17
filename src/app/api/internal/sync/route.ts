@@ -20,10 +20,11 @@ function intervalSec(): number {
 export async function GET(req: Request) {
   if (!isCronAuthorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401, headers: NO_STORE });
   try {
-    const { db, source } = syncDeps();
+    const { db, source } = syncDeps("market");
+    // 50 s: the second cycle's tail (its last request and writes) ends before the next minute's lease attempt.
     const report = await runSync(db, source, {
       job: "market", owner: randomUUID(), now: Date.now, sleep,
-      windowSec: 55, intervalSec: intervalSec(), queryBudget: 150, leaseSec: 120,
+      windowSec: 50, intervalSec: intervalSec(), queryBudget: 150, leaseSec: 120,
     });
     return NextResponse.json(report, { headers: NO_STORE });
   } catch (err) {

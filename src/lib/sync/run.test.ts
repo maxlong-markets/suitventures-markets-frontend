@@ -64,6 +64,26 @@ describe("runSync", () => {
   });
 });
 
+describe("runSync yields to the nightly (spec 5.1)", () => {
+  it("skips with 'nightly' while the nightly's lease is held: its own lease released, the indexer not asked, nothing recorded", async () => {
+    await acquireLease(db, "nightly", "night", T0 + 1000, 300);
+    const src = source();
+    const o = opts();
+    expect(await runSync(db, src, o)).toEqual({ job: "market", skipped: "nightly", cycles: 0, results: [], error: null });
+    expect(src.calls).toEqual([]);
+    expect(o.slept).toEqual([]);
+    expect(await readState(db, "market")).toMatchObject({ lastRunAt: null, lastError: null, leaseOwner: null, leaseUntil: 0 });
+    expect(await readState(db, "nightly")).toMatchObject({ leaseOwner: "night", leaseUntil: T0 + 1300 });
+  });
+  it("runs once the nightly's lease has lapsed, and the nightly never yields to the market", async () => {
+    await acquireLease(db, "nightly", "night", T0 + 500, 300); // until T0 + 800, before this invocation at T0 + 1000
+    expect(await runSync(db, source(), opts({ windowSec: 1 }))).toMatchObject({ skipped: null, cycles: 1 });
+    await acquireLease(db, "market", "other", T0 + 1000, 120);
+    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    expect(await runSync(db, src, opts({ job: "nightly", windowSec: 280, queryBudget: 400, leaseSec: 300 }))).toMatchObject({ skipped: null, cycles: 1 });
+  });
+});
+
 describe("runSync head-block guard (spec 5.3a)", () => {
   it("skips with 'indexer' when the indexer reports a block below the stored mark: last_error set, lease released, nothing written", async () => {
     await raiseHeadBlock(db, 1000);

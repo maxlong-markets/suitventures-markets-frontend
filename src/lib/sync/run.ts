@@ -2,7 +2,7 @@ import type { Db } from "@/lib/db/client";
 import { runMarketCycle, type CycleResult } from "./market";
 import { runNightly, type NightlyResult } from "./nightly";
 import type { EnvioSource } from "./source";
-import { acquireLease, finishRun, raiseHeadBlock, readHeadBlock, releaseLease, type SyncJob } from "./state";
+import { acquireLease, finishRun, raiseHeadBlock, readHeadBlock, readState, releaseLease, type SyncJob } from "./state";
 
 export type RunOpts = {
   job: SyncJob; owner: string; now: () => number; sleep: (ms: number) => Promise<void>;
@@ -22,8 +22,9 @@ const rowsOf = (r: CycleResult | NightlyResult) =>
   "done" in r ? r.tokens + r.pools + r.listed : r.pools + r.swaps + r.candles + r.tokens + r.newPools;
 
 /**
- * Takes the lease (or reports skipped: "lease"); probes the indexer's head block once and skips ("indexer", with
- * last_error set) while it is below the store's mark, raising the mark otherwise; market: runs cycles until
+ * Takes the lease (or reports skipped: "lease"); market: yields (skipped: "nightly") while the nightly holds its
+ * lease; probes the indexer's head block once and skips ("indexer", with last_error set) while it is below the
+ * store's mark, raising the mark otherwise; market: runs cycles until
  * windowSec has elapsed, sleeping so cycles start intervalSec apart, sharing one queryBudget across the invocation
  * (the probe counts); nightly: one runNightly. Every cycle ends with finishRun (ok or error); the first error,
  * the probe's included, ends the invocation. Always releases the lease.
@@ -40,6 +41,9 @@ export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promi
     await finishRun(db, opts.job, { now: sec(opts.now()), ok: false, error, rows: 0, queries: source.queries - since });
   };
   try {
+    // The two jobs never run together (spec 5.1): the market invocation yields while the nightly holds its lease, so
+    // their requests never add up against the endpoint's cap. The nightly's own window bounds the delay.
+    if (opts.job === "market" && (await readState(db, "nightly")).leaseUntil > sec(startMs)) return { ...report, skipped: "nightly" };
     // Head-block guard (spec 5.3a): a replaying indexer reports a block below the highest one ever seen; nothing from
     // its state may reach the store, so the invocation records the skip and does nothing else.
     let head: number;
