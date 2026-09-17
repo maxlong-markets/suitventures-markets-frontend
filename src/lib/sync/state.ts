@@ -62,6 +62,22 @@ export async function saveCursors(db: Db, job: SyncJob, patch: { cursor?: number
   await db.query(`update market.sync_state set ${sets.join(", ")} where job = $1`, params);
 }
 
+/**
+ * The head-block mark (spec 5.3a) lives on the market row and is shared by both jobs: the highest
+ * latest_processed_block Envio has ever reported to an invocation. An indexer reporting less is replaying.
+ */
+export async function readHeadBlock(db: Db): Promise<number> {
+  await ensureRow(db, "market");
+  const [r] = await db.query<{ head_block: number }>("select head_block from market.sync_state where job = 'market'");
+  return r.head_block;
+}
+
+/** Raises the mark to `block` where it is lower; never lowers it. */
+export async function raiseHeadBlock(db: Db, block: number): Promise<void> {
+  await ensureRow(db, "market");
+  await db.query("update market.sync_state set head_block = greatest(head_block, $1::int) where job = 'market'", [block]);
+}
+
 export async function finishRun(db: Db, job: SyncJob, r: { now: number; ok: boolean; error?: string; rows: number; queries: number }): Promise<void> {
   await ensureRow(db, job);
   await db.query(

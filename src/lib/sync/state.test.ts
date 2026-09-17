@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
-import { acquireLease, finishRun, readState, releaseLease, saveCursors } from "./state";
+import { acquireLease, finishRun, raiseHeadBlock, readHeadBlock, readState, releaseLease, saveCursors } from "./state";
 
 const NOW = 1_789_000_000;
 let db: Db;
@@ -43,6 +43,15 @@ describe("sync_state", () => {
     expect(await readState(db, "market")).toMatchObject({ cursor: 100, cursor2: 200, cursorText: "b", phase: "y" });
     await saveCursors(db, "market", { cursor: 101, cursor2: 201 });
     expect(await readState(db, "market")).toMatchObject({ cursor: 101, cursor2: 201, cursorText: "b", phase: "y" });
+  });
+  it("keeps the highest head block ever reported on the market row, from a database that has never seen the job", async () => {
+    expect(await readHeadBlock(db)).toBe(0);
+    await raiseHeadBlock(db, 100);
+    await raiseHeadBlock(db, 50);
+    expect(await readHeadBlock(db)).toBe(100);
+    await raiseHeadBlock(db, 120);
+    expect(await readHeadBlock(db)).toBe(120);
+    expect((await db.query<{ n: unknown }>("select count(*) as n from market.sync_state")).map((r) => Number(r.n))).toEqual([1]);
   });
   it("records ok and failed runs and accumulates the counters", async () => {
     await finishRun(db, "market", { now: NOW, ok: true, rows: 10, queries: 3 });

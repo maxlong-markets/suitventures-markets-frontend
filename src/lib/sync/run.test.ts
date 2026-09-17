@@ -3,7 +3,7 @@ import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import { FakeSource } from "./fakeSource";
 import { runSync, type RunOpts } from "./run";
-import { acquireLease, readState } from "./state";
+import { acquireLease, raiseHeadBlock, readHeadBlock, readState } from "./state";
 import { T0, poolRec, priceRec, quoteRec, tokenRec } from "./testRows";
 
 const NOW_MS = (T0 + 1000) * 1000;
@@ -21,8 +21,10 @@ function opts(over: Partial<RunOpts> = {}): RunOpts & { slept: number[] } {
     windowSec: 55, intervalSec: 30, queryBudget: 150, leaseSec: 120, slept, ...over,
   };
 }
-/** Quotes only: a market cycle costs three requests (quotes, an empty pool page, an empty new-pool page). */
-const source = () => new FakeSource({ quotes: [quoteRec()], prices: [priceRec()] });
+/** Quotes only: a market cycle costs three requests (quotes, an empty pool page, an empty new-pool page); the invocation's head-block probe is one more. */
+const quotesOnly = () => ({ quotes: [quoteRec()], prices: [priceRec()] });
+const source = (chain?: { latestProcessedBlock: number; blockHeight: number }) => new FakeSource({ ...quotesOnly(), chain });
+const count = async (table: string) => Number((await db.query<{ n: unknown }>(`select count(*) as n from market.${table}`))[0]!.n);
 
 describe("runSync", () => {
   it("skips when another owner holds the lease", async () => {
@@ -32,14 +34,16 @@ describe("runSync", () => {
     expect(src.calls).toEqual([]);
     expect((await readState(db, "market")).leaseOwner).toBe("other");
   });
-  it("runs cycles 30 s apart inside a 55 s window and shares one budget across them", async () => {
-    const o = opts({ queryBudget: 5 });
-    const report = await runSync(db, source(), o);
+  it("runs cycles 30 s apart inside a 55 s window and shares one budget across them, the head-block probe included", async () => {
+    const o = opts({ queryBudget: 6 });
+    const src = source();
+    const report = await runSync(db, src, o);
     expect(report).toMatchObject({ job: "market", skipped: null, cycles: 2, error: null });
     expect(o.slept).toEqual([30_000]);
+    expect(src.calls.slice(0, 2)).toEqual(["chainMeta", "quotes"]);
     expect(report.results[0]).toMatchObject({ queries: 3, exhausted: false });
     expect(report.results[1]).toMatchObject({ queries: 2, exhausted: true });
-    expect(await readState(db, "market")).toMatchObject({ queriesUsed: 5, lastOkAt: T0 + 1030, lastError: null, leaseOwner: null, leaseUntil: 0 });
+    expect(await readState(db, "market")).toMatchObject({ queriesUsed: 6, lastOkAt: T0 + 1030, lastError: null, leaseOwner: null, leaseUntil: 0 });
   });
   it("records an error through finishRun, ends the invocation and still releases the lease", async () => {
     const src = source();
@@ -56,6 +60,49 @@ describe("runSync", () => {
     expect(report).toMatchObject({ job: "nightly", cycles: 1, error: null });
     expect(report.results[0]).toMatchObject({ done: true, phase: "", tokens: 1, pools: 1, listed: 1 });
     expect(o.slept).toEqual([]);
-    expect(await readState(db, "nightly")).toMatchObject({ rowsWritten: 3, queriesUsed: 2, leaseOwner: null });
+    expect(await readState(db, "nightly")).toMatchObject({ rowsWritten: 3, queriesUsed: 3, leaseOwner: null });
+  });
+});
+
+describe("runSync head-block guard (spec 5.3a)", () => {
+  it("skips with 'indexer' when the indexer reports a block below the stored mark: last_error set, lease released, nothing written", async () => {
+    await raiseHeadBlock(db, 1000);
+    const src = source({ latestProcessedBlock: 999, blockHeight: 1200 });
+    const o = opts();
+    expect(await runSync(db, src, o)).toEqual({ job: "market", skipped: "indexer", cycles: 0, results: [], error: "indexer behind the store" });
+    expect(src.calls).toEqual(["chainMeta"]);
+    expect(o.slept).toEqual([]);
+    expect(await readState(db, "market")).toMatchObject({
+      lastRunAt: T0 + 1000, lastOkAt: null, lastError: "indexer behind the store", queriesUsed: 1, rowsWritten: 0, leaseOwner: null, leaseUntil: 0,
+    });
+    expect(await readHeadBlock(db)).toBe(1000);
+    expect(await count("quotes")).toBe(0);
+  });
+  it("runs when the reported block equals the mark, raises the mark when it is above, and clears the error", async () => {
+    await raiseHeadBlock(db, 1000);
+    expect(await runSync(db, source({ latestProcessedBlock: 1000, blockHeight: 1000 }), opts({ windowSec: 1 }))).toMatchObject({ skipped: null, cycles: 1, error: null });
+    expect(await readHeadBlock(db)).toBe(1000);
+    expect(await runSync(db, source({ latestProcessedBlock: 1200, blockHeight: 1250 }), opts({ windowSec: 1 }))).toMatchObject({ skipped: null, cycles: 1, error: null });
+    expect(await readHeadBlock(db)).toBe(1200);
+    expect(await readState(db, "market")).toMatchObject({ lastError: null, queriesUsed: 8 });
+    expect(await count("quotes")).toBe(1);
+  });
+  it("guards the nightly job with the same mark and records the skip on the nightly row", async () => {
+    await raiseHeadBlock(db, 1000);
+    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()], chain: { latestProcessedBlock: 500, blockHeight: 1000 } });
+    const o = opts({ job: "nightly", windowSec: 250, queryBudget: 400, leaseSec: 300 });
+    expect(await runSync(db, src, o)).toEqual({ job: "nightly", skipped: "indexer", cycles: 0, results: [], error: "indexer behind the store" });
+    expect(src.calls).toEqual(["chainMeta"]);
+    expect(await readState(db, "nightly")).toMatchObject({ lastError: "indexer behind the store", queriesUsed: 1, leaseOwner: null, leaseUntil: 0 });
+    expect(await readState(db, "market")).toMatchObject({ lastRunAt: null, lastError: null });
+    expect(await count("tokens")).toBe(0);
+  });
+  it("records a failed probe like a failed cycle and releases the lease", async () => {
+    const src = source();
+    src.failOn = { method: "chainMeta", error: new Error("indexer responded 503") };
+    expect(await runSync(db, src, opts())).toEqual({ job: "market", skipped: null, cycles: 0, results: [], error: "indexer responded 503" });
+    expect(src.calls).toEqual(["chainMeta"]);
+    expect(await readState(db, "market")).toMatchObject({ lastError: "indexer responded 503", queriesUsed: 1, leaseOwner: null, leaseUntil: 0 });
+    expect(await readHeadBlock(db)).toBe(0);
   });
 });

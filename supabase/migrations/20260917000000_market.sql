@@ -108,6 +108,7 @@ create table market.sync_state (
   cursor2 int not null default 0,
   cursor_text text not null default '',
   phase text not null default '',
+  head_block int not null default 0,
   last_run_at int,
   last_ok_at int,
   last_error text,
