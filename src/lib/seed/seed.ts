@@ -138,14 +138,19 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
         await ranged<BalanceRec>(phase, (a, b, l) => source.balancesPage(a, b, l), (batch) => db.copy("market.token_balances", BALANCE_COLS, batch.map(balanceRow)), (batch) => upsertBalances(db, batch));
         break;
       case "finish": {
-        await db.query(
-          `delete from market.token_balances b using (
-             select token_id, holder, row_number() over (partition by token_id order by balance desc, holder) as rn
-             from market.token_balances) r
-           where r.token_id = b.token_id and r.holder = b.holder and r.rn > $1`,
-          [kept],
-        );
-        await recomputeListedPools(db, "all");
+        // The trim and the recompute scan whole tables, and Supabase's session pooler starts every session with a
+        // two-minute statement_timeout; `set local` lifts it for these two statements only, on the one connection.
+        await db.tx(async (t) => {
+          await t.exec("set local statement_timeout = 0");
+          await t.query(
+            `delete from market.token_balances b using (
+               select token_id, holder, row_number() over (partition by token_id order by balance desc, holder) as rn
+               from market.token_balances) r
+             where r.token_id = b.token_id and r.holder = b.holder and r.rn > $1`,
+            [kept],
+          );
+          await recomputeListedPools(t, "all");
+        });
         // Every pool's swaps and candles are stored up to the seed's start (the id walks are complete), so the first
         // cycles fetch from an hour before it for the pools that traded since; a higher watermark is never lowered.
         await db.query("update market.pools set synced_to = greatest(synced_to, $1::int)", [cp.startedAt - CURSOR_BACKDATE_SEC]);
