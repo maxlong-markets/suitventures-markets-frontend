@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-16-supabase-market-store-design.md`. The M1 read path it replaces is `docs/superpowers/specs/2026-09-12-m1-live-data-design.md` section 6; the M1 plan's Global Constraints about Envio (numeric strings, no `Candle.interval` filter, composite keys, the pinned exemption) still bind every Envio read in this plan.
 
+## Amendments, 17 September 2026 (during execution)
+
+- Task 1 gained two commits beyond its text: `eslint.config.mjs` ignores `docs/**` and `.claude/**` (the handoff script under docs/design-handoff had carried lint errors since the first commit, and tool worktrees were being linted through their build output), and `createDb()` turns a URL-parse failure into a `DbUnavailableError` without the input, because Node's URL error carries the whole connection string.
+- Task 4's cycle advances the cursor after every 50-pool batch, not only after a whole page, and a batch cut short by the budget or the deadline persists its resume state (`since`, pool ids, swap and candle keysets) in `sync_state.cursor_text`, drained first by the next cycle. The page-level rule could stall for good on a page whose history outgrew one invocation, which the first cycle after the seed would have hit. Spec section 5.2 step 5 and the 5.5 table carry the amended rule.
+- Vitest 4 reports a missing module as `Cannot find module`, not `Failed to resolve import`; the RED steps' wording differs, the cause is the same.
+
 ## Global Constraints
 
 - Secrets stay server-side: `DATABASE_URL`, `DATABASE_URL_DIRECT`, `CRON_SECRET`, `ENVIO_GRAPHQL_URL`, `ENVIO_GRAPHQL_KEY`. Nothing under `NEXT_PUBLIC_` for any of them. `src/lib/db/client.ts` and `src/lib/envio/client.ts` import `"server-only"`; scripts therefore run with `--conditions=react-server` (see package scripts).
