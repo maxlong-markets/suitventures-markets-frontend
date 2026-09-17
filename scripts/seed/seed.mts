@@ -35,7 +35,7 @@ async function loadCheckpoint(): Promise<Checkpoint> {
   }
 }
 
-const db = createDb(url, { max: 4 });
+const db = createDb(url, { max: 8 });
 const source = createEnvioSource({ limiter: createLimiter(200) });
 try {
   const cp = await runSeed(db, source, {
@@ -46,7 +46,9 @@ try {
       await writeFile(CHECKPOINT_TMP, JSON.stringify(c, null, 2));
       await rename(CHECKPOINT_TMP, CHECKPOINT);
     },
-    workers: 3,
+    // The indexer answers at most 1000 rows a page whatever limit is asked and serves parallel pages at the speed of
+    // one, so the limiter (200 a minute) is the ceiling and 16 ranges (one per hex digit) keep it busy.
+    workers: 16,
     pageLimit: 1000,
     log: (line) => console.log(line),
     now: () => Math.floor(Date.now() / 1000),

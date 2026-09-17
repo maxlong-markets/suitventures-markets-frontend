@@ -92,7 +92,9 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
     for (;;) {
       const batch = await page(after, range.to, opts.pageLimit);
       if (batch.length > 0) {
-        rows += await write(batch, idempotent);
+        // Not `rows += await …`: the left operand is read before the await, and concurrent ranges would lose updates.
+        const written = await write(batch, idempotent);
+        rows += written;
         idempotent = false;
         after = batch[batch.length - 1]!.id;
         cp.ranges[range.key] = after;
