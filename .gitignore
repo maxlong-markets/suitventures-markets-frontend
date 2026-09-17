@@ -48,3 +48,6 @@ next-env.d.ts
 
 # Smoke-test screenshots (evidence, not source)
 .shots/
+
+# Seed checkpoint (resumable state, never source)
+.seed/
