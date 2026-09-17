@@ -9,7 +9,7 @@ lives in `.env.local` only.
 |---|---|
 | `npm run db:migrate` | Applies every `supabase/migrations/*.sql` not yet recorded in `market.schema_migrations`, in filename order, and prints the names applied. |
 | `npm run db:smoke` | One round trip; prints `ok`. Run it after changing `.env.local`. |
-| `npm run seed` | The one-off load from Envio: quotes, tokens, pools, then swaps, candles and balances by id ranges with three workers at 200 queries a minute, then the finish phase (top 100 holders per token, listed pools, sync cursors). About eight hours. |
+| `npm run seed` | The one-off load from Envio: quotes, tokens, pools, then swaps, candles and balances by id ranges with three workers at 200 queries a minute, then the finish phase (top 100 holders per token, listed pools, every pool's `synced_to` watermark and the sync cursors at the seed's start minus 600 s). About eight hours. |
 | `npm run db:parity` | Loads `pairs("all")` and `pairs("launchpad")` through both backends and prints every token missing on either side, every field differing by more than 0.1 % (numbers) or at all (strings), then the counts. |
 
 Seed, on a laptop that must not sleep:

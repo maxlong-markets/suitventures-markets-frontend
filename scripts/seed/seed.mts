@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createDb } from "../../src/lib/db/client";
 import { newCheckpoint, runSeed, type Checkpoint } from "../../src/lib/seed/seed";
 import { createEnvioSource } from "../../src/lib/sync/envioSource";
 import { createLimiter } from "../../src/lib/sync/limiter";
 
-const CHECKPOINT = ".seed/checkpoint.json"; // git-ignored; delete it to start over
+const CHECKPOINT = ".seed/checkpoint.json"; // git-ignored; starting over: see scripts/README.md
+const CHECKPOINT_TMP = `${CHECKPOINT}.tmp`;
 const url = process.env.DATABASE_URL_DIRECT;
 if (!url) {
   console.error("DATABASE_URL_DIRECT is not set in .env.local");
@@ -28,7 +29,9 @@ try {
     checkpoint: await loadCheckpoint(),
     save: async (c) => {
       await mkdir(".seed", { recursive: true });
-      await writeFile(CHECKPOINT, JSON.stringify(c, null, 2));
+      // Written next to the file and renamed over it, so a kill mid-write can never leave a truncated checkpoint.
+      await writeFile(CHECKPOINT_TMP, JSON.stringify(c, null, 2));
+      await rename(CHECKPOINT_TMP, CHECKPOINT);
     },
     workers: 3,
     pageLimit: 1000,

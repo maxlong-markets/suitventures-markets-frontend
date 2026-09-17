@@ -15,7 +15,8 @@ const src = fileURLToPath(new URL("./src", import.meta.url));
  * server conditions rather than replacing them.
  */
 export default defineConfig({
-  test: { include: ["src/**/*.test.ts"] },
+  // Ten PGlite instances booting at once exceeded the 10 s hook default twice on a loaded laptop; the boot is real work.
+  test: { include: ["src/**/*.test.ts"], hookTimeout: 60_000 },
   resolve: { alias: [{ find: /^@\//, replacement: `${src}/` }] },
   ssr: { resolve: { conditions: ["react-server", ...defaultServerConditions] } },
 });

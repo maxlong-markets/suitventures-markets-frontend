@@ -68,7 +68,8 @@ async function upsertBalances(db: Db, rows: readonly BalanceRec[]): Promise<numb
  * Runs the phases from checkpoint.phase, saving the checkpoint at each phase start; big tables walk
  * `idRanges(workers)` concurrently with COPY per page and save the last id per range after each page; "finish"
  * trims balances to holdersKept per token, recomputes
- * every listed pool, sets sync_state.market cursor and cursor2 to startedAt − 600, and marks nightly ok.
+ * every listed pool, raises every pool's synced_to and sets sync_state.market cursor and cursor2 to startedAt − 600,
+ * and marks nightly ok.
  */
 export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Promise<Checkpoint> {
   const cp: Checkpoint = { ...opts.checkpoint, ranges: { ...opts.checkpoint.ranges }, done: [...opts.checkpoint.done] };
@@ -145,6 +146,9 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
           [kept],
         );
         await recomputeListedPools(db, "all");
+        // Every pool's swaps and candles are stored up to the seed's start (the id walks are complete), so the first
+        // cycles fetch from 600 s before it for the pools that traded since; a higher watermark is never lowered.
+        await db.query("update market.pools set synced_to = greatest(synced_to, $1::int)", [cp.startedAt - CURSOR_BACKDATE_SEC]);
         await readState(db, "market"); // inserts the default row when missing
         await saveCursors(db, "market", { cursor: cp.startedAt - CURSOR_BACKDATE_SEC, cursor2: cp.startedAt - CURSOR_BACKDATE_SEC });
         await readState(db, "nightly");
