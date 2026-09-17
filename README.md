@@ -36,21 +36,53 @@ Everything the UI renders comes through `MarketsDataSource`
 - `EnvioDataSource` (`src/lib/data/envio.ts`) — live data, read through this
   app's own route handlers. Select it with `NEXT_PUBLIC_DATA_SOURCE=envio`.
 
-Live mode needs three variables:
+### The store
+
+Live market data lives in a Postgres schema `market` on a Supabase project the
+app owns (`supabase/migrations/`), mirrored from the Envio indexer. The route
+handlers under `src/app/api` read that store; Envio is the ingest engine and is
+queried only by the sync job, the holders read-through refresh and the health
+probe.
+
+- **Sync** (`src/lib/sync`): `GET /api/internal/sync` runs every minute on
+  Vercel cron (`vercel.json`) and pulls what moved since its cursor — quotes,
+  the pools that traded, their swaps and candles, their tokens — in cycles about
+  30 s apart; `GET /api/internal/sync/nightly` re-pulls every token and pool at
+  03:00 UTC. Both require `Authorization: Bearer <CRON_SECRET>`, take a lease in
+  `market.sync_state` so invocations never overlap, and record their last run,
+  last success and last error there. Every write is an upsert, so re-processing
+  the overlap changes nothing.
+- **Backend switch** (`src/lib/market`): route handlers call `getBackend()`,
+  which is the store implementation when `DATABASE_URL` is set and the M1 Envio
+  implementation otherwise, or whenever `MARKET_DATA_BACKEND=envio` (the
+  rollback path). Both produce the same JSON, field for field: `shapePairs()`
+  in `src/lib/envio/shape.ts` is the reference and `npm run db:parity` checks it.
+- **Routes**: `/api/pairs`, `/api/quotes` and
+  `/api/tokens/[address]/{candles,trades,holders}` keep their contract and cache
+  headers. `GET /api/tokens/[address]` is new: one `TokenPair` (or 404) for a
+  token outside the 500-row list, so deep links work. `GET /api/health` reports
+  the backend, database latency, sync age and last error, indexer lag (chain
+  head minus last processed block) and which quote-asset USD prices are stale.
+- **Scripts** (`scripts/`, see `scripts/README.md`): `npm run db:migrate`,
+  `npm run db:smoke`, `npm run seed` (the resumable one-off load) and
+  `npm run db:parity`. They read `DATABASE_URL_DIRECT` (session pooler) from
+  `.env.local`, never the app's `DATABASE_URL`.
+
+Live mode needs these variables; all but the first are server-only:
 
 | Variable | Value |
 |---|---|
 | `NEXT_PUBLIC_DATA_SOURCE` | `envio` |
+| `DATABASE_URL` | Supabase pooler, transaction mode, port 6543 |
+| `CRON_SECRET` | 32 random bytes; Vercel sends it as a Bearer token to the cron routes |
+| `MARKET_DATA_BACKEND` | unset (the store) or `envio` to roll back to the M1 path |
+| `SYNC_INTERVAL_SEC` | optional; seconds between sync cycles inside one invocation, default 30 |
 | `ENVIO_GRAPHQL_URL` | the indexer's GraphQL endpoint |
 | `ENVIO_GRAPHQL_KEY` | the endpoint API key from Envio Cloud's Security tab (not the HyperSync token) |
 
-The last two are server-only: the route handlers under `src/app/api` are the
-only Envio clients, and `EnvioDataSource` just fetches those routes. Both
-sources share the swap math in `src/lib/quote.ts` — a constant-product
+Preview deployments get no database variable and stay on the mock source.
+Both sources share the swap math in `src/lib/quote.ts` — a constant-product
 approximation until the v4 Quoter lands in M2.
-
-`GET /api/health` reports indexer lag (chain head minus last processed block)
-and which quote-asset USD prices are stale.
 
 `GET /api/tokens/[address]/logo` proxies the token's logo, resolved per token
 from the contract's `logo()` (Pons), its `tokenURI()` JSON (LONG) or
@@ -63,7 +95,8 @@ not follow the wallet to another device, and vote counts read 0 until the
 signed API lands in M2.
 
 Two methods were added beyond the handoff interface: `votes(address)` (the
-caller's current vote per token address) — see the comment in `types.ts`.
+caller's current vote per token address) and `pair(id)` (one token by address,
+listed or not) — see the comments in `types.ts`.
 
 ## Stubs still to wire (M2)
 
@@ -84,4 +117,10 @@ src/context        Providers (wagmi, query, RainbowKit theme), AppState, DataSou
 src/hooks          breakpoint, data queries, balances
 src/lib            types, formatting, market filters, chain, wagmi, swap stub, quote math
 src/lib/data       seed data, mock source, Envio source, local watch store
+src/lib/db         Db interface (postgres driver, PGlite in tests), migrations
+src/lib/sync       Envio source boundary, writers, cursor state, market cycle, nightly
+src/lib/market     MarketBackend: the store implementation and the M1 Envio one
+src/lib/seed       the resumable one-off loader
+scripts            migrate, smoke, seed, parity (laptop, session pooler)
+supabase           migrations for the market schema
 ```
