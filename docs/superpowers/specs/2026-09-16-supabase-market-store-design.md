@@ -136,7 +136,7 @@ Notes:
 
 - `GET /api/internal/sync` and `GET /api/internal/sync/nightly`, `maxDuration = 300`, Node runtime. Both require `Authorization: Bearer <CRON_SECRET>`; anything else is 401. `vercel.json` schedules the first every minute and the second at 03:00 UTC.
 - The minute route runs market cycles back to back for up to 55 s, sleeping `SYNC_INTERVAL_SEC` (default 30) between cycle starts, so freshness is about 30 s at the cost of one function invocation a minute. Setting the variable to 60 gives one cycle per invocation.
-- A lease in `sync_state` (`lease_until`, `lease_owner`, taken with one conditional `UPDATE … WHERE lease_until < now RETURNING`) keeps two invocations from overlapping. A holder that dies leaves a lease that expires after 120 s.
+- A lease in `sync_state` (`lease_until`, `lease_owner`, taken with one conditional `UPDATE … WHERE lease_until < now RETURNING`) keeps two invocations from overlapping. A holder that dies leaves a lease that expires after 120 s. Every Envio request is bounded (20 s timeout, at most 3 attempts inside the sync) so a hung request cannot outlive the lease, and the cursors are written with `greatest()` so a late writer can never move one backwards. The market invocation yields (`skipped: nightly`) while the nightly holds its lease, and the nightly runs its own limiter at 120 requests a minute inside a 280 s window, so the two jobs never exceed the endpoint's cap together. (Amended 17 Sep 2026 after the whole-branch review.)
 - Every cycle ends by writing `last_run_at`, `last_ok_at` or `last_error`, `rows_written` and `queries_used`.
 
 ### 5.2 Market cycle (job `market`)
@@ -150,7 +150,7 @@ Cursor `c` = the largest `Pool.lastSwapAt` fully processed. Overlap `o` = 120 s.
    3. **candles**, same batches, one document with two aliases: `recent: Candle(where: {pool_id: {_in: ids}, t: {_gte: since − 900}}, order_by: [{t: asc}, {id: asc}], limit: 1000)`, paged by a `(t, id)` keyset when a batch has more, catches every m1, m5 and m15 bucket that could have changed, and `open: Candle(where: {id: {_in: […]}})` looks up by id the h1 and d1 buckets containing `since` and now (at most four ids per pool). The interval is parsed from the id (`<pool>-<interval>-<bucket>`); the field is never filtered on. Upsert;
    4. **tokens** of the batch's pools, by id (primary-key lookups). Upsert, then recompute `listed_pool_id` for those tokens with one SQL statement, and stamp the batch's pools with `synced_to = headTs`, the largest `lastSwapAt` Envio returned in this cycle so far (a swap Envio processed at that time means every earlier swap is already there);
    5. after each batch of 50 pools has its swaps, candles and tokens written, advance `c` to that batch's largest `lastSwapAt` and persist it; the page is ordered ascending, so every unprocessed pool has a `lastSwapAt` at or after `c`. A cycle that runs out of time or queries between batches simply stops. One that runs out inside a batch persists that batch's resume state (its `since`, its pool ids, and the swap and candle keysets reached) in `sync_state.cursor_text`; the next cycle drains that batch first, clears the record, and only then continues normal paging. Progress is therefore guaranteed at the granularity of one request, never of a page, so catch-up after the seed or an outage runs at the query budget. (Amended 17 Sep 2026 after the Task 4 review: the original page-level rule could stall for good on a page whose history outgrew one invocation.)
-3. **Repair**, at most one batch per cycle while budget remains and only when the cycle read Envio pool rows: the 50 pools with the newest `last_swap_at` among those with `synced_to < last_swap_at` and `last_swap_at < c − o` (pools the paging would not find again), processed exactly like a page batch. This is the safety net for any pool the cursor passed, whatever the cause.
+3. **Repair**, at most one batch per cycle while budget remains and only when the cycle has a head time (a pool page read from Envio, or a drained batch's stored `last_swap_at`): the 50 pools with the newest `last_swap_at` among those with `synced_to < last_swap_at` and `last_swap_at < c − o` (pools the paging would not find again), processed exactly like a page batch. This is the safety net for any pool the cursor passed, whatever the cause.
 4. **New pools** (created, never traded). Cursor `c2` on `createdAt`: `Pool(where: {createdAt: {_gte: c2 − o}, lastSwapAt: {_is_null: true}}, order_by: [{createdAt: asc}, {id: asc}])`. Upsert pools and their tokens. A few pages a day.
 
 Why `c` is safe: Envio writes in block order, so any pool updated after a read carries a `lastSwapAt` at least as large as every value that read returned. The overlap covers clock slop and the handler's own retries.
@@ -160,6 +160,10 @@ Budget: about 40 queries per cycle at today's volume (1 quotes + 1 to 3 pool pag
 ### 5.3 Nightly (job `nightly`)
 
 Full re-pull of `Token` (131 pages) and `Pool` (235 pages) by keyset on id, upsert, then recompute `listed_pool_id` for every token. This catches what the market cycle cannot see: TVL changes from liquidity events on pools that did not trade, metadata that loaded late, holder counts of tokens that only transferred. About 370 queries; it fits in one invocation and is resumable by `phase` and `cursor_text` (the last id of the completed page) in `sync_state` if it does not.
+
+### 5.3a Head-block guard
+
+Every invocation of either job asks Envio for `chain_metadata` once (one request) after taking its lease. `sync_state` keeps the highest `latest_processed_block` ever seen (`head_block`). If the indexer reports a lower block, the invocation records `last_error = "indexer behind the store"`, releases the lease and does nothing else; otherwise it raises the mark and proceeds. This is what makes an indexer replay invisible: a fresh deployment behind the same endpoint replays from genesis, and until it passes the mark, no quote, pool, token, swap or candle from replay state reaches the store. Holders refreshed read-through are the one exception (cosmetic, self-healing on the next refresh). (Amended 17 Sep 2026.)
 
 ### 5.4 Holders, read-through
 
@@ -172,7 +176,7 @@ No holders loop. The holders route serves `token_balances` from the store and, w
 | Envio down or rate-limiting | cycle records `last_error`; store stops moving; health shows sync lag | automatic on the next minute; overlap and cursors make catch-up exact |
 | Database down | cron invocation fails; routes answer 503 | automatic; nothing to replay because cursors live in the database |
 | Two invocations at once | second one finds the lease taken and exits | none needed |
-| Envio deployment replaced (re-sync, redesign) | the new deployment replays from genesis behind the same endpoint; the sync ignores rows older than its cursor and resumes when the replay passes it; the store never regresses | none, unless the redesign changes what a row means, which is a re-seed |
+| Envio deployment replaced (re-sync, redesign) | the new deployment replays from genesis behind the same endpoint; the head-block guard (5.3a) pauses both jobs until the replay passes the store's mark, and the cursors and watermarks then resume; the store never regresses | none, unless the redesign changes what a row means, which is a re-seed |
 | Store falls behind by hours | pools are paged by `lastSwapAt`; progress is saved per 50-pool batch, a batch cut short resumes from its saved keysets, and each pool fetches from its own watermark so no window is skipped | catch-up runs at the query budget; a day's backlog clears in about an hour; pools the cursor passed are repaired by later cycles |
 
 ## 6. Read models
@@ -201,7 +205,7 @@ A one-off script run from the laptop against the session pooler, resumable throu
 | swaps | `Swap` by id, COPY into `swaps` | 52,600 | about 4.4 h |
 | candles | `Candle` by id, COPY | 20,000 to 25,000 | about 2 h |
 | balances | `TokenBalance` by id with `balance > 0`, COPY, then trimmed to the top 100 per token in SQL | about 18,000 | about 1.5 h |
-| finish | recompute `listed_pool_id` for all tokens; set every pool's `synced_to` to the seed's start time minus 600 s (the id walks are complete up to then); set `sync_state.market.cursor` to the same value; set `nightly.last_ok_at`; print row counts | | minutes |
+| finish | recompute `listed_pool_id` for all tokens; set every pool's `synced_to` to the seed's start time minus 3600 s (the id walks are complete up to then, with an hour of slack for indexer lag); set `sync_state.market.cursor` and `cursor2` to the same value; set `nightly.last_ok_at`; print row counts | | minutes |
 
 About eight hours unattended. The chain keeps moving during the seed; the first market cycles replay everything since the seed started because the cursor is set back to that moment, and every write is idempotent. The archive under the indexer's `.superpowers/sdd/2026-09-12-m1-indexer/archive-seed/` stays as a fallback but is not the seed source: it lacks token names, decimals and tick spacing.
 
@@ -277,5 +281,5 @@ Migrations live in `supabase/migrations/<timestamp>_<name>.sql` and are applied 
 - The seed depends on Envio's rate limit and on Hasura not timing out on keyset pages of the big tables; M1's extractions of the same shape did not time out. The script is resumable, so a failure costs a restart, not a redo.
 - Envio's Hasura may return the `interval` field fine but the sync never relies on it; it parses the id. If ids ever change shape, the candle step fails loudly rather than mislabelling buckets.
 - The smallest Supabase compute has 1 GB of memory; the pairs query and the sync's upserts are indexed and small, but the seed's COPY and index maintenance will run slower there. Upgrading compute is a dashboard change.
-- The nightly job and the market cycle share a query budget; a nightly running during a busy hour delays the market cycle by at most one invocation.
+- The nightly job and the market cycle never run together: the market invocation yields while the nightly's lease is held, so a nightly delays the market cycle by at most its own duration (about three minutes at 120 requests a minute).
 - D35's wording to the client changes. Kobe tells MAXLONG.
