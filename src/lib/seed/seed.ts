@@ -1,4 +1,4 @@
-import type { Db } from "@/lib/db/client";
+import { DbUnavailableError, type Db } from "@/lib/db/client";
 import { parseCandleId, parseSwapId } from "@/lib/sync/ids";
 import type { BalanceRec, CandleRec, EnvioSource, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { finishRun, readState, saveCursors } from "@/lib/sync/state";
@@ -11,6 +11,8 @@ export const HOLDERS_KEPT = 100;
 const CURSOR_BACKDATE_SEC = 3600;
 /** A range's checkpoint value once its walk has ended; never a valid id, so a resume skips it outright. */
 const RANGE_DONE = "done";
+/** Attempts at a database step whose connection dropped: the first plus three retries. */
+const DB_ATTEMPTS = 4;
 const HEX = "0123456789abcdef";
 
 export type Checkpoint = { startedAt: number; phase: SeedPhase; ranges: Record<string, string>; done: SeedPhase[] };
@@ -35,7 +37,7 @@ export function idRanges(n: number): { key: string; from: string; to: string | n
 
 export type SeedOpts = {
   checkpoint: Checkpoint; save: (c: Checkpoint) => Promise<void>; workers: number; pageLimit: number;
-  holdersKept?: number; log: (line: string) => void; now: () => number;
+  holdersKept?: number; retryDelayMs?: number; log: (line: string) => void; now: () => number;
 };
 
 type Range = { key: string; from: string; to: string | null };
@@ -81,6 +83,22 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
   let saving: Promise<void> = Promise.resolve();
   const save = () => (saving = saving.then(() => opts.save({ ...cp, ranges: { ...cp.ranges }, done: [...cp.done] })));
   const log = (phase: SeedPhase, key: string) => opts.log(`${phase} ${key} pages=${pages} rows=${rows} queries=${source.queries} elapsed=${opts.now() - t0}s`);
+  /**
+   * Runs a database step again when its connection dropped (the pooler closes sessions under load), up to
+   * DB_ATTEMPTS times with a growing pause. fn receives the attempt number: a page write switches to its idempotent
+   * path from the second attempt, since the server may have committed the page before the socket closed.
+   */
+  async function retrying<T>(what: string, fn: (attempt: number) => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fn(attempt);
+      } catch (err) {
+        if (!(err instanceof DbUnavailableError) || attempt >= DB_ATTEMPTS) throw err;
+        opts.log(`${what}: ${err.message}; retry ${attempt} of ${DB_ATTEMPTS - 1}`);
+        await new Promise((resolve) => setTimeout(resolve, opts.retryDelayMs ?? attempt * 2000));
+      }
+    }
+  }
 
   async function walk<R extends { id: string }>(phase: SeedPhase, range: Range, page: PageFn<R>, write: WriteFn<R>) {
     const start = cp.ranges[range.key];
@@ -93,7 +111,7 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
       const batch = await page(after, range.to, opts.pageLimit);
       if (batch.length > 0) {
         // Not `rows += await …`: the left operand is read before the await, and concurrent ranges would lose updates.
-        const written = await write(batch, idempotent);
+        const written = await retrying(`${phase} ${range.key}`, (attempt) => write(batch, idempotent || attempt > 1));
         rows += written;
         idempotent = false;
         after = batch[batch.length - 1]!.id;
@@ -119,7 +137,7 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
     switch (phase) {
       case "quotes": {
         const { quotes, prices } = await source.quotes();
-        rows += await upsertQuotes(db, quotes, prices);
+        rows += await retrying("quotes", () => upsertQuotes(db, quotes, prices));
         pages += 1;
         log(phase, single.key);
         break;
@@ -140,26 +158,28 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
         await ranged<BalanceRec>(phase, (a, b, l) => source.balancesPage(a, b, l), (batch) => db.copy("market.token_balances", BALANCE_COLS, batch.map(balanceRow)), (batch) => upsertBalances(db, batch));
         break;
       case "finish": {
-        // The trim and the recompute scan whole tables, and Supabase's session pooler starts every session with a
-        // two-minute statement_timeout; `set local` lifts it for these two statements only, on the one connection.
-        await db.tx(async (t) => {
-          await t.exec("set local statement_timeout = 0");
-          await t.query(
-            `delete from market.token_balances b using (
-               select token_id, holder, row_number() over (partition by token_id order by balance desc, holder) as rn
-               from market.token_balances) r
-             where r.token_id = b.token_id and r.holder = b.holder and r.rn > $1`,
-            [kept],
-          );
-          await recomputeListedPools(t, "all");
+        await retrying("finish", async () => {
+          // The trim and the recompute scan whole tables, and Supabase's session pooler starts every session with a
+          // two-minute statement_timeout; `set local` lifts it for these two statements only, on the one connection.
+          await db.tx(async (t) => {
+            await t.exec("set local statement_timeout = 0");
+            await t.query(
+              `delete from market.token_balances b using (
+                 select token_id, holder, row_number() over (partition by token_id order by balance desc, holder) as rn
+                 from market.token_balances) r
+               where r.token_id = b.token_id and r.holder = b.holder and r.rn > $1`,
+              [kept],
+            );
+            await recomputeListedPools(t, "all");
+          });
+          // Every pool's swaps and candles are stored up to the seed's start (the id walks are complete), so the first
+          // cycles fetch from an hour before it for the pools that traded since; a higher watermark is never lowered.
+          await db.query("update market.pools set synced_to = greatest(synced_to, $1::int)", [cp.startedAt - CURSOR_BACKDATE_SEC]);
+          await readState(db, "market"); // inserts the default row when missing
+          await saveCursors(db, "market", { cursor: cp.startedAt - CURSOR_BACKDATE_SEC, cursor2: cp.startedAt - CURSOR_BACKDATE_SEC });
+          await readState(db, "nightly");
+          await finishRun(db, "nightly", { now: opts.now(), ok: true, rows: 0, queries: 0 });
         });
-        // Every pool's swaps and candles are stored up to the seed's start (the id walks are complete), so the first
-        // cycles fetch from an hour before it for the pools that traded since; a higher watermark is never lowered.
-        await db.query("update market.pools set synced_to = greatest(synced_to, $1::int)", [cp.startedAt - CURSOR_BACKDATE_SEC]);
-        await readState(db, "market"); // inserts the default row when missing
-        await saveCursors(db, "market", { cursor: cp.startedAt - CURSOR_BACKDATE_SEC, cursor2: cp.startedAt - CURSOR_BACKDATE_SEC });
-        await readState(db, "nightly");
-        await finishRun(db, "nightly", { now: opts.now(), ok: true, rows: 0, queries: 0 });
         log(phase, single.key);
         break;
       }

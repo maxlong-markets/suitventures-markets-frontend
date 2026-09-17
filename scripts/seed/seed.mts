@@ -35,7 +35,7 @@ async function loadCheckpoint(): Promise<Checkpoint> {
   }
 }
 
-const db = createDb(url, { max: 8 });
+const db = createDb(url, { max: 4 }); // four writers keep up with 16 fetchers: a page copies in well under a second
 const source = createEnvioSource({ limiter: createLimiter(200) });
 try {
   const cp = await runSeed(db, source, {

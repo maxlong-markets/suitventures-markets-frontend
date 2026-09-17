@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Db } from "@/lib/db/client";
+import { DbUnavailableError, type Db } from "@/lib/db/client";
 import { FakeSource } from "@/lib/sync/fakeSource";
 import type { BalanceRec, CandleRec, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { readState } from "@/lib/sync/state";
@@ -124,5 +124,40 @@ describe("runSeed", () => {
     await runSeed(fresh, new FakeSource(data), seedOpts(checkpoint, []));
     expect(await fresh.query("select id, synced_to from market.pools order by id")).toEqual([{ id: POOL_A, synced_to: NOW - 3600 }, { id: POOL_B, synced_to: NOW + 5 }]);
     await fresh.end();
+  });
+});
+
+describe("runSeed on a dropped connection", () => {
+  it("retries the page through the idempotent path and logs the retry", async () => {
+    const fresh = await testDb();
+    try {
+      let dropped = 0;
+      const flaky: Db = {
+        ...fresh,
+        copy: async (table, columns, rows) => {
+          if (dropped++ === 0) throw new DbUnavailableError("database unavailable (CONNECTION_CLOSED)");
+          return fresh.copy(table, columns, rows);
+        },
+      };
+      const logs: string[] = [];
+      const cp = await runSeed(flaky, new FakeSource(data), { ...seedOpts(newCheckpoint(NOW), []), retryDelayMs: 0, log: (line) => logs.push(line) });
+      expect(cp.done).toEqual([...SEED_PHASES]);
+      expect(await count(fresh, "swaps")).toBe(5);
+      expect(logs.filter((l) => l.includes("retry 1 of 3"))).toHaveLength(1);
+    } finally {
+      await fresh.end();
+    }
+  });
+  it("gives up after the last attempt", async () => {
+    const fresh = await testDb();
+    try {
+      // A dead copy alone is survivable (the retry moves to the upsert path); a dead query is not.
+      const dead: Db = { ...fresh, query: async () => { throw new DbUnavailableError("database unavailable (CONNECTION_CLOSED)"); } };
+      const logs: string[] = [];
+      await expect(runSeed(dead, new FakeSource(data), { ...seedOpts(newCheckpoint(NOW), []), retryDelayMs: 0, log: (line) => logs.push(line) })).rejects.toThrow("CONNECTION_CLOSED");
+      expect(logs.filter((l) => l.includes("; retry "))).toHaveLength(3);
+    } finally {
+      await fresh.end();
+    }
   });
 });

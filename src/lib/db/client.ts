@@ -63,7 +63,7 @@ function savepoints(t: postgres.TransactionSql): Begin {
   return <T>(cb: (s: postgres.TransactionSql) => Promise<T>) => t.savepoint(cb) as unknown as Promise<T>;
 }
 
-function wrap(sql: postgres.ISql, begin: Begin, end: () => Promise<void>): Db {
+function wrap(sql: postgres.ISql, begin: Begin, end: () => Promise<void>, copyTimeoutMs: number): Db {
   return {
     async query<T extends Record<string, unknown>>(text: string, params: readonly unknown[] = []) {
       // Every value we pass is a string, number, boolean, null or an array of those; the driver's parameter type is just narrower than unknown.
@@ -77,18 +77,35 @@ function wrap(sql: postgres.ISql, begin: Begin, end: () => Promise<void>): Db {
       if (rows.length === 0) return 0;
       // Identifiers are constants from our own code, never user input.
       const writable = await guard(sql.unsafe(`copy ${table} (${columns.join(",")}) from stdin with (format csv)`).writable());
-      await guard(pipeline(Readable.from([rows.map(csvLine).join("")]), writable));
+      // The driver resolves a COPY when the server accepts the stream and never surfaces a later server error: a
+      // rejected page leaves the pipeline pending forever. The bound turns that into DbUnavailableError, and callers
+      // redo the page through their idempotent path, which reports the real error.
+      let timer: NodeJS.Timeout | undefined;
+      const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          writable.destroy();
+          reject(new DbUnavailableError(`copy into ${table} did not complete within ${copyTimeoutMs} ms`));
+        }, copyTimeoutMs);
+      });
+      try {
+        await guard(Promise.race([pipeline(Readable.from([rows.map(csvLine).join("")]), writable), expired]));
+      } finally {
+        clearTimeout(timer);
+      }
       return rows.length;
     },
     async tx(fn) {
-      return guard(begin((t) => fn(wrap(t, savepoints(t), async () => {}))));
+      return guard(begin((t) => fn(wrap(t, savepoints(t), async () => {}, copyTimeoutMs))));
     },
     end,
   };
 }
 
-/** porsager `postgres` with `prepare: false` (Supavisor transaction mode), `max` default 4, `idle_timeout` 20, `connect_timeout` 10. */
-export function createDb(url: string, opts: { max?: number } = {}): Db {
+/**
+ * porsager `postgres` with `prepare: false` (Supavisor transaction mode), `max` default 4, `idle_timeout` 20,
+ * `connect_timeout` 10; a COPY that has not completed after `copyTimeoutMs` (default 60 s) fails as unavailable.
+ */
+export function createDb(url: string, opts: { max?: number; copyTimeoutMs?: number } = {}): Db {
   let sql: postgres.Sql;
   try {
     sql = postgres(url, { prepare: false, max: opts.max ?? 4, idle_timeout: 20, connect_timeout: 10 });
@@ -96,7 +113,7 @@ export function createDb(url: string, opts: { max?: number } = {}): Db {
     // Node's URL parser attaches the offending string to its TypeError as `input`; nothing from the driver's error may travel, not even as a cause.
     throw new DbUnavailableError("DATABASE_URL is not a valid connection string");
   }
-  return wrap(sql, begins(sql), () => sql.end({ timeout: 5 }));
+  return wrap(sql, begins(sql), () => sql.end({ timeout: 5 }), opts.copyTimeoutMs ?? 60_000);
 }
 
 let singleton: Db | null = null;
