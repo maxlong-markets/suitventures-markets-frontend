@@ -161,3 +161,26 @@ describe("runSeed on a dropped connection", () => {
     }
   });
 });
+
+describe("runSeed when one range fails for good", () => {
+  it("stops the other ranges and surfaces the failure once they have stopped", async () => {
+    const fresh = await testDb();
+    try {
+      let copies = 0;
+      const broken: Db = {
+        ...fresh,
+        copy: async (table, columns, rows) => {
+          copies += 1;
+          if (table === "market.swaps") throw new Error("boom");
+          return fresh.copy(table, columns, rows);
+        },
+      };
+      await expect(runSeed(broken, new FakeSource(data), seedOpts(newCheckpoint(NOW), []))).rejects.toThrow("boom");
+      // Every range tried at most one page: the first failure stops the rest before their next page.
+      expect(copies).toBeLessThanOrEqual(3);
+      expect(await count(fresh, "swaps")).toBe(0);
+    } finally {
+      await fresh.end();
+    }
+  });
+});

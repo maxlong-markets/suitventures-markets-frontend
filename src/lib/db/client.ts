@@ -75,22 +75,31 @@ function wrap(sql: postgres.ISql, begin: Begin, end: () => Promise<void>, copyTi
     },
     async copy(table, columns, rows) {
       if (rows.length === 0) return 0;
-      // Identifiers are constants from our own code, never user input.
-      const writable = await guard(sql.unsafe(`copy ${table} (${columns.join(",")}) from stdin with (format csv)`).writable());
-      // The driver resolves a COPY when the server accepts the stream and never surfaces a later server error: a
-      // rejected page leaves the pipeline pending forever. The bound turns that into DbUnavailableError, and callers
-      // redo the page through their idempotent path, which reports the real error.
-      let timer: NodeJS.Timeout | undefined;
-      const expired = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          writable.destroy();
-          reject(new DbUnavailableError(`copy into ${table} did not complete within ${copyTimeoutMs} ms`));
-        }, copyTimeoutMs);
-      });
+      // The pool pipelines queued queries onto busy connections, and a query written into a connection that is
+      // still streaming a COPY is a protocol violation the server answers by closing the socket. A reserved
+      // connection is exclusive for the copy; a transaction already is.
+      const pool = sql as Partial<postgres.Sql>;
+      const reserved: postgres.ReservedSql | null = typeof pool.reserve === "function" ? await guard(pool.reserve()) : null;
       try {
-        await guard(Promise.race([pipeline(Readable.from([rows.map(csvLine).join("")]), writable), expired]));
+        // Identifiers are constants from our own code, never user input.
+        const writable = await guard((reserved ?? sql).unsafe(`copy ${table} (${columns.join(",")}) from stdin with (format csv)`).writable());
+        // The driver resolves a COPY when the server accepts the stream and never surfaces a later server error: a
+        // rejected page leaves the pipeline pending forever. The bound turns that into DbUnavailableError, and callers
+        // redo the page through their idempotent path, which reports the real error.
+        let timer: NodeJS.Timeout | undefined;
+        const expired = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            writable.destroy();
+            reject(new DbUnavailableError(`copy into ${table} did not complete within ${copyTimeoutMs} ms`));
+          }, copyTimeoutMs);
+        });
+        try {
+          await guard(Promise.race([pipeline(Readable.from([rows.map(csvLine).join("")]), writable), expired]));
+        } finally {
+          clearTimeout(timer);
+        }
       } finally {
-        clearTimeout(timer);
+        reserved?.release();
       }
       return rows.length;
     },

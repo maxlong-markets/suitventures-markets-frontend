@@ -100,7 +100,16 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
     }
   }
 
+  let stopped: unknown = null;
   async function walk<R extends { id: string }>(phase: SeedPhase, range: Range, page: PageFn<R>, write: WriteFn<R>) {
+    try {
+      await walkRange(phase, range, page, write);
+    } catch (err) {
+      stopped ??= err;
+      throw err;
+    }
+  }
+  async function walkRange<R extends { id: string }>(phase: SeedPhase, range: Range, page: PageFn<R>, write: WriteFn<R>) {
     const start = cp.ranges[range.key];
     if (start === RANGE_DONE) return;
     let after = start ?? range.from;
@@ -108,6 +117,7 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
     // stored cursor in a phase the checkpoint had already entered may have copied its first page the same way.
     let idempotent = start !== undefined || opts.checkpoint.phase === phase;
     for (;;) {
+      if (stopped) return;
       const batch = await page(after, range.to, opts.pageLimit);
       if (batch.length > 0) {
         // Not `rows += await …`: the left operand is read before the await, and concurrent ranges would lose updates.
@@ -126,8 +136,13 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
     await save();
   }
   const single: Range = { key: "all", from: "0x0", to: null };
-  const ranged = <R extends { id: string }>(phase: SeedPhase, page: PageFn<R>, copy: (batch: R[]) => Promise<number>, upsert: (batch: R[]) => Promise<number>) =>
-    Promise.all(idRanges(opts.workers).map((r) => walk(phase, r, page, (batch, idempotent) => (idempotent ? upsert(batch) : copy(batch)))));
+  // A range that fails stops the others after their current page, and the failure surfaces once every range has
+  // stopped, so the caller closes the pool with nothing in flight.
+  const ranged = async <R extends { id: string }>(phase: SeedPhase, page: PageFn<R>, copy: (batch: R[]) => Promise<number>, upsert: (batch: R[]) => Promise<number>) => {
+    const settled = await Promise.allSettled(idRanges(opts.workers).map((r) => walk(phase, r, page, (batch, idempotent) => (idempotent ? upsert(batch) : copy(batch)))));
+    const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+    if (failed) throw failed.reason;
+  };
 
   for (const phase of SEED_PHASES.slice(SEED_PHASES.indexOf(cp.phase))) {
     if (cp.done.includes(phase)) continue;
