@@ -81,10 +81,12 @@ create table market.pools (
   origin text not null check (origin in ('LONG','Pons','Uniswap','Other','SUIT','SV')),
   created_at int not null, price_quote double precision not null,
   tvl_token numeric(78,0), tvl_quote numeric(78,0), swap_count int not null, last_swap_at int,
-  volume_quote_all_time double precision not null, synced_at int not null
+  volume_quote_all_time double precision not null, synced_at int not null,
+  synced_to int not null default 0   -- swaps and candles are stored up to this time; 0 = never
 );
 create index pools_token_last_swap on market.pools (token_id, last_swap_at desc);
 create index pools_last_swap on market.pools (last_swap_at desc nulls last);
+create index pools_unsynced on market.pools (last_swap_at desc) where synced_to < last_swap_at;
 
 create table market.swaps (
   tx_hash text not null, log_index int not null, pool_id text not null, token_id text not null,
@@ -123,6 +125,7 @@ Notes:
 
 - `swaps` stores the indexer's `Swap.id` split into `(tx_hash, log_index)`; the id is `txHash-logIndex`. That saves a 70-byte text column and its index on 52 M rows. `Swap.txHash` is the same value.
 - `token_balances` holds at most the top 100 non-zero holders per token. Holder *counts* come from `tokens.holders_count`; the balance rows exist for the top-holders panel and share-of-supply.
+- `pools.synced_to` is each pool's own watermark: the Envio head time up to which its swaps and candles are stored. A batch fetches from the oldest watermark among its pools (minus the overlap) rather than from the cycle's cursor, and stamps the head time it reached afterwards, so advancing the cursor past a batch can never drop older history of the pools behind it. (Amended 17 Sep 2026 after the Task 4 fix rounds.)
 - `tokens.listed_pool_id` is the M1 `resolvePool` result, precomputed: the primary pool when it prices sanely and has traded, else the sane pool with the most swaps, else null. Sane means `1e-24 < price_quote < 1e18`. A token with a null listed pool is not in the table.
 - No summary table for 1h/24h stats. They are computed at read time from the listed pools' `h1` candles with the existing `windowStats()` (section 8), exactly as M1 does.
 - Estimated size at seed: swaps about 25 GB with their two indexes, candles about 6 GB, balances under 1 GB, the rest negligible. Swaps grow by about 0.5 GB a day; whether to keep them past 90 days is an M5 retention decision, not this design's.
@@ -143,11 +146,12 @@ Cursor `c` = the largest `Pool.lastSwapAt` fully processed. Overlap `o` = 120 s.
 1. **Quotes.** One query: `Quote` and `QuotePrice`. Upsert `quotes`.
 2. **Pools that traded.** Page `Pool(where: {lastSwapAt: {_gte: since}}, order_by: [{lastSwapAt: asc}, {id: asc}], limit: 1000)` with a two-column keyset (`lastSwapAt > last` or `lastSwapAt = last and id > lastId`). For each page, in order:
    1. upsert the pool rows;
-   2. **swaps**, in batches of 50 pool ids: page `Swap(where: {pool_id: {_in: ids}, timestamp: {_gte: since}}, order_by: [{timestamp: asc}, {id: asc}], limit: 1000)`; insert with `on conflict do nothing`;
+   2. **swaps**, in batches of 50 pool ids, with the batch's own `since` = the smallest `synced_to` among its pools minus the overlap (never the cycle's cursor): page `Swap(where: {pool_id: {_in: ids}, timestamp: {_gte: since}}, order_by: [{timestamp: asc}, {id: asc}], limit: 1000)`; insert with `on conflict do nothing`;
    3. **candles**, same batches, one document with two aliases: `recent: Candle(where: {pool_id: {_in: ids}, t: {_gte: since − 900}}, order_by: [{t: asc}, {id: asc}], limit: 1000)`, paged by a `(t, id)` keyset when a batch has more, catches every m1, m5 and m15 bucket that could have changed, and `open: Candle(where: {id: {_in: […]}})` looks up by id the h1 and d1 buckets containing `since` and now (at most four ids per pool). The interval is parsed from the id (`<pool>-<interval>-<bucket>`); the field is never filtered on. Upsert;
-   4. **tokens** of the page's pools, by id in batches of 100 (primary-key lookups). Upsert, then recompute `listed_pool_id` for those tokens with one SQL statement;
+   4. **tokens** of the batch's pools, by id (primary-key lookups). Upsert, then recompute `listed_pool_id` for those tokens with one SQL statement, and stamp the batch's pools with `synced_to = headTs`, the largest `lastSwapAt` Envio returned in this cycle so far (a swap Envio processed at that time means every earlier swap is already there);
    5. after each batch of 50 pools has its swaps, candles and tokens written, advance `c` to that batch's largest `lastSwapAt` and persist it; the page is ordered ascending, so every unprocessed pool has a `lastSwapAt` at or after `c`. A cycle that runs out of time or queries between batches simply stops. One that runs out inside a batch persists that batch's resume state (its `since`, its pool ids, and the swap and candle keysets reached) in `sync_state.cursor_text`; the next cycle drains that batch first, clears the record, and only then continues normal paging. Progress is therefore guaranteed at the granularity of one request, never of a page, so catch-up after the seed or an outage runs at the query budget. (Amended 17 Sep 2026 after the Task 4 review: the original page-level rule could stall for good on a page whose history outgrew one invocation.)
-3. **New pools** (created, never traded). Cursor `c2` on `createdAt`: `Pool(where: {createdAt: {_gte: c2 − o}, lastSwapAt: {_is_null: true}}, order_by: [{createdAt: asc}, {id: asc}])`. Upsert pools and their tokens. A few pages a day.
+3. **Repair**, at most one batch per cycle while budget remains and only when the cycle read Envio pool rows: the 50 pools with the newest `last_swap_at` among those with `synced_to < last_swap_at` and `last_swap_at < c − o` (pools the paging would not find again), processed exactly like a page batch. This is the safety net for any pool the cursor passed, whatever the cause.
+4. **New pools** (created, never traded). Cursor `c2` on `createdAt`: `Pool(where: {createdAt: {_gte: c2 − o}, lastSwapAt: {_is_null: true}}, order_by: [{createdAt: asc}, {id: asc}])`. Upsert pools and their tokens. A few pages a day.
 
 Why `c` is safe: Envio writes in block order, so any pool updated after a read carries a `lastSwapAt` at least as large as every value that read returned. The overlap covers clock slop and the handler's own retries.
 
@@ -169,7 +173,7 @@ No holders loop. The holders route serves `token_balances` from the store and, w
 | Database down | cron invocation fails; routes answer 503 | automatic; nothing to replay because cursors live in the database |
 | Two invocations at once | second one finds the lease taken and exits | none needed |
 | Envio deployment replaced (re-sync, redesign) | the new deployment replays from genesis behind the same endpoint; the sync ignores rows older than its cursor and resumes when the replay passes it; the store never regresses | none, unless the redesign changes what a row means, which is a re-seed |
-| Store falls behind by hours | pools are paged by `lastSwapAt`; progress is saved per 50-pool batch, and a batch cut short resumes from its saved keysets | catch-up runs at the query budget; a day's backlog clears in about an hour |
+| Store falls behind by hours | pools are paged by `lastSwapAt`; progress is saved per 50-pool batch, a batch cut short resumes from its saved keysets, and each pool fetches from its own watermark so no window is skipped | catch-up runs at the query budget; a day's backlog clears in about an hour; pools the cursor passed are repaired by later cycles |
 
 ## 6. Read models
 
@@ -197,7 +201,7 @@ A one-off script run from the laptop against the session pooler, resumable throu
 | swaps | `Swap` by id, COPY into `swaps` | 52,600 | about 4.4 h |
 | candles | `Candle` by id, COPY | 20,000 to 25,000 | about 2 h |
 | balances | `TokenBalance` by id with `balance > 0`, COPY, then trimmed to the top 100 per token in SQL | about 18,000 | about 1.5 h |
-| finish | recompute `listed_pool_id` for all tokens; set `sync_state.market.cursor` to the seed's start time minus 600 s; set `nightly.last_ok_at`; print row counts | | minutes |
+| finish | recompute `listed_pool_id` for all tokens; set every pool's `synced_to` to the seed's start time minus 600 s (the id walks are complete up to then); set `sync_state.market.cursor` to the same value; set `nightly.last_ok_at`; print row counts | | minutes |
 
 About eight hours unattended. The chain keeps moving during the seed; the first market cycles replay everything since the seed started because the cursor is set back to that moment, and every write is idempotent. The archive under the indexer's `.superpowers/sdd/2026-09-12-m1-indexer/archive-seed/` stays as a fallback but is not the seed source: it lacks token names, decimals and tick spacing.
 
