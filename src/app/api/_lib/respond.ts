@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { DbUnavailableError } from "@/lib/db/client";
 import { EnvioUnavailableError } from "@/lib/envio/client";
 
 export { nowSec } from "@/lib/time";
@@ -26,6 +27,10 @@ export function failure(err: unknown): NextResponse {
   if (err instanceof EnvioUnavailableError) {
     console.warn(`envio unavailable: ${err.message}`);
     return NextResponse.json({ error: "indexer unavailable" }, { status: 503, headers: { ...headers, "Retry-After": "15" } });
+  }
+  if (err instanceof DbUnavailableError) {
+    console.warn(`database unavailable: ${err.message}`);
+    return NextResponse.json({ error: "database unavailable" }, { status: 503, headers: { ...headers, "Retry-After": "15" } });
   }
   console.error(err);
   return NextResponse.json({ error: "internal error" }, { status: 500, headers });
