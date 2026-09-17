@@ -150,4 +150,12 @@ describe("createEnvioSource", () => {
     expect(g.calls).toHaveLength(1);
     expect(source.queries).toBe(1);
   });
+
+  it("retries with the given options: attempts 2 gives up after the second failure, each attempt counted", async () => {
+    const g = fakeGql([new EnvioUnavailableError("indexer responded 429"), new EnvioUnavailableError("indexer responded 429"), { Quote: [], QuotePrice: [] }]);
+    const source = createEnvioSource({ gql: g.fn, limiter: countingLimiter(), retry: { attempts: 2, sleep: async () => {} } });
+    await expect(source.quotes()).rejects.toThrow("responded 429");
+    expect(g.calls).toHaveLength(2);
+    expect(source.queries).toBe(2);
+  });
 });

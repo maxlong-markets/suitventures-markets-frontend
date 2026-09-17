@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { gql, EnvioUnavailableError } from "./client";
+import { GQL_TIMEOUT_MS, gql, EnvioUnavailableError } from "./client";
 
 describe("gql", () => {
   beforeEach(() => {
@@ -24,5 +24,36 @@ describe("gql", () => {
   it("throws EnvioUnavailableError when a 200 carries a non-JSON body", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>gateway</html>", { status: 200 })));
     await expect(gql("query { x }")).rejects.toBeInstanceOf(EnvioUnavailableError);
+  });
+  it("hands fetch a 20 s timeout signal", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ data: { ok: true } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await gql("query { x }");
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal!.aborted).toBe(false);
+    expect(GQL_TIMEOUT_MS).toBe(20_000);
+  });
+  it("aborts a request that outlives the timeout and reports it as unreachable, which the sync's retry rule covers", async () => {
+    // A fetch that never answers on its own and settles only when its signal fires, as undici's does.
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const err = await gql("query { x }", {}, { timeoutMs: 20 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EnvioUnavailableError);
+    expect((err as Error).message).toBe("indexer unreachable: timeout");
+  });
+  it("reports a body read cut off by the timeout the same way", async () => {
+    const body = new ReadableStream<Uint8Array>({ start() {} }); // never closes
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const res = new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      // Reading the body after the abort rejects with the signal's reason, as undici's body stream does.
+      res.json = () => new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason)));
+      return res;
+    }));
+    const err = await gql("query { x }", {}, { timeoutMs: 20 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EnvioUnavailableError);
+    expect((err as Error).message).toBe("indexer unreachable: timeout");
   });
 });

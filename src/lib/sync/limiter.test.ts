@@ -89,7 +89,10 @@ describe("withRetry", () => {
     await expect(once(new EnvioUnavailableError("indexer query failed: unknown field"))).rejects.toThrow("query failed");
     await expect(once(new EnvioUnavailableError("indexer responded 404"))).rejects.toThrow("404");
     await expect(once(new Error("responded 503, but not from the client"))).rejects.toThrow("not from the client");
-    expect(calls).toBe(3);
+    // A bad document stays a bad document even when the indexer's own text mentions a 5xx or "unreachable".
+    await expect(once(new EnvioUnavailableError("indexer query failed: upstream responded 502"))).rejects.toThrow("query failed");
+    await expect(once(new EnvioUnavailableError("indexer query failed: database unreachable"))).rejects.toThrow("query failed");
+    expect(calls).toBe(5);
     expect(sleeps).toEqual([]);
   });
 });

@@ -76,12 +76,22 @@ describe("runMarketCycle", () => {
     expect(await readState(db, "market")).toMatchObject({ cursor: T0 + 500, cursor2: T0 + 700, cursorText: "" });
   });
 
-  it("re-processes the overlap without writing anything new, and never moves a cursor backwards", async () => {
+  it("re-processes the overlap without writing anything new, and never moves a cursor backwards, not even a cycle that read the cursors before another invocation raised them", async () => {
     const src = new FakeSource(base());
     await cycle(src);
     expect(await cycle(src)).toEqual({ ...full, swaps: 0 });
     expect(await counts()).toEqual([2, 2, 2, 2]);
     expect(await readState(db, "market")).toMatchObject({ cursor: T0 + 500, cursor2: T0 + 700 });
+    // The hung-request case: this cycle read cursor T0 + 500 and cursor2 T0 + 700; while its swap request is in
+    // flight another invocation moves both to T0 + 900. Its own, older values are written last and must lose.
+    const swapsFor = src.swapsFor.bind(src);
+    vi.spyOn(src, "swapsFor").mockImplementationOnce(async (...args) => {
+      await saveCursors(db, "market", { cursor: T0 + 900, cursor2: T0 + 900 });
+      return swapsFor(...args);
+    });
+    expect(await cycle(src)).toMatchObject({ cursor: T0 + 500, cursor2: T0 + 700, exhausted: false });
+    expect(await readState(db, "market")).toMatchObject({ cursor: T0 + 900, cursor2: T0 + 900, cursorText: "" });
+    expect(await counts()).toEqual([2, 2, 2, 2]);
   });
 
   it("stops before the request that would exceed the budget; a batch that never started leaves no record", async () => {

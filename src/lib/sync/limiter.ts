@@ -32,8 +32,10 @@ export function createLimiter(perMinute: number, deps: { now?: () => number; sle
 export type RetryOpts = { attempts?: number; baseMs?: number; sleep?: (ms: number) => Promise<void> };
 
 const RETRYABLE = /responded 429|responded 5|unreachable/;
+/** A rejected document is never retried, whatever the indexer's own error text goes on to say. */
+const NEVER = /query failed/;
 
-/** Retries fn on an EnvioUnavailableError whose message contains "responded 429", "responded 5", or "unreachable"; attempts default 4, backoff baseMs·2^n (baseMs default 1000). Any other error is rethrown at once. */
+/** Retries fn on an EnvioUnavailableError whose message contains "responded 429", "responded 5", or "unreachable" and not "query failed"; attempts default 4, backoff baseMs·2^n (baseMs default 1000). Any other error is rethrown at once. */
 export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): Promise<T> {
   const attempts = opts.attempts ?? 4;
   const baseMs = opts.baseMs ?? 1000;
@@ -42,7 +44,7 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): 
     try {
       return await fn();
     } catch (err) {
-      const retryable = err instanceof EnvioUnavailableError && RETRYABLE.test(err.message);
+      const retryable = err instanceof EnvioUnavailableError && RETRYABLE.test(err.message) && !NEVER.test(err.message);
       if (!retryable || n + 1 >= attempts) throw err;
       await sleep(baseMs * 2 ** n);
     }

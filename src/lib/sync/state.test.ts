@@ -37,6 +37,13 @@ describe("sync_state", () => {
     await saveCursors(db, "nightly", {});
     expect(await readState(db, "nightly")).toMatchObject({ cursor: 5, cursor2: 0, cursorText: "0xabc", phase: "tokens" });
   });
+  it("never lowers cursor or cursor2 (a late writer loses), while cursor_text and phase are plain writes", async () => {
+    await saveCursors(db, "market", { cursor: 100, cursor2: 200, cursorText: "a", phase: "x" });
+    await saveCursors(db, "market", { cursor: 50, cursor2: 150, cursorText: "b", phase: "y" });
+    expect(await readState(db, "market")).toMatchObject({ cursor: 100, cursor2: 200, cursorText: "b", phase: "y" });
+    await saveCursors(db, "market", { cursor: 101, cursor2: 201 });
+    expect(await readState(db, "market")).toMatchObject({ cursor: 101, cursor2: 201, cursorText: "b", phase: "y" });
+  });
   it("records ok and failed runs and accumulates the counters", async () => {
     await finishRun(db, "market", { now: NOW, ok: true, rows: 10, queries: 3 });
     expect(await readState(db, "market")).toMatchObject({ lastRunAt: NOW, lastOkAt: NOW, lastError: null, rowsWritten: 10, queriesUsed: 3 });

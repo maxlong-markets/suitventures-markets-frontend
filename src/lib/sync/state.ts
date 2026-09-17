@@ -41,12 +41,20 @@ export async function releaseLease(db: Db, job: SyncJob, owner: string): Promise
   await db.query("update market.sync_state set lease_until = 0, lease_owner = null where job = $1 and lease_owner = $2::text", [job, owner]);
 }
 
+/**
+ * `cursor` and `cursor2` only ever rise (`greatest` in SQL): a cycle that read them before another invocation moved
+ * them on, and writes last, cannot pull them back. `cursorText` and `phase` are plain writes.
+ */
 export async function saveCursors(db: Db, job: SyncJob, patch: { cursor?: number; cursor2?: number; cursorText?: string; phase?: string }): Promise<void> {
   const sets: string[] = [];
   const params: unknown[] = [job];
-  const add = (column: string, cast: string, v: unknown) => { params.push(v); sets.push(`${column} = $${params.length}::${cast}`); };
-  if (patch.cursor !== undefined) add("cursor", "int", patch.cursor);
-  if (patch.cursor2 !== undefined) add("cursor2", "int", patch.cursor2);
+  const add = (column: string, cast: string, v: unknown, monotonic = false) => {
+    params.push(v);
+    const value = `$${params.length}::${cast}`;
+    sets.push(`${column} = ${monotonic ? `greatest(${column}, ${value})` : value}`);
+  };
+  if (patch.cursor !== undefined) add("cursor", "int", patch.cursor, true);
+  if (patch.cursor2 !== undefined) add("cursor2", "int", patch.cursor2, true);
   if (patch.cursorText !== undefined) add("cursor_text", "text", patch.cursorText);
   if (patch.phase !== undefined) add("phase", "text", patch.phase);
   if (sets.length === 0) return;

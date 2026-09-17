@@ -1,5 +1,5 @@
 import { EnvioUnavailableError, gql as defaultGql } from "@/lib/envio/client";
-import { createLimiter, withRetry, type Limiter } from "./limiter";
+import { createLimiter, withRetry, type Limiter, type RetryOpts } from "./limiter";
 import type { BalanceRec, CandleRec, EnvioSource, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "./source";
 
 const CHAIN_ID = 4663;
@@ -57,10 +57,15 @@ const PAGES = {
 
 type ChainRow = { chain_id: number; latest_processed_block: number; block_height: number };
 
-/** Real source over the M1 `gql` client. Every request first awaits `limiter.take()` (default: 200 a minute) and runs through `withRetry` unless `retry` is false. `gql` is injectable so tests can capture documents and variables. */
-export function createEnvioSource(opts: { gql?: typeof defaultGql; limiter?: Limiter; retry?: boolean } = {}): EnvioSource {
+/**
+ * Real source over the M1 `gql` client. Every request first awaits `limiter.take()` (default: 200 a minute) and runs
+ * through `withRetry`: with its defaults when `retry` is true or absent, with the given RetryOpts, or not at all when
+ * `retry` is false. `gql` is injectable so tests can capture documents and variables.
+ */
+export function createEnvioSource(opts: { gql?: typeof defaultGql; limiter?: Limiter; retry?: RetryOpts | boolean } = {}): EnvioSource {
   const gql = opts.gql ?? defaultGql;
   const limiter = opts.limiter ?? createLimiter(200);
+  const retry = opts.retry ?? true;
   let queries = 0;
 
   async function request<T>(query: string, variables: Record<string, unknown>): Promise<T> {
@@ -70,7 +75,7 @@ export function createEnvioSource(opts: { gql?: typeof defaultGql; limiter?: Lim
       queries += 1;
       return gql<T>(query, variables);
     };
-    return opts.retry === false ? once() : withRetry(once);
+    return retry === false ? once() : withRetry(once, retry === true ? {} : retry);
   }
 
   async function page<E extends keyof typeof PAGES, T>(entity: E, afterId: string, beforeId: string | null, limit: number): Promise<T[]> {
