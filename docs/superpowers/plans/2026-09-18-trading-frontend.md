@@ -33,9 +33,26 @@ packages on 18 Sep 2026, not recalled. Treat them as given; do not re-derive.
   `quoteExactInputSingle` and `quoteExactOutputSingle` answer through a plain
   `eth_call` and each returns two words, `(amount, gasEstimate)`. The tuple is
   `((address,address,uint24,int24,address),bool,uint128,bytes)`.
-- **Worked example** on AI/NVDA (`fee 8388608`, `tickSpacing 200`, hook
-  `0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544`, `zeroForOne: false`):
-  1e18 NVDA in → `0x054250e7ec6578928c7c72f7` out; 1e21 AI out → `0x7466611729` in.
+- **Worked example** on the AI/NVDA pool the unit fixtures use, probed at block
+  `0x3e8ee47`. AI is `0x2e8c31162b855a2ffa90f6f8634643ad6f111e18`
+  (`currency0`), NVDA `0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec` (`currency1`),
+  `fee 8388608`, `tickSpacing 8`, hook `0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544`,
+  `zeroForOne: false`: 1e18 NVDA in → `0x20a47d4d0bff912e5b`
+  (602148524866942348891) out; 1e21 AI out → `0x170bc6c8a8f2c5df`
+  (1660639452746401247) in.
+- **Two different live tokens are both called "AI"; neither is a mistake.**
+  Unit tests use the one already in `src/lib/envio/fixtures.ts`:
+  AI `0x2e8c3116…`, `tickSpacing 8`, pool
+  `0xcbdfea90430a30ee4469c9902e120a77e7c7e4711d5643671c1d1957f2f1ce27`, which is
+  what `keccak256(abi.encode(key))` gives for that key. One constant set — the
+  fixtures' — across `poolKey.test.ts`, `quoter.test.ts` and `envioBackend.test.ts`.
+  **Task 7's fork script trades the other one**: AI
+  `0x68082B7EA5eE83cA3BD992f038ef02c0180b9Ba3`, `tickSpacing 200`, pool
+  `0x8b7f6b0cc404947b4c5d32b02353b82d432c98d61497a07f2a42f4ed5a3c19ee`
+  (1e18 NVDA in → `0x054250e7ec6578928c7c72f7`), because the contracts repo's
+  fork suite already proves SVRouter end to end on exactly that pool, and the two
+  repos must agree about what has been proven. Both pool keys were re-probed on
+  18 Sep 2026 and both quote. Do not "unify" them.
 - **The indexer carries every pool-key field**, including `quote.address`.
   Ids and `hooks` are lowercase; `token.address` and `quote.address` are
   checksummed. `priceQuote` arrives as a **string, sometimes in exponent
@@ -60,18 +77,28 @@ their drafts disagree with each other or with the contract, the ruling here
 wins and the task text is read as amended.
 
 1. **`QuoterUnavailableError` exists** (contract amendment). `src/lib/quote/quoter.ts`
-   exports `class QuoterUnavailableError extends Error` and throws it when viem
-   raises a transport failure (`HttpRequestError`, `TimeoutError`, or any error
-   that is not a contract revert). Task 2 adds it; Task 3's route catches it and
-   answers 503 `{ error: "rpc unavailable" }` instead of sniffing viem's error
-   classes itself. This keeps viem's taxonomy inside the quoter module, matching
-   `DbUnavailableError` and `EnvioUnavailableError` elsewhere.
+   exports `class QuoterUnavailableError extends Error` and throws it for **every**
+   error that is not a contract revert — `HttpRequestError`, `TimeoutError`, a bare
+   `fetch failed`, anything. Only `ContractFunctionRevertedError` and
+   `ContractFunctionZeroDataError` still become `NotRoutableError`. Its message names
+   the failing error's class and nothing else (`quoter unreachable (TimeoutError)`):
+   never a URL, a host or a body, because a viem transport error carries all three.
+   Task 2 adds it and its test asserts the class, so the test fails against the
+   pre-ruling design; Task 3's route catches that one class and answers 503
+   `{ error: "rpc unavailable" }`, and imports no viem error class at all. This keeps
+   viem's taxonomy inside the quoter module, matching `DbUnavailableError` and
+   `EnvioUnavailableError` elsewhere. A `RangeError` from the quoter's own argument
+   check is raised before the call and travels as itself.
 2. **`priceImpactPct` takes the net amount**, what the pool actually swapped,
    not the gross input. Task 2 renames its first parameter to `netIn` and says so
    in the doc comment. Task 3 already passes `net`; no change there.
 3. **Task 4 owns every `src/lib/types.ts` change.** It adds BOTH
    `routable?: boolean` and `call?: SwapCall` to `Quote`, plus the type-only
-   re-export of `SwapCall`. Task 6 consumes them and edits `types.ts` no further.
+   re-export of `SwapCall`, plus the `amount: string` signature of
+   `MarketsDataSource.quoteSwap` (ruling 11). Because that signature is load-bearing,
+   Task 4 also makes the one-line edits its call sites need to keep the gates green —
+   `useMarketsData.ts`, both data sources and the panel — and Task 6 then replaces
+   those two data-source methods wholesale. Task 6 edits `types.ts` no further.
 4. **Task 4 makes the minimal `TradePanel.tsx` edit** needed to keep the build
    green under `executeSwap`'s new signature, including widening the catch so
    `SwapRejectedError` is not reported as a generic failure. Task 6 then does the
@@ -79,9 +106,15 @@ wins and the task text is read as amended.
    that file, in that order.
 5. **`SwapRejectedError extends Error`**, as the contract says. Task 4's catch
    handles it explicitly rather than relying on inheritance.
-6. **`ttlCache` is load-through only.** Routability is cached by pricing inside
-   the loader and caching the boolean; there is no peek or set. Stated here so no
-   task tries to invent one.
+6. **Only a routable verdict is ever cached, and never a price.** `ttlCache` is
+   load-through only — routability is decided by pricing inside the loader; there is
+   no peek and no set. The loader returns `true` for a pool the quoter priced, which
+   stands for 300 s, and `undefined` for a refusal, which `ttlCache` does not store
+   (it only serves an entry whose `value !== undefined`). A refusal is therefore
+   never cached: the quoter also refuses an amount the pool's liquidity cannot
+   serve, and one dust-sized keystroke must not lock a live pool out of the panel
+   for five minutes. This narrows spec section 3's D28 to its positive half, on
+   purpose.
 7. **`toHuman` never uses exponent notation, never emits trailing zeros after
    the decimal point, and never ends in a bare decimal point.** `1.5`, `1`,
    `0.000001` are right; `1.500000`, `1.`, `1e-6` are wrong. Task 2's test pins it.
@@ -93,6 +126,21 @@ wins and the task text is read as amended.
 10. **The DOM test project is its own reviewable unit** inside Task 5. If it
     proves unworkable, the panel tests in spec section 8 may be dropped and the
     task still ships; nothing else depends on it.
+11. **The typed amount is a string from the keyboard to the route.**
+    `MarketsDataSource.quoteSwap`'s `amount` parameter is a `string`, and so is
+    `SwapQuoteParams.amount` and the `amount` in the query key. The panel passes the
+    raw input text; `EnvioDataSource` normalises its shape as a string (`"1."` → `"1"`,
+    `".5"` → `"0.5"`) and never through a float, because that string becomes
+    `toBase`'s input and then the `amountIn` Permit2 transfers. This is Global
+    Constraint 1: `parseFloat` had been silently rounding a user's own number to 17
+    significant digits before it reached the chain. Only the two float models —
+    `localQuote` and the panel's display gating — parse it, with `Number(amount)`,
+    and neither reaches an amount the chain will see.
+12. **"Max" means exactly the balance.** `usePairBalances` returns each balance three
+    ways: `bigint` base units, an exact decimal string from `toHuman`, and the float
+    parsed from that same string for display and comparison. The panel's 100 % button
+    sets the amount to the exact string, never a `toFixed` rounding; 25/50/75 keep
+    their existing display rounding, which is a convenience rather than a promise.
 
 ---
 ### Task 1: Chain constants and the pool key
@@ -218,20 +266,24 @@ Expected: PASS (4 tests).
 import { describe, expect, it } from "vitest";
 import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
-/** The indexer's own casing: ids lowercase, `Token.address` and `Quote.address` checksummed. */
+/**
+ * The real AI/NVDA pool, in the indexer's own casing: ids lowercase, `Token.address` and
+ * `Quote.address` checksummed. These are the fixtures' constants, and the only pool key that
+ * hashes to this pool id — see the header's verified facts.
+ */
 const parts: PoolKeyParts = {
   poolId: "0xCBDFEA90430A30EE4469C9902E120A77E7C7E4711D5643671C1D1957F2F1CE27",
   hooks: "0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544",
   fee: 8388608,
-  tickSpacing: 200,
+  tickSpacing: 8,
   tokenIsCurrency0: true,
   priceQuote: 0.000866,
-  tokenAddress: "0x68082B7EA5eE83cA3BD992f038ef02c0180b9Ba3",
+  tokenAddress: "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18",
   tokenDecimals: 18,
   quoteAddress: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
   quoteDecimals: 18,
 };
-const AI = "0x68082b7ea5ee83ca3bd992f038ef02c0180b9ba3";
+const AI = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18";
 const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 
 describe("poolKeyRow", () => {
@@ -241,7 +293,7 @@ describe("poolKeyRow", () => {
       currency0: AI,
       currency1: NVDA,
       fee: 8388608,
-      tickSpacing: 200,
+      tickSpacing: 8,
       hooks: "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
       tokenIsCurrency0: true,
       priceQuote: 0.000866,
@@ -678,7 +730,7 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 
 **Interfaces:**
 - Consumes: `V4_QUOTER_ADDRESS`, `robinhoodChain` from `src/lib/chain.ts` (Task 1); `PoolKeyRow` from `src/lib/market/poolKey.ts` (Task 1); `Address` from `src/lib/types.ts`; viem's `createPublicClient`, `http`, `BaseError`, `ContractFunctionRevertedError`, `ContractFunctionZeroDataError`, `PublicClient`.
-- Produces: `ROUTER_FEE_BPS`, `HOLDER_FEE_BPS`, `feeFor`, `grossUp`, `withSlippage`, `priceImpactPct`, `toBase`, `toHuman` from `src/lib/quote/math.ts`; `QuoterCall`, `Quoter`, `NotRoutableError`, `createQuoter`, `QUOTER_ABI` from `src/lib/quote/quoter.ts`. Signatures exactly as in the contract; `QUOTER_ABI` is the one addition, so the test can assert the fragment that is sent rather than re-describe it.
+- Produces: `ROUTER_FEE_BPS`, `HOLDER_FEE_BPS`, `feeFor`, `grossUp`, `withSlippage`, `priceImpactPct`, `toBase`, `toHuman` from `src/lib/quote/math.ts`; `QuoterCall`, `Quoter`, `NotRoutableError`, `QuoterUnavailableError`, `createQuoter`, `QUOTER_ABI` from `src/lib/quote/quoter.ts`. Signatures exactly as in the contract; `QuoterUnavailableError` (ruling 1) and `QUOTER_ABI` are the two additions — the first so the route never sniffs viem's error classes, the second so the test can assert the fragment that is sent rather than re-describe it. Task 5 consumes `toHuman` for the exact balance strings.
 
 Decisions where the contract is silent (each one line):
 - `src/lib/quote.ts` (the M1 `localQuote` approximation) stays exactly where it is: a file `quote.ts` and a directory `quote/` are different names, `@/lib/quote` keeps resolving to the file and `@/lib/quote/math` to the new module. M3 deletes the file when the panel stops falling back to it.
@@ -690,7 +742,9 @@ Decisions where the contract is silent (each one line):
 - `priceImpactPct` is signed — a stale stored `price_quote` can read better than the pool and that is worth showing — and returns 0 rather than `Infinity`/`NaN` for a zero amount or a zero stored price.
 - The Quoter's `exactAmount` is `uint128`, so a non-positive or oversized amount is a `RangeError` raised before any RPC call rather than an opaque encoding failure.
 - `hookData` is always `0x`: the Doppler and Pons hooks on these pools read the swap, not an argument.
-- Only a contract revert (`ContractFunctionRevertedError`) or an empty answer (`ContractFunctionZeroDataError`) becomes `NotRoutableError`; a transport failure travels as itself, so the route can tell 200 `{ routable: false }` from 503.
+- Only a contract revert (`ContractFunctionRevertedError`) or an empty answer (`ContractFunctionZeroDataError`) becomes `NotRoutableError`; **every** other error becomes `QuoterUnavailableError` (ruling 1), so the route can tell 200 `{ routable: false }` from 503 without importing a viem error class.
+- `QuoterUnavailableError`'s message is `quoter unreachable (<the failing error's name>)` and it does **not** keep the original as `cause`: viem's transport errors carry the endpoint URL and the request body in their own fields, and rule 4 keeps those out of anything that can be logged or serialised. The class name is all the route needs.
+- The argument check runs **before** the `try`, so the `RangeError` it raises travels as itself rather than being wrapped as a transport failure: a bad amount is the caller's bug, and the route turns it into a 400.
 - `NotRoutableError`'s message names no address: rule 4.
 
 - [ ] **Step 1: Write the failing math test**
@@ -951,9 +1005,13 @@ export function withSlippage(amountOut: bigint, slippageBps: number): bigint {
  * stored price can read better than the pool and that is worth showing. Both directions are
  * converted to quote-per-token first, so a buy and a sell are measured the same way. Display only
  * — a float never decides an amount — and 0 for a degenerate input rather than Infinity or NaN.
+ *
+ * The first parameter is `netIn`: the amount the pool actually swapped, after the router took its
+ * fee off the input. Passing the gross `amountIn` would charge the router's 0.5 % to price impact
+ * and show half a percent of slippage no pool caused (ruling 2).
  */
 export function priceImpactPct(
-  amountIn: bigint,
+  netIn: bigint,
   amountOut: bigint,
   inDecimals: number,
   outDecimals: number,
@@ -962,8 +1020,8 @@ export function priceImpactPct(
 ): number {
   checkDecimals(inDecimals);
   checkDecimals(outDecimals);
-  if (amountIn <= 0n || amountOut <= 0n || !(poolPriceQuote > 0)) return 0;
-  const inHuman = Number(amountIn) / 10 ** inDecimals;
+  if (netIn <= 0n || amountOut <= 0n || !(poolPriceQuote > 0)) return 0;
+  const inHuman = Number(netIn) / 10 ** inDecimals;
   const outHuman = Number(amountOut) / 10 ** outDecimals;
   const realised = payingQuote ? inHuman / outHuman : outHuman / inHuman;
   if (!Number.isFinite(realised) || realised <= 0) return 0;
@@ -1008,22 +1066,28 @@ Expected: PASS (28 tests).
 
 ```ts
 import { describe, expect, it, vi } from "vitest";
-import { ContractFunctionRevertedError, ContractFunctionZeroDataError, type PublicClient } from "viem";
+import {
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  TimeoutError,
+  type PublicClient,
+} from "viem";
 import { V4_QUOTER_ADDRESS } from "@/lib/chain";
 import type { PoolKeyRow } from "@/lib/market/poolKey";
-import { NotRoutableError, QUOTER_ABI, createQuoter } from "./quoter";
+import { NotRoutableError, QUOTER_ABI, QuoterUnavailableError, createQuoter } from "./quoter";
 
-// The AI/NVDA pool as `cast call` reported it on 18 Sep 2026, numbers included.
-const AI = "0x68082b7ea5ee83ca3bd992f038ef02c0180b9ba3";
+// The real AI/NVDA pool: the fixtures' constants, and the only key that hashes to this pool id.
+// The two amounts below are what the live Quoter answered at block 0x3e8ee47 (header facts).
+const AI = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18";
 const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 const HOOK = "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544";
 const POOL = "0xcbdfea90430a30ee4469c9902e120a77e7c7e4711d5643671c1d1957f2f1ce27";
 const pool: PoolKeyRow = {
-  poolId: POOL, currency0: AI, currency1: NVDA, fee: 8388608, tickSpacing: 200, hooks: HOOK,
+  poolId: POOL, currency0: AI, currency1: NVDA, fee: 8388608, tickSpacing: 8, hooks: HOOK,
   tokenIsCurrency0: true, priceQuote: 0.000866,
   tokenAddress: AI, tokenDecimals: 18, quoteAddress: NVDA, quoteDecimals: 18,
 };
-const KEY = { currency0: AI, currency1: NVDA, fee: 8388608, tickSpacing: 200, hooks: HOOK };
+const KEY = { currency0: AI, currency1: NVDA, fee: 8388608, tickSpacing: 8, hooks: HOOK };
 
 function fake() {
   const simulateContract = vi.fn();
@@ -1033,9 +1097,9 @@ function fake() {
 describe("createQuoter", () => {
   it("simulates quoteExactInputSingle and returns the output, dropping the gas estimate", async () => {
     const { simulateContract, client } = fake();
-    simulateContract.mockResolvedValue({ result: [1_627_596_220_751_955_204_094_325_495n, 82_000n] });
+    simulateContract.mockResolvedValue({ result: [602_148_524_866_942_348_891n, 348_787n] });
     const out = await createQuoter({ client }).exactIn({ poolKey: pool, zeroForOne: false, exactAmount: 10n ** 18n });
-    expect(out).toBe(1_627_596_220_751_955_204_094_325_495n);
+    expect(out).toBe(602_148_524_866_942_348_891n);
     expect(simulateContract).toHaveBeenCalledWith({
       address: V4_QUOTER_ADDRESS,
       abi: QUOTER_ABI,
@@ -1046,9 +1110,9 @@ describe("createQuoter", () => {
 
   it("simulates quoteExactOutputSingle for the input an exact output needs", async () => {
     const { simulateContract, client } = fake();
-    simulateContract.mockResolvedValue({ result: [499_933_845_289n, 91_000n] });
+    simulateContract.mockResolvedValue({ result: [1_660_639_452_746_401_247n, 262_929n] });
     const need = await createQuoter({ client }).exactOut({ poolKey: pool, zeroForOne: false, exactAmount: 10n ** 21n });
-    expect(need).toBe(499_933_845_289n);
+    expect(need).toBe(1_660_639_452_746_401_247n);
     expect(simulateContract).toHaveBeenCalledWith({
       address: V4_QUOTER_ADDRESS,
       abi: QUOTER_ABI,
@@ -1104,12 +1168,28 @@ describe("createQuoter", () => {
     expect((err as Error).name).toBe("NotRoutableError");
   });
 
-  it("lets a transport failure travel as itself, so the route answers 503 rather than 'not routed'", async () => {
+  it("wraps a transport failure in QuoterUnavailableError, so the route answers 503 rather than 'not routed'", async () => {
     const { simulateContract, client } = fake();
-    simulateContract.mockRejectedValue(new Error("fetch failed"));
+    // viem's own timeout, carrying the endpoint and the request body it was sent.
+    simulateContract.mockRejectedValue(
+      new TimeoutError({ body: { method: "eth_call" }, url: "https://rpc.internal.example/secret-key" }),
+    );
     const err = await createQuoter({ client }).exactIn({ poolKey: pool, zeroForOne: true, exactAmount: 1n }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(QuoterUnavailableError);
     expect(err).not.toBeInstanceOf(NotRoutableError);
-    expect((err as Error).message).toBe("fetch failed");
+    expect((err as Error).name).toBe("QuoterUnavailableError");
+    // The class of the failure and nothing else: no URL, no host, no body (rule 4).
+    expect((err as Error).message).toBe("quoter unreachable (TimeoutError)");
+    expect((err as Error).message).not.toContain("secret-key");
+    expect((err as { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it("wraps a bare fetch failure the same way, keeping none of its message", async () => {
+    const { simulateContract, client } = fake();
+    simulateContract.mockRejectedValue(new Error("fetch failed: https://rpc.internal.example/secret-key"));
+    const err = await createQuoter({ client }).exactIn({ poolKey: pool, zeroForOne: true, exactAmount: 1n }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(QuoterUnavailableError);
+    expect((err as Error).message).toBe("quoter unreachable (Error)");
   });
 
   it("refuses an amount the Quoter's uint128 cannot hold, before any RPC call", async () => {
@@ -1219,9 +1299,9 @@ export const QUOTER_ABI = [
 export type QuoterCall = { poolKey: PoolKeyRow; zeroForOne: boolean; exactAmount: bigint };
 
 export interface Quoter {
-  /** Output for an exact input. Throws NotRoutableError when the pool cannot be routed. */
+  /** Output for an exact input. NotRoutableError when the pool cannot be routed, QuoterUnavailableError when the node cannot be reached. */
   exactIn(call: QuoterCall): Promise<bigint>;
-  /** Input an exact output needs. Throws NotRoutableError when the pool cannot be routed. */
+  /** Input an exact output needs. Same two failures. */
   exactOut(call: QuoterCall): Promise<bigint>;
 }
 
@@ -1230,6 +1310,22 @@ export class NotRoutableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "NotRoutableError";
+  }
+}
+
+/**
+ * The Quoter could not be asked at all — an unreachable node, a timeout, a socket hangup. The
+ * route answers 503 on this class alone (ruling 1), which is why viem's error taxonomy stops here.
+ *
+ * The message names the failing error's class and nothing else, and the original is deliberately
+ * NOT kept as `cause`: viem's transport errors carry the endpoint URL and the request body in
+ * their own fields, and rule 4 keeps those out of anything that can be logged or serialised.
+ */
+export class QuoterUnavailableError extends Error {
+  constructor(cause: unknown) {
+    const kind = cause instanceof Error && cause.name ? cause.name : typeof cause;
+    super(`quoter unreachable (${kind})`);
+    this.name = "QuoterUnavailableError";
   }
 }
 
@@ -1262,14 +1358,15 @@ function paramsOf(call: QuoterCall): readonly [ExactSingleParams] {
 
 /**
  * A revert — a hook rejecting the swap, a pool with no liquidity, a pair that is not a pool — means
- * "not routable". Anything else (an unreachable RPC, a timeout) travels as itself, so the route can
- * tell 200 `{ routable: false }` from 503.
+ * "not routable". Every other failure (an unreachable RPC, a timeout, a bare `fetch failed`) becomes
+ * `QuoterUnavailableError`, so the route can tell 200 `{ routable: false }` from 503 by class alone
+ * and never has to know what viem's errors look like.
  */
-function quoterError(err: unknown): unknown {
+function quoterError(err: unknown): Error {
   const reverted =
     err instanceof BaseError &&
     err.walk((e) => e instanceof ContractFunctionRevertedError || e instanceof ContractFunctionZeroDataError) !== null;
-  return reverted ? new NotRoutableError("the pool cannot be routed") : err;
+  return reverted ? new NotRoutableError("the pool cannot be routed") : new QuoterUnavailableError(err);
 }
 
 /** Talks to the V4 Quoter at `V4_QUOTER_ADDRESS`. The tests inject `client`; production builds one on the chain's RPC. */
@@ -1277,12 +1374,15 @@ export function createQuoter(opts: { client?: PublicClient } = {}): Quoter {
   const client = opts.client ?? createPublicClient({ chain: robinhoodChain, transport: http() });
   return {
     async exactIn(call) {
+      // Outside the try on purpose: a RangeError from the argument check is the caller's bug and
+      // must travel as itself, not as a transport failure the route would answer 503 to.
+      const args = paramsOf(call);
       try {
         const { result } = await client.simulateContract({
           address: V4_QUOTER_ADDRESS,
           abi: QUOTER_ABI,
           functionName: "quoteExactInputSingle",
-          args: paramsOf(call),
+          args,
         });
         return result[0];
       } catch (err) {
@@ -1290,12 +1390,13 @@ export function createQuoter(opts: { client?: PublicClient } = {}): Quoter {
       }
     },
     async exactOut(call) {
+      const args = paramsOf(call);
       try {
         const { result } = await client.simulateContract({
           address: V4_QUOTER_ADDRESS,
           abi: QUOTER_ABI,
           functionName: "quoteExactOutputSingle",
-          args: paramsOf(call),
+          args,
         });
         return result[0];
       } catch (err) {
@@ -1307,7 +1408,7 @@ export function createQuoter(opts: { client?: PublicClient } = {}): Quoter {
 ```
 
 Run: `npx vitest run src/lib/quote`
-Expected: PASS, both files, 37 tests, and no network access — `createQuoter` is never called without a client.
+Expected: PASS, both files, 38 tests, and no network access — `createQuoter` is never called without a client.
 
 - [ ] **Step 5: Run the gates**
 
@@ -1330,18 +1431,20 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 - Test: `src/lib/quote/price.test.ts`, `src/app/api/tokens/[address]/quote/route.test.ts`
 
 **Interfaces:**
-- Consumes: `PoolKeyRow` from `src/lib/market/poolKey.ts` and `MarketBackend.poolKey(tokenId)` through `getBackend()` from `src/lib/market/backend.ts` (Task 1); `ROUTER_FEE_BPS`, `HOLDER_FEE_BPS`, `feeFor`, `grossUp`, `withSlippage`, `priceImpactPct`, `toBase`, `toHuman` from `src/lib/quote/math.ts` and `Quoter`, `QuoterCall`, `NotRoutableError`, `createQuoter` from `src/lib/quote/quoter.ts` (Task 2); `badRequest`, `failure`, `isAddress` from `src/app/api/_lib/respond.ts`; `ttlCache`, `clearTtlCache` from `src/lib/envio/cache.ts`; `Address`, `Denom`, `Side` from `src/lib/types.ts`; `DbUnavailableError` from `src/lib/db/client.ts` (test only).
-- Produces: `PriceRequest`, `PriceResult`, `SwapCall`, `priceSwap` from `src/lib/quote/price.ts`; `GET`, `dynamic`, `maxDuration` from `src/app/api/tokens/[address]/quote/route.ts`. Signatures exactly as in the contract. Task 4 consumes `SwapCall`; Task 5 consumes the route.
+- Consumes: `PoolKeyRow` from `src/lib/market/poolKey.ts` and `MarketBackend.poolKey(tokenId)` through `getBackend()` from `src/lib/market/backend.ts` (Task 1); `ROUTER_FEE_BPS`, `HOLDER_FEE_BPS`, `feeFor`, `grossUp`, `withSlippage`, `priceImpactPct`, `toBase`, `toHuman` from `src/lib/quote/math.ts` and `Quoter`, `QuoterCall`, `NotRoutableError`, `QuoterUnavailableError`, `createQuoter` from `src/lib/quote/quoter.ts` (Task 2); `badRequest`, `failure`, `isAddress` from `src/app/api/_lib/respond.ts`; `ttlCache`, `clearTtlCache` from `src/lib/envio/cache.ts`; `Address`, `Denom`, `Side` from `src/lib/types.ts`; `DbUnavailableError` from `src/lib/db/client.ts` (test only).
+- Produces: `PriceRequest`, `PriceResult`, `SwapCall`, `priceSwap` from `src/lib/quote/price.ts`; `GET`, `dynamic`, `maxDuration` from `src/app/api/tokens/[address]/quote/route.ts`. Signatures exactly as in the contract. Task 4 consumes `SwapCall` (and re-exports it from `types.ts`); Task 6 consumes the route and `PriceResult`; Task 7's e2e consumes `priceSwap`.
 
 Decisions where the contract is silent (each one line):
 - `denom` names the pay side when `denom === (side === "buy" ? "quote" : "token")`, since a buy pays the quote asset and a sell pays the pair token; everything else is the inverted path.
 - `priceImpactPct` is fed `net`, not `amountIn`: the pool only ever saw the amount after the router fee, and charging the fee to price impact would show 0.5 % of slippage that no pool caused.
 - `poolFeePct` is `pool.fee / 10_000`, because a v4 `fee` is hundredths of a basis point (3000 is 0.30 %).
-- A quoter answer of `0` is an honest zero, not "not routable" (contract rule 5 reads both ways); only `NotRoutableError` produces `{ routable: false }`, so one dust-sized quote can never cache a live pool as dead.
+- A quoter answer of `0` is an honest zero, not "not routable" (contract rule 5 reads both ways); only `NotRoutableError` produces `{ routable: false }`.
+- **A refusal is never cached** (ruling 6). The quoter reverts for a pool that cannot be routed *and* for an amount this pool's liquidity cannot serve, and the cache is keyed on the pool alone — so caching `false` would let one oversized keystroke mark a live pool dead for 300 s. The loader returns `true` or `undefined`, and `ttlCache` stores only the `true`.
 - `amountIn <= 0n` throws `RangeError` from `priceSwap` as `toBase` does for junk, and the route turns any `RangeError` into its `bad amount` 400, so the brain is safe to call directly from a script.
 - A pool row whose `currency0`/`currency1` carry neither pay asset throws a plain `Error` (→ 500): that is a broken row in the store, not a user mistake. Its message names no address (rule 4).
-- The route detects a dead RPC itself and answers 503 `{ error: "rpc unavailable" }`: `failure()` maps only `DbUnavailableError` and `EnvioUnavailableError` to 503, and a viem transport failure would otherwise leave as a 500. Everything else still goes through `failure()`.
-- The D28 cache is a load-through: the first quote for a pool prices inside the `ttlCache` loader and returns only the boolean, so a pool already known to be unroutable answers without an RPC call, and a routable pool is re-priced on every request. No priced answer is ever cached.
+- The route catches `QuoterUnavailableError` and answers 503 `{ error: "rpc unavailable" }` (ruling 1). It imports no viem error class and sniffs nothing: `failure()` maps only `DbUnavailableError` and `EnvioUnavailableError` to 503, so this one class is decided here and everything else still goes through `failure()`.
+- The D28 cache is a load-through: the first quote for a pool prices inside the `ttlCache` loader and returns only the verdict. A routable pool is re-priced on every request — no priced answer is ever cached — and an unroutable one is re-probed, because the cost of one extra simulation is smaller than the cost of calling a live pool dead.
+- The 200 body carries `routable: true`, which the spec's `QuoteResponse` type does not declare (its prose does: it is what `{ routable: false }` is the other half of). The superset is deliberate — it makes `PriceResult` a discriminated union the browser can narrow with one field instead of guessing from the presence of `call` — and is a spec erratum to fold back into section 3's type block.
 - Every answer, including the 404, is `Cache-Control: no-store`: a price is never a CDN fact.
 - The tests read the human fields through `Number()`. `toHuman`'s exact spelling (trailing zeros or not) is `math.ts`'s business and its own test's; the base-unit fields in `call` are asserted as exact strings because this task produces them.
 
@@ -1721,8 +1824,9 @@ import { HttpRequestError } from "viem";
 import { DbUnavailableError } from "@/lib/db/client";
 import { clearTtlCache } from "@/lib/envio/cache";
 import type { PoolKeyRow } from "@/lib/market/poolKey";
-// The mock below spreads the real module, so this is the very class priceSwap checks against.
-import { NotRoutableError, type QuoterCall } from "@/lib/quote/quoter";
+// The mock below spreads the real module, so these are the very classes priceSwap and the route
+// check against.
+import { NotRoutableError, QuoterUnavailableError, type QuoterCall } from "@/lib/quote/quoter";
 import type { Address } from "@/lib/types";
 import { GET } from "./route";
 
@@ -1868,22 +1972,37 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect((body.call as { amountIn: string }).amountIn).toBe("100000000");
   });
 
-  it("answers 200 routable:false and remembers it, so a reload does not re-probe", async () => {
+  it("answers 200 routable:false and never remembers it: one dust-sized amount must not kill a live pool", async () => {
     exactIn.mockRejectedValue(new NotRoutableError("pool cannot be routed"));
     const first = await call(ADDR, OK);
     expect(first.status).toBe(200);
     expect(first.headers.get("Cache-Control")).toBe("no-store");
     await expect(first.json()).resolves.toEqual({ routable: false });
 
-    const second = await call(ADDR, "side=sell&amount=5&denom=token&slippageBps=100");
+    // The quoter also refuses an amount this pool's liquidity cannot serve, and the cache is
+    // keyed on the pool alone — so a smaller amount must be priced again, not served as dead.
+    exactIn.mockReset();
+    exactIn.mockResolvedValue(199n * 10n ** 18n);
+    const second = await call(ADDR, "side=buy&amount=1&denom=quote&slippageBps=100");
     expect(second.status).toBe(200);
-    await expect(second.json()).resolves.toEqual({ routable: false });
-    // D28: the pool's routability is cached under routable:{poolId} for 300 s.
+    expect(((await second.json()) as { routable: boolean }).routable).toBe(true);
     expect(exactIn).toHaveBeenCalledTimes(1);
   });
 
+  it("caches the routable verdict but never the price: every request is quoted afresh", async () => {
+    exactIn.mockResolvedValue(199n * 10n ** 18n);
+    await call(ADDR, OK);
+    const second = await call(ADDR, OK);
+    expect(((await second.json()) as { payAmount: string }).payAmount).toBeDefined();
+    expect(exactIn).toHaveBeenCalledTimes(2);
+  });
+
   it("answers 503 when the chain cannot be reached, without echoing the endpoint", async () => {
-    exactIn.mockRejectedValue(new HttpRequestError({ url: "https://rpc.internal.example/secret-key" }));
+    // Exactly what the quoter throws for a transport failure (ruling 1); the route knows this
+    // class and nothing about viem's own error taxonomy.
+    exactIn.mockRejectedValue(
+      new QuoterUnavailableError(new HttpRequestError({ url: "https://rpc.internal.example/secret-key" })),
+    );
     const res = await call(ADDR, OK);
     expect(res.status).toBe(503);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
@@ -1911,11 +2030,10 @@ Expected: FAIL, `Cannot find module './route'`.
 
 ```ts
 import { NextResponse } from "next/server";
-import { BaseError, HttpRequestError, TimeoutError } from "viem";
 import { ttlCache } from "@/lib/envio/cache";
 import { getBackend } from "@/lib/market/backend";
 import { priceSwap, type PriceResult } from "@/lib/quote/price";
-import { createQuoter } from "@/lib/quote/quoter";
+import { QuoterUnavailableError, createQuoter } from "@/lib/quote/quoter";
 import { badRequest, failure, isAddress } from "../../../_lib/respond";
 
 /** A price is never a CDN fact: the route is dynamic and every answer is no-store. */
@@ -1923,7 +2041,7 @@ export const dynamic = "force-dynamic";
 /** Two quoter simulations plus one store read, comfortably inside the platform's limit. */
 export const maxDuration = 15;
 
-/** D28: how long one pool's routability verdict stands, in this process only. */
+/** D28: how long one pool's *positive* routability verdict stands, in this process only. */
 const ROUTABLE_TTL_MS = 300_000;
 const AMOUNT = /^\d+(\.\d+)?$/;
 const INTEGER = /^\d+$/;
@@ -1931,15 +2049,6 @@ const NO_STORE = { "Cache-Control": "no-store" };
 
 function answer(body: unknown, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: NO_STORE });
-}
-
-/**
- * A transport failure, not a contract answer: the chain could not be asked at all. `failure()` maps
- * only the store's own unavailable errors to 503, so this one is decided here.
- */
-function isRpcDown(err: unknown): boolean {
-  if (!(err instanceof BaseError)) return false;
-  return err.walk((e) => e instanceof HttpRequestError || e instanceof TimeoutError) !== null;
 }
 
 export async function GET(req: Request, ctx: { params: Promise<{ address: string }> }): Promise<Response> {
@@ -1966,20 +2075,26 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
 
     const request = { side, amount, denom, slippageBps, holder: holder === "1", pool };
     const quoter = createQuoter();
-    // The first quote for this pool prices inside the loader and records only the verdict, so a pool
-    // already known to be unroutable answers with no RPC call at all — and no priced answer is kept.
+    // The quote for this pool prices inside the loader and records only the verdict; no priced
+    // answer is ever kept. The loader returns `true` for a pool the quoter priced and `undefined`
+    // for a refusal — and `ttlCache` stores nothing for `undefined`, because the quoter also
+    // refuses an amount this pool's liquidity cannot serve and the key is the pool alone. One
+    // dust-sized keystroke must never lock a live pool out for five minutes (ruling 6).
     const probe: { priced: PriceResult | null } = { priced: null };
-    const routable = await ttlCache(`routable:${pool.poolId}`, ROUTABLE_TTL_MS, async () => {
-      probe.priced = await priceSwap(quoter, request);
-      return probe.priced.routable;
+    const routable = await ttlCache<true | undefined>(`routable:${pool.poolId}`, ROUTABLE_TTL_MS, async () => {
+      const priced = await priceSwap(quoter, request);
+      probe.priced = priced;
+      return priced.routable ? true : undefined;
     });
-    if (!routable) return answer({ routable: false });
+    // `probe.priced` is null only when the cached `true` short-circuited the loader.
+    if (!routable) return answer(probe.priced ?? { routable: false });
     return answer(probe.priced ?? (await priceSwap(quoter, request)));
   } catch (err) {
     // toBase() rejects anything the query validation let through; the user sees one message.
     if (err instanceof RangeError) return badRequest("bad amount");
-    if (isRpcDown(err)) {
-      // No URL, no key: rule 4. The error object carries both.
+    if (err instanceof QuoterUnavailableError) {
+      // The quoter has already stripped the endpoint and the body from this (ruling 1); the
+      // message is a class name, and this line adds nothing of its own. Rule 4.
       console.warn("quote rpc unavailable");
       return NextResponse.json(
         { error: "rpc unavailable" },
@@ -1992,7 +2107,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
 ```
 
 Run: `npx vitest run "src/app/api/tokens/[address]/quote/route.test.ts"`
-Expected: PASS (8 `it`s, 14 of them from the `it.each` table — 21 tests).
+Expected: PASS (9 `it`s, 14 more from the `it.each` table — 22 tests).
 
 - [ ] **Step 5: Run the gates**
 
@@ -2013,12 +2128,12 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 
 **Files:**
 - Create: `src/lib/swap/abi.ts`, `src/lib/swap/permit.ts`
-- Modify: `src/lib/swap.ts` (the stub becomes the real path), `src/lib/types.ts` (one optional field on `Quote`), `src/components/TradePanel.tsx` (the call site, so the gates stay green)
+- Modify: `src/lib/swap.ts` (the stub becomes the real path), `src/lib/types.ts` (**every** change that file gets: `routable?` and `call?` on `Quote`, the `SwapCall` re-export, and `MarketsDataSource.quoteSwap`'s `amount: string` — rulings 3 and 11), and the four call sites that signature forces: `src/hooks/useMarketsData.ts`, `src/lib/data/envio.ts`, `src/lib/data/mock.ts`, `src/components/TradePanel.tsx` (one line each, so the gates stay green; Task 6 rewrites the two data-source methods and the panel in full)
 - Test: `src/lib/swap/abi.test.ts`, `src/lib/swap/permit.test.ts`, `src/lib/swap.test.ts`
 
 **Interfaces:**
 - Consumes: `PERMIT2_ADDRESS`, `SVROUTER_ADDRESS`, `robinhoodChain` from `src/lib/chain.ts` (Task 1); `SwapCall` from `src/lib/quote/price.ts` (Task 3, type-only); `Address`, `Side`, `Quote` from `src/lib/types.ts`; viem's `WalletClient`, `PublicClient`, `parseEventLogs`, `decodeErrorResult`, `maxUint256`, `BaseError`, `ContractFunctionRevertedError`, `UserRejectedRequestError`; wagmi's `useWalletClient`, `usePublicClient` (the call site only).
-- Produces: `svRouterAbi`, `erc20Abi`, `permit2Abi` from `src/lib/swap/abi.ts`; `permitTypedData`, `randomNonce`, `PERMIT_TRANSFER_FROM_TYPES` from `src/lib/swap/permit.ts`; `SwapRequest`, `SwapHandle`, `SwapReceipt`, `SwapDeps`, `SwapFailedError`, `SwapRejectedError`, `executeSwap` from `src/lib/swap.ts`. Signatures exactly as in the contract. Task 5 consumes `SwapReceipt` for the confirmed toast and fills `Quote.call` from the route.
+- Produces: `svRouterAbi`, `erc20Abi`, `permit2Abi` from `src/lib/swap/abi.ts`; `permitTypedData`, `randomNonce`, `PERMIT_TRANSFER_FROM_TYPES` from `src/lib/swap/permit.ts`; `SwapRequest`, `SwapHandle`, `SwapReceipt`, `SwapDeps`, `SwapFailedError`, `SwapRejectedError`, `executeSwap` from `src/lib/swap.ts`. Signatures exactly as in the contract, plus the whole of `src/lib/types.ts`'s change: `Quote.routable?`, `Quote.call?`, the type-only `SwapCall` re-export and `MarketsDataSource.quoteSwap`'s `amount: string`. Task 6 consumes `SwapReceipt` for the confirmed toast and fills `Quote.call` from the route.
 
 Decisions where the contract is silent (each one line):
 - The ABI is transcribed from `SuitVenturesMarket-contracts/src/interfaces/ISVRouter.sol`, and `abi.test.ts` pins every selector against the Solidity signature, so a mistyped field cannot ship: `swapExactIn` is `0x4d20a50e` and `Trade` is `0xae40db53…`.
@@ -2029,8 +2144,12 @@ Decisions where the contract is silent (each one line):
 - Every message ends in "Nothing was spent.", the rejection included, because the router pulls funds only after its checks pass.
 - `SwapRejectedError extends Error` as the contract says, so the panel must catch it explicitly; until Task 5 does, a rejection renders the panel's generic failure text, which is also true.
 - A receipt with `status: "reverted"`, or one with no `Trade` log, is a `SwapFailedError`: without the event there is no honest number to report.
+- `parseEventLogs` filters on **both** the event and the router's address. Topic0 alone is not proof of provenance: any contract in the transaction — an input token, a hook — that emits a log with the same topic0 and a compatible data layout would otherwise supply the `amountOut` the confirmed toast reports as truth.
+- `amountIn` and `amountOutMin` are `uint128` on chain, and `executeSwap` range-checks both before it touches the wallet. The route bounds only the quoter's `exactAmount`; the grossed-up input and the quoter's uint256 output can each exceed a uint128, and without the check the user sees a raw viem encoding error mapped to "Swap failed.". `amountOutMin` of 0 is refused with them: a trade whose minimum has been floored away is a trade with no protection, and the panel should re-quote rather than send it.
+- `erc20Abi` here carries `allowance`, `approve` and `balanceOf` only. `decimals()` is read by the balances hook through viem's own `erc20Abi` (Task 5), which needs nothing from this module; a fourth entry here would be a second ABI for the same function, kept alive by its own test.
+- `MarketsDataSource.quoteSwap` takes `amount` as a `string` (ruling 11), so this task also touches `useMarketsData.ts` and both data sources — one line each. The panel already holds the untouched input text; `parseFloat` had been rounding the user's own number before `toBase` turned it into the amount Permit2 transfers.
 - `executeSwap` refuses with a `SwapFailedError` when `SVROUTER_ADDRESS` is empty; the panel's disabled state is the first line of defence, this is the second.
-- `Quote.call` is added as optional so this task can compile the call site without pre-empting Task 5's hook work; the import is type-only in both directions, so the `types.ts` ↔ `quote/price.ts` cycle is erased at build time.
+- `Quote.routable` and `Quote.call` are both optional, so this task can compile the call site without pre-empting Task 6's wiring; the import is type-only in both directions, so the `types.ts` ↔ `quote/price.ts` cycle is erased at build time.
 
 - [ ] **Step 1: Write the failing ABI test**
 
@@ -2117,8 +2236,9 @@ describe("svRouterAbi", () => {
 });
 
 describe("erc20Abi and permit2Abi", () => {
-  it("carry exactly what the swap reads and writes", () => {
-    expect(erc20Abi.map((item) => item.name).sort()).toEqual(["allowance", "approve", "balanceOf", "decimals"]);
+  it("carry exactly what the swap reads and writes, and nothing the balances hook owns", () => {
+    // No `decimals`: the balances hook reads it through viem's own erc20Abi (Task 5).
+    expect(erc20Abi.map((item) => item.name).sort()).toEqual(["allowance", "approve", "balanceOf"]);
     expect(
       encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [A, maxUint256] }).slice(0, 10),
     ).toBe("0x095ea7b3");
@@ -2252,7 +2372,11 @@ export const svRouterAbi = [
   },
 ] as const;
 
-/** The four functions the swap and the balances need, and nothing else. */
+/**
+ * The three functions the swap reads and writes, and nothing else. `decimals()` is deliberately
+ * absent: the balances hook reads it through viem's own `erc20Abi`, and a second fragment for the
+ * same function would only be kept alive by this file's test.
+ */
 export const erc20Abi = [
   {
     type: "function",
@@ -2280,13 +2404,6 @@ export const erc20Abi = [
     stateMutability: "view",
     inputs: [{ name: "account", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "decimals",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ name: "", type: "uint8" }],
   },
 ] as const;
 
@@ -2506,6 +2623,8 @@ vi.mock("@/lib/chain", async (importOriginal) => ({
 }));
 
 const ACCOUNT = "0x8888888888888888888888888888888888888888" as Address;
+/** Another contract in the same transaction, emitting a log shaped exactly like ours. */
+const DECOY = "0x6666666666666666666666666666666666666666" as Address;
 const TOKEN_IN = "0x2222222222222222222222222222222222222222" as Address;
 const TOKEN_OUT = "0x1111111111111111111111111111111111111111" as Address;
 const ZERO = "0x0000000000000000000000000000000000000000" as Address;
@@ -2540,14 +2659,14 @@ const REQUEST: SwapRequest = {
 };
 
 /** A Trade log the router would have emitted, built with viem so the encoding is the real one. */
-function tradeLog(args: { amountOut: bigint; fee: bigint; holderRate: boolean }): Log {
+function tradeLog(args: { amountOut: bigint; fee: bigint; holderRate: boolean; address?: Address }): Log {
   const topics = encodeEventTopics({
     abi: svRouterAbi,
     eventName: "Trade",
     args: { user: ACCOUNT, poolId: POOL_ID, tokenIn: TOKEN_IN },
   });
   return {
-    address: ROUTER,
+    address: args.address ?? ROUTER,
     topics: topics as [Hex, ...Hex[]],
     data: encodeAbiParameters(
       [{ type: "address" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "bool" }],
@@ -2693,6 +2812,38 @@ describe("executeSwap", () => {
     expect(h.waitForTransactionReceipt).toHaveBeenCalledWith({ hash: SWAP_HASH });
   });
 
+  it("reads only our router's Trade event, never one another contract emitted in the same transaction", async () => {
+    const h = harness(maxUint256);
+    h.waitForTransactionReceipt.mockResolvedValue({
+      status: "success",
+      logs: [
+        // Same topic0, same data layout, different emitter — and it comes first.
+        tradeLog({ amountOut: 1n, fee: 999_999n, holderRate: true, address: DECOY }),
+        tradeLog({ amountOut: 198_500_000_000_000_000_000n, fee: 500_000n, holderRate: false }),
+      ],
+    });
+    await expect((await executeSwap(REQUEST, h.deps)).confirmation).resolves.toEqual({
+      amountOut: 198_500_000_000_000_000_000n,
+      fee: 500_000n,
+      holderRate: false,
+    });
+  });
+
+  it.each([
+    { amountIn: "0" },
+    { amountIn: (2n ** 128n).toString() },
+    { amountOutMin: "0" },
+    { amountOutMin: (2n ** 128n).toString() },
+  ])("refuses a call block the router's uint128 cannot hold, before the wallet is touched (%o)", async (over) => {
+    const h = harness(maxUint256);
+    const req = { ...REQUEST, call: { ...CALL, ...over } };
+    await expect(executeSwap(req, h.deps)).rejects.toBeInstanceOf(SwapFailedError);
+    await expect(executeSwap(req, h.deps)).rejects.toThrow("Nothing was spent.");
+    expect(h.readContract).not.toHaveBeenCalled();
+    expect(h.writeContract).not.toHaveBeenCalled();
+    expect(h.signTypedData).not.toHaveBeenCalled();
+  });
+
   it("maps a dismissed wallet to SwapRejectedError", async () => {
     const h = harness(maxUint256);
     h.signTypedData.mockRejectedValue(
@@ -2766,6 +2917,8 @@ import type { Address, Side } from "./types";
 
 /** How long the signature and the trade stay valid, in seconds. */
 const DEADLINE_SEC = 1200;
+/** `SwapParams.amountIn` and `amountOutMin` are uint128 on chain. */
+const UINT128_MAX = (1n << 128n) - 1n;
 
 export interface SwapRequest {
   ticker: string;
@@ -2806,6 +2959,20 @@ export class SwapRejectedError extends Error {
     super(message);
     this.name = "SwapRejectedError";
   }
+}
+
+/**
+ * Both of the router's amounts are uint128, and the route bounds only what it sends the Quoter: a
+ * grossed-up input or a uint256 output can each overflow one. Checked here, before the wallet is
+ * touched, because viem's encoding error is not something a user can read. A zero `amountOutMin` is
+ * refused with them — a trade whose minimum has been floored away has no slippage protection left,
+ * and re-quoting is the honest answer.
+ */
+function checkUint128(value: bigint): bigint {
+  if (value <= 0n || value > UINT128_MAX) {
+    throw new SwapFailedError("That amount is out of range for the router; re-quote and try again. Nothing was spent.");
+  }
+  return value;
 }
 
 function tryDecode(data: Hex): { errorName: string; args?: readonly unknown[] } | undefined {
@@ -2850,7 +3017,7 @@ export function mapSwapError(err: unknown, slippagePct: number): Error {
   return new SwapFailedError("Swap failed. Nothing was spent.");
 }
 
-async function confirm(deps: SwapDeps, hash: Address, slippagePct: number): Promise<SwapReceipt> {
+async function confirm(deps: SwapDeps, router: Address, hash: Address, slippagePct: number): Promise<SwapReceipt> {
   let receipt;
   try {
     receipt = await deps.publicClient.waitForTransactionReceipt({ hash });
@@ -2858,7 +3025,15 @@ async function confirm(deps: SwapDeps, hash: Address, slippagePct: number): Prom
     throw mapSwapError(err, slippagePct);
   }
   if (receipt.status === "reverted") throw new SwapFailedError("Swap failed. Nothing was spent.");
-  const [trade] = parseEventLogs({ abi: svRouterAbi, eventName: "Trade", logs: receipt.logs });
+  // Filtered by address as well as by event: topic0 is not proof of provenance, and any other
+  // contract in this transaction could emit a log shaped like ours. The toast reports these
+  // numbers as the truth, so they must come from our router or from nowhere.
+  const [trade] = parseEventLogs({
+    abi: svRouterAbi,
+    address: router,
+    eventName: "Trade",
+    logs: receipt.logs,
+  });
   // Without the event there is no honest number to report, so this is a failure, not a zero.
   if (!trade) throw new SwapFailedError("Swap failed. Nothing was spent.");
   return { amountOut: trade.args.amountOut, fee: trade.args.fee, holderRate: trade.args.holderRate };
@@ -2868,8 +3043,8 @@ export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<Swa
   const router = SVROUTER_ADDRESS;
   if (!router) throw new SwapFailedError("Trading goes live when the router is deployed. Nothing was spent.");
   const { call } = req;
-  const amountIn = BigInt(call.amountIn);
-  const amountOutMin = BigInt(call.amountOutMin);
+  const amountIn = checkUint128(BigInt(call.amountIn));
+  const amountOutMin = checkUint128(BigInt(call.amountOutMin));
   const deadline = BigInt(Math.floor(Date.now() / 1000) + DEADLINE_SEC);
 
   try {
@@ -2921,8 +3096,12 @@ export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<Swa
       chain: robinhoodChain,
     });
 
-    // 4. The caller awaits this; it carries the event's numbers, not the quote's.
-    return { hash, confirmation: confirm(deps, hash, req.slippagePct) };
+    // 4. The caller awaits this; it carries the event's numbers, not the quote's. The no-op catch
+    //    keeps a caller that never awaits it from raising an unhandled rejection: the rejection
+    //    the caller does await is the same promise, and still rejects.
+    const confirmation = confirm(deps, router, hash, req.slippagePct);
+    void confirmation.catch(() => {});
+    return { hash, confirmation };
   } catch (err) {
     throw mapSwapError(err, req.slippagePct);
   }
@@ -2930,17 +3109,35 @@ export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<Swa
 ```
 
 Run: `npx vitest run src/lib/swap.test.ts`
-Expected: PASS (11 tests: 7 `it`s plus the 4-row revert table).
+Expected: PASS (16 tests: 8 `it`s plus the 4-row revert table and the 4-row uint128 table).
 
-- [ ] **Step 7: Keep the call site compiling**
+- [ ] **Step 7: Own the whole of `types.ts`, and keep the call sites compiling**
 
-The signature change breaks `TradePanel`, and the gates must be green at this commit. This is the smallest edit that compiles and behaves; Task 5 owns the panel's real wiring and will build on it.
+This task owns **every** change `src/lib/types.ts` gets (ruling 3), and two of them — the `SwapCall`
+re-export and `quoteSwap`'s `amount: string` (ruling 11) — are what Task 6 builds on. The signature
+changes break four call sites, and the gates must be green at this commit, so each gets the smallest
+edit that compiles and behaves. Task 6 rewrites the two data-source methods and the panel in full.
 
-In `src/lib/types.ts`, add the import beside the existing ones and one optional field to `Quote`:
+**(a)** `src/lib/types.ts`. Add the import as the **first line of the file**, above the doc comment:
 
 ```ts
 import type { SwapCall } from "./quote/price";
 ```
+
+Immediately after the `export type VoteDir = "bull" | "bear";` line, re-export the type:
+
+```ts
+/**
+ * The execution block the quote route returns. It lives in `src/lib/quote/price.ts` next to the
+ * code that builds it; this is a type-only re-export, erased at build time, so nothing client-side
+ * gains a runtime dependency on the route's internals. Both sides of the
+ * `types.ts` ↔ `quote/price.ts` pair import the other with `import type`, so nothing circular
+ * survives to runtime.
+ */
+export type { SwapCall };
+```
+
+Replace the `Quote` interface, with both optional fields (ruling 3 — Task 6 adds neither):
 
 ```ts
 export interface Quote {
@@ -2950,14 +3147,93 @@ export interface Quote {
   routerFeePct: 0 | 0.5;
   poolFeePct: number;
   minReceived: number;
-  /** The route's execution block; absent while the local approximation is answering. */
+  /**
+   * `false` when the quote route simulated the pool and could not route it, `true` when it priced
+   * it, `undefined` when nothing has been priced yet — amount 0, or the mock source's local
+   * approximation. Only an explicit `false` shows the "Not routed" card.
+   */
+  routable?: boolean;
+  /**
+   * Execution, verbatim from the route. The browser never recomputes an amount in it; it signs and
+   * sends it as it stands. Absent means "nothing can be submitted from this quote".
+   */
   call?: SwapCall;
 }
 ```
 
-(Both sides of the `types.ts` ↔ `quote/price.ts` pair import the other with `import type`, so nothing circular survives to runtime.)
+And change one parameter of `MarketsDataSource.quoteSwap` — `number` to `string` (ruling 11):
 
-In `src/components/TradePanel.tsx`, add the two wagmi clients to the imports and the component, and pass them plus the call block:
+```ts
+  /**
+   * The typed amount travels as the string the user typed: a float would round it to 17
+   * significant digits before `toBase` turned it into the amount Permit2 transfers (Global
+   * Constraint 1). Only the two float models — `localQuote` and the panel's display gating —
+   * parse it.
+   */
+  quoteSwap(
+    id: string,
+    side: Side,
+    amount: string,
+    denom: Denom,
+    isSuitHolder: boolean,
+    slippagePct: number,
+  ): Promise<Quote>;
+```
+
+**(b)** `src/hooks/useMarketsData.ts`. `SwapQuoteParams.amount` becomes a string; the query key
+carries it unchanged, so `"1"` and `"1."` are two entries that resolve to the same answer:
+
+```ts
+export interface SwapQuoteParams {
+  id: string;
+  side: Side;
+  /** The raw typed text, never a parsed float: Global Constraint 1. */
+  amount: string;
+  denom: Denom;
+  isSuitHolder: boolean;
+  slippagePct: number;
+}
+```
+
+**(c)** `src/lib/data/envio.ts` — the signature and the one call inside it (Task 6 replaces this
+whole method):
+
+```ts
+  async quoteSwap(id: string, side: Side, amount: string, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
+    const fresh = this.pairsCache && Date.now() - this.pairsCache.at < 30_000 ? this.pairsCache.list : await this.pairs();
+    const pair = fresh.find((p) => p.id === id.toLowerCase());
+    if (!pair) throw new Error(`Unknown token ${id}`);
+    // The approximation is a float model; a half-typed "." parses to NaN, which reads as 0.
+    const typed = Number(amount);
+    return localQuote(pair, side, Number.isFinite(typed) ? typed : 0, denom, isSuitHolder, slippagePct);
+  }
+```
+
+**(d)** `src/lib/data/mock.ts` — the same two changes:
+
+```ts
+  async quoteSwap(
+    id: string,
+    side: Side,
+    amount: string,
+    denom: Denom,
+    isSuitHolder: boolean,
+    slippagePct: number,
+  ): Promise<Quote> {
+    const typed = Number(amount);
+    return localQuote(
+      this.pairOrThrow(id),
+      side,
+      Number.isFinite(typed) ? typed : 0,
+      denom,
+      isSuitHolder,
+      slippagePct,
+    );
+  }
+```
+
+**(e)** `src/components/TradePanel.tsx`. Add the two wagmi clients to the imports and the component,
+pass the typed string to the quote hook, and pass the clients plus the call block to `executeSwap`:
 
 ```ts
 import { usePublicClient, useWalletClient } from "wagmi";
@@ -2969,6 +3245,12 @@ Beside the existing `useAppState()` line in the component body:
 ```ts
   const { data: walletClient } = useWalletClient();
   const publicClient = usePublicClient();
+```
+
+In the `useSwapQuote({ … })` call, the typed text replaces the parsed float — one line:
+
+```ts
+    amount,
 ```
 
 And in `submit`, replace the `executeSwap({ … })` call and widen the catch:
@@ -3011,12 +3293,12 @@ Expected: clean. If wagmi's client types do not satisfy `SwapDeps`, widen `SwapD
 - [ ] **Step 8: Run the gates**
 
 Run: `npm test && npx tsc --noEmit && npx eslint . && npm run build`
-Expected: all green. `grep -rn "rng\|hexBytes32" src/lib/swap.ts` matches nothing: the fake wallet round-trip is gone. With `NEXT_PUBLIC_SVROUTER_ADDRESS` unset, `npm run build` still succeeds and the panel keeps its disabled state.
+Expected: all green. `grep -rn "rng\|hexBytes32\|MOCK_TX_OUTCOME" src/lib/swap.ts` matches nothing: the fake wallet round-trip and the mock-outcome flag are both gone (Task 7 drops the flag from `.env.example`). With `NEXT_PUBLIC_SVROUTER_ADDRESS` unset, `npm run build` still succeeds and the panel keeps its disabled state.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/lib/swap/abi.ts src/lib/swap/abi.test.ts src/lib/swap/permit.ts src/lib/swap/permit.test.ts src/lib/swap.ts src/lib/swap.test.ts src/lib/types.ts src/components/TradePanel.tsx
+git add src/lib/swap/abi.ts src/lib/swap/abi.test.ts src/lib/swap/permit.ts src/lib/swap/permit.test.ts src/lib/swap.ts src/lib/swap.test.ts src/lib/types.ts src/hooks/useMarketsData.ts src/lib/data/envio.ts src/lib/data/mock.ts src/components/TradePanel.tsx
 git commit -m "Execute swaps through SVRouter with a Permit2 signature" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ```
@@ -3027,14 +3309,16 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 - Modify: `src/hooks/useTokenBalance.ts`, `src/lib/suits.ts`, `vitest.config.mts`, `package.json` (`package-lock.json` follows), `.env.example`
 
 **Interfaces:**
-- Consumes: `useQuotes()` from `@/hooks/useMarketsData`; `robinhoodChain` from `@/lib/chain`; `Address`, `QuoteAsset`, `TokenPair` from `@/lib/types`; viem's `erc20Abi` and `formatUnits`; wagmi's `useAccount`, `useBlockNumber`, `useReadContract`, `useReadContracts`. Nothing from Tasks 1 to 4 — this task can run in parallel with them.
-- Produces: `usePairBalances(pair: TokenPair): PairBalances` with real reads (same name and signature as the stub), `invalidatePairBalances(qc: QueryClient): Promise<void>` from `src/hooks/useTokenBalance.ts`; `useIsSuitHolder` with the mock default flipped in `src/lib/suits.ts`; the DOM test harness `src/test/dom.tsx` (`queryHarness()` plus every `@testing-library/react` export), which Task 6 reuses.
+- Consumes: `useQuotes()` from `@/hooks/useMarketsData`; `robinhoodChain` from `@/lib/chain`; `toHuman` from `@/lib/quote/math` (Task 2 — the only thing this task needs from an earlier one, and the reason it runs after Task 2 rather than beside it); `Address`, `QuoteAsset`, `TokenPair` from `@/lib/types`; viem's own `erc20Abi` (not `src/lib/swap/abi.ts`'s three-function fragment, which carries no `decimals`); wagmi's `useAccount`, `useBlockNumber`, `useReadContract`, `useReadContracts`.
+- Produces: `usePairBalances(pair: TokenPair): PairBalances` with real reads (same name and signature as the stub, with `PairBalances` widened to carry base units and exact decimal strings beside the floats — ruling 12), `invalidatePairBalances(qc: QueryClient): Promise<void>` from `src/hooks/useTokenBalance.ts`; `useIsSuitHolder` with the mock default flipped in `src/lib/suits.ts`; the DOM test harness `src/test/dom.tsx` (`queryHarness()` plus every `@testing-library/react` export), which Task 6 reuses.
 
 Decisions where the contract and the spec are silent (each one line):
 - **Where the decimals come from.** The quote asset's decimals are `QuoteAsset.decimals` from `useQuotes()`, matched on `pair.quote` (the symbol) — already loaded for the whole app, no extra call. `TokenPair` carries no token decimals, so the pair token's come from an on-chain `decimals()` read, **not** from the quote route's `call.tokenOutDecimals`: the balance is needed before any priced answer exists (the 25/50/75/100 buttons and the insufficient-balance check run at amount 0, where the route is not called at all), and a `routable: false` answer carries no `call` and therefore no decimals. `decimals()` is immutable, so it is read once with `staleTime: Infinity, gcTime: Infinity` and is **not** part of the per-block batch.
 - **"Refetch on block" samples the head every 10 s.** Robinhood Chain produces a block about every 0.1 s (the contracts repo's `.env.example` puts 50,000 blocks at roughly 80 minutes), so a subscription that invalidated on every block would refetch a hundred times a minute. `useBlockNumber({ watch: { poll: true, pollingInterval: 10_000 } })` plus an invalidation on change is the only sane reading of the spec's "refetches on block".
 - **The batch's query key is held in a ref.** wagmi returns a fresh `queryKey` array each render; putting it in the effect's dependency list would make an invalidation re-run the effect, which re-invalidates — a loop. The ref keeps the dependency list to the block number that actually changed, with no `eslint-disable`.
-- **Any unknown scale returns zeroes.** Disconnected, quotes not loaded, quote asset not in the list, decimals not read yet: all `{ quote: 0, token: 0 }`. A balance rendered at the wrong scale is worse than no balance.
+- **Any unknown scale returns zeroes.** Disconnected, quotes not loaded, quote asset not in the list, decimals not read yet: all zeroes on every field. A balance rendered at the wrong scale is worse than no balance.
+- **Each balance comes back three ways** (ruling 12): the `bigint` the chain returned, the exact decimal string `toHuman` prints from it, and the float parsed from *that string* for display and comparison. The float is derived from the string rather than computed beside it, so "Max is the balance" is true by construction: the panel's 100 % button writes the string, the route turns it back into the same base units with `toBase`, and the insufficient-balance check compares two floats that came from one decimal expansion. `toHuman` replaces viem's `formatUnits` here for the same reason — one spelling of a balance, not two.
+- **No `ContractFunctionParameters[]` annotation on the batch.** viem's `ContractFunctionParameters` has no `chainId` member, so annotating the array erases the per-entry `chainId` overload wagmi accepts and `tsc --noEmit` fails with TS2322. The array literal is left to infer, with `as const` so wagmi can read the argument tuples.
 - **There is no component or hook test in this repo today** — `find src -name '*.test.tsx'` is empty, `vitest.config.mts` includes only `src/**/*.test.ts`, there is no jsdom, no `@testing-library/*`, and no setup file. This task creates that harness because it is the first task that needs it; Task 6 only consumes it.
 - **Vitest 4 removed both `environmentMatchGlobs` and the `@vitest-environment` docblock** (verified against the installed `vitest@4.1.11`: no `environmentMatchGlobs` and no docblock parser anywhere in `node_modules/vitest/dist`). Two environments in one run therefore need `test.projects`. The DOM project deliberately does **not** inherit the root config, because the root sets `ssr.resolve.conditions` to `["react-server", …]` and Vite's config merge concatenates arrays rather than replacing them — a merged DOM project would still carry `react-server`, under which `react` exports no client hooks.
 
@@ -3204,6 +3488,16 @@ const pair = {
 const QUOTE_BASE = BigInt("1250000000");
 const TOKEN_BASE = BigInt("125000000000000000000000");
 
+/** Every field zeroed: the one answer for "the scale is not known yet". */
+const ZERO = {
+  quote: 0,
+  token: 0,
+  quoteBase: BigInt(0),
+  tokenBase: BigInt(0),
+  quoteText: "0",
+  tokenText: "0",
+};
+
 function connected(): void {
   h.account = { address: WALLET, isConnected: true };
   h.quotes.data = [nvda];
@@ -3231,7 +3525,7 @@ describe("usePairBalances", () => {
 
   it("returns zeroes and asks the chain for nothing while disconnected", () => {
     const { result } = read();
-    expect(result.current).toEqual({ quote: 0, token: 0 });
+    expect(result.current).toEqual(ZERO);
     expect(h.seenReadContracts.mock.calls[0][0]).toMatchObject({ query: { enabled: false } });
     expect(h.seenReadContracts.mock.calls[0][0].contracts).toBeUndefined();
     expect(h.seenReadContract.mock.calls[0][0]).toMatchObject({ query: { enabled: false } });
@@ -3240,7 +3534,28 @@ describe("usePairBalances", () => {
   it("scales each balance by its own asset's decimals", () => {
     connected();
     const { result } = read();
-    expect(result.current).toEqual({ quote: 1250, token: 125_000 });
+    expect(result.current).toEqual({
+      quote: 1250,
+      token: 125_000,
+      quoteBase: QUOTE_BASE,
+      tokenBase: TOKEN_BASE,
+      quoteText: "1250",
+      tokenText: "125000",
+    });
+  });
+
+  it("keeps an exact decimal string beside the float, so Max can be the balance to the last wei", () => {
+    connected();
+    // A balance no double can hold: 125000.123456789012345678 rounds to …8901 as a float.
+    const odd = BigInt("125000123456789012345678");
+    h.batch.data = [QUOTE_BASE, odd];
+    const { result } = read();
+    expect(result.current.tokenBase).toBe(odd);
+    expect(result.current.tokenText).toBe("125000.123456789012345678");
+    // The float is parsed from that same string, so the panel's comparison and the route's
+    // toBase() of the string can never disagree about which is larger.
+    expect(result.current.token).toBe(Number("125000.123456789012345678"));
+    expect(String(result.current.token)).not.toBe(result.current.tokenText);
   });
 
   it("batches balanceOf for the quote address and the pair token, both on chain 4663", () => {
@@ -3278,14 +3593,14 @@ describe("usePairBalances", () => {
   it("returns zeroes rather than a wrong scale while the token's decimals are unknown", () => {
     connected();
     h.decimals.data = undefined;
-    expect(read().result.current).toEqual({ quote: 0, token: 0 });
+    expect(read().result.current).toEqual(ZERO);
   });
 
   it("returns zeroes when the pair's quote symbol is not in the quotes list", () => {
     connected();
     h.quotes.data = [{ ...nvda, symbol: "USDC" }];
     const { result } = read();
-    expect(result.current).toEqual({ quote: 0, token: 0 });
+    expect(result.current).toEqual(ZERO);
     expect(h.seenReadContracts.mock.calls[0][0]).toMatchObject({ query: { enabled: false } });
   });
 
@@ -3333,20 +3648,41 @@ Replace `src/hooks/useTokenBalance.ts` entirely:
 
 import { useEffect, useRef } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { erc20Abi, formatUnits, type ContractFunctionParameters } from "viem";
+import { erc20Abi } from "viem";
 import { useAccount, useBlockNumber, useReadContract, useReadContracts } from "wagmi";
 import { useQuotes } from "@/hooks/useMarketsData";
 import { robinhoodChain } from "@/lib/chain";
+import { toHuman } from "@/lib/quote/math";
 import type { Address, TokenPair } from "@/lib/types";
 
+/**
+ * Each balance three ways (ruling 12). `quote`/`token` are for display and comparison;
+ * `quoteText`/`tokenText` are the exact decimal expansion, which is what the panel's 100 % button
+ * writes into the amount field, and `quoteBase`/`tokenBase` are what the chain returned. The floats
+ * are parsed from the strings, never computed beside them, so "Max is exactly the balance" holds
+ * through `toBase` on the server and through the insufficient-balance check in the browser.
+ */
 export interface PairBalances {
   /** Quote-asset balance, in quote units. */
   quote: number;
   /** Pair-token balance. */
   token: number;
+  /** Base units, as the chain returned them. */
+  quoteBase: bigint;
+  tokenBase: bigint;
+  /** The same two balances as exact decimal strings: no exponent, no rounding. */
+  quoteText: string;
+  tokenText: string;
 }
 
-const ZERO: PairBalances = { quote: 0, token: 0 };
+const ZERO: PairBalances = {
+  quote: 0,
+  token: 0,
+  quoteBase: 0n,
+  tokenBase: 0n,
+  quoteText: "0",
+  tokenText: "0",
+};
 
 /**
  * Robinhood Chain produces a block about every 0.1 s, so "refetch on block" samples the
@@ -3388,9 +3724,13 @@ export function usePairBalances(pair: TokenPair): PairBalances {
     query: { enabled: Boolean(isConnected), staleTime: Infinity, gcTime: Infinity },
   });
 
-  const contracts: readonly ContractFunctionParameters[] | undefined =
+  // No `readonly ContractFunctionParameters[]` annotation here, on purpose: viem's
+  // `ContractFunctionParameters` has no `chainId` member, so the annotation erases the per-entry
+  // `chainId` overload wagmi accepts and `tsc --noEmit` fails with TS2322. The literal infers, and
+  // `as const` keeps the argument tuples readable to wagmi.
+  const contracts =
     owner && quoteAsset
-      ? [
+      ? ([
           {
             address: quoteAsset.address,
             abi: erc20Abi,
@@ -3405,7 +3745,7 @@ export function usePairBalances(pair: TokenPair): PairBalances {
             args: [owner],
             chainId: robinhoodChain.id,
           },
-        ]
+        ] as const)
       : undefined;
 
   const batch = useReadContracts({
@@ -3434,9 +3774,17 @@ export function usePairBalances(pair: TokenPair): PairBalances {
   if (!ready || !quoteAsset || !raw || raw.length < 2 || decimals.data === undefined) {
     return ZERO;
   }
+  // One decimal expansion per balance, and the float parsed from it: "Max" writes the string, the
+  // route turns that same string back into these base units, and no rounding sits in between.
+  const quoteText = toHuman(raw[0], quoteAsset.decimals);
+  const tokenText = toHuman(raw[1], decimals.data);
   return {
-    quote: Number(formatUnits(raw[0], quoteAsset.decimals)),
-    token: Number(formatUnits(raw[1], decimals.data)),
+    quote: Number(quoteText),
+    token: Number(tokenText),
+    quoteBase: raw[0],
+    tokenBase: raw[1],
+    quoteText,
+    tokenText,
   };
 }
 
@@ -3454,7 +3802,7 @@ export function invalidatePairBalances(qc: QueryClient): Promise<void> {
 - [ ] **Step 6: Run the balance test to verify it passes**
 
 Run: `npx vitest run src/hooks/useTokenBalance.test.tsx`
-Expected: PASS, 9 tests, reported under the `dom` project.
+Expected: PASS, 10 tests, reported under the `dom` project.
 
 - [ ] **Step 7: Write the failing Suits test**
 
@@ -3558,6 +3906,12 @@ Expected: FAIL, 2 of 6. "reports NOT a holder in an unconfigured build" and "rep
  * unconfigured build must show the 0.5% router fee every user will actually pay, and the
  * quote route is told the same answer, so the displayed fee and the executed fee come from
  * one decision. Set the flag to exactly "true" to demo the 0% holder state.
+ *
+ * One caveat the mock flag buys: the chain charges what SVRouter's own feeFor() says, against
+ * the SuitsNFT it was deployed with. A build with the flag set to "true" against a router whose
+ * suitsNft is the zero address — which is exactly what scripts/fork/deploy-local.mts deploys —
+ * would quote 0 bps and be charged 50. Never a loss of funds (slippage covers it or the swap
+ * reverts), but it is why the fork e2e always runs with holder: false.
  */
 export function useIsSuitHolder(address?: Address): boolean {
   const { data } = useReadContract({
@@ -3608,68 +3962,196 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ### Task 6: Wire the trade panel to the quote route and the real swap
 
 **Files:**
-- Create: `src/components/TradePanel.test.tsx`
-- Modify: `src/lib/types.ts`, `src/lib/data/envio.ts`, `src/lib/data/mock.ts`, `src/components/TradePanel.tsx`
+- Create: `src/lib/data/envio.test.ts`, `src/components/TradePanel.test.tsx`
+- Modify: `src/lib/data/envio.ts`, `src/lib/data/mock.ts`, `src/components/TradePanel.tsx`. **Not `src/lib/types.ts`**: Task 4 owns every change that file gets (ruling 3), and this task only consumes `Quote.routable`, `Quote.call`, the `SwapCall` re-export and `quoteSwap`'s `amount: string`.
 
 **Interfaces:**
-- Consumes: `SwapCall` and `PriceResult` from `src/lib/quote/price.ts` (Task 3); `GET /api/tokens/[address]/quote` (Task 3); `hasRouter()` from `src/lib/chain.ts` (Task 1); `toHuman` from `src/lib/quote/math.ts` (Task 2); `executeSwap`, `SwapDeps`, `SwapReceipt`, `SwapFailedError`, `SwapRejectedError` from `src/lib/swap.ts` (Task 4); `usePairBalances`, `invalidatePairBalances` from `src/hooks/useTokenBalance.ts` and `src/test/dom.tsx` (Task 5); `useSwapQuote` from `src/hooks/useMarketsData.ts` (unchanged); `usePublicClient`, `useWalletClient` from wagmi.
-- Produces: `Quote` widened with `routable?: boolean` and `call?: SwapCall`, and `SwapCall` re-exported from `src/lib/types.ts`; `EnvioDataSource.quoteSwap` answering from the route; a `TradePanel` that submits the route's `call` block and reports the `Trade` event's `amountOut`.
+- Consumes: `PriceResult` from `src/lib/quote/price.ts` (Task 3, in the data source) and `SwapCall` from `src/lib/types.ts`'s re-export (Task 4, in the tests and the panel); `GET /api/tokens/[address]/quote` (Task 3); `hasRouter()` from `src/lib/chain.ts` (Task 1); `toHuman` from `src/lib/quote/math.ts` (Task 2); `executeSwap`, `SwapDeps`, `SwapReceipt`, `SwapFailedError`, `SwapRejectedError` from `src/lib/swap.ts` (Task 4); `usePairBalances` (with its exact balance strings), `invalidatePairBalances` from `src/hooks/useTokenBalance.ts` and `src/test/dom.tsx` (Task 5); `useSwapQuote` from `src/hooks/useMarketsData.ts` (whose `amount` Task 4 already made a string); `usePublicClient`, `useWalletClient` from wagmi.
+- Produces: `EnvioDataSource.quoteSwap` answering from the route, with its own test file; a `MockDataSource.quoteSwap` that documents why it does not; a `TradePanel` that submits the route's `call` block, fills "Max" with the exact balance and reports the `Trade` event's `amountOut`.
 
 Decisions where the contract and the spec are silent (each one line):
-- **`quoteSwap` carries the call block by widening `Quote`, not by returning a richer type.** Two optional fields — `routable?: boolean` and `call?: SwapCall` — leave `MarketsDataSource.quoteSwap`'s signature, `useSwapQuote`'s type, `localQuote`'s return and every existing read of `quote.payAmount` compiling untouched. A richer return type would have changed the interface method, both implementations, the hook's generic and `localQuote` all at once for nothing the panel needs.
-- **`SwapCall` is defined once, in `src/lib/quote/price.ts` (the contract's home for it), and re-exported from `src/lib/types.ts` as a type.** `import type` is erased under `isolatedModules`, so `types.ts` gains no runtime dependency on server code and the type-level cycle (`price.ts` imports `Side`/`Denom` from `types.ts`) is harmless.
+- **`quoteSwap` carries the call block by widening `Quote`, not by returning a richer type** — and Task 4 did the widening (ruling 3). Two optional fields, `routable?: boolean` and `call?: SwapCall`, leave `useSwapQuote`'s type, `localQuote`'s return and every existing read of `quote.payAmount` compiling untouched. A richer return type would have changed the interface method, both implementations, the hook's generic and `localQuote` all at once for nothing the panel needs.
+- **`SwapCall` is defined once, in `src/lib/quote/price.ts` (the contract's home for it), and re-exported from `src/lib/types.ts` as a type** — by Task 4, in the same edit. This task imports it from `@/lib/types` like any other model and adds no import of its own to that file.
+- **The typed amount arrives as a string** (ruling 11), so `quoteSwap` never sees a float. It normalises the shape the keyboard produces — `"1."` → `"1"`, `".5"` → `"0.5"`, `"0.50"` → `"0.5"` — with string operations only, because the route's `AMOUNT` regex refuses a bare leading or trailing point and `Number()` would round the digits the user typed.
 - **`routable` is a tri-state on purpose.** `false` means the route simulated the pool and could not route it; `true` means it priced it; `undefined` means nobody has asked yet. The panel shows the `UntradeableCard` only on an explicit `false`, so the card cannot flash before any input.
 - **The route is not called at amount 0.** The panel queries at amount 0 so the rate and fee rows render before any input, but the route requires `amount > 0` and answers 400 below it. `EnvioDataSource.quoteSwap` therefore answers amount 0 from `localQuote`, with no `call`, so nothing can be submitted from it.
 - **`MockDataSource.quoteSwap` keeps `localQuote` and never reaches the route.** The mock's tokens are seeded pseudo-random addresses that no backend knows: every call would 404 and the whole demo build's panel would break. It is modified only to document the contract it now has — it returns no `call`, so the mock build's submit button stays disabled, which is exactly the state a build with no `NEXT_PUBLIC_SVROUTER_ADDRESS` is in anyway. (I flag this as a place the task brief and the mock's purpose disagree.)
 - **Error wording stays in `src/lib/swap.ts`.** Spec section 4 makes the swap client own the message mapping, so the panel renders `err.message` for both `SwapRejectedError` and `SwapFailedError` and falls back to "Swap failed. Nothing was spent." for anything else. Duplicating the strings in the panel would let the two drift.
 - **The `UntradeableCard` decision moves into `TradeForm`**, after every hook call, because routability now comes from the quote rather than from the list's `tradeable` flag. `TradePanel`'s own `!pair.tradeable` guard stays: the list still answers for a token whose panel has not queried yet.
 
-- [ ] **Step 1: Widen `Quote` and re-export `SwapCall`**
+- [ ] **Step 1: Write the failing test for the Envio source's `quoteSwap`**
 
-`src/lib/types.ts`: add the import at the very top of the file, above the doc comment's closing block is not needed — put it as the first line of the file.
+`src/lib/types.ts` already carries everything this task consumes — `Quote.routable`, `Quote.call`,
+the `SwapCall` re-export and `quoteSwap`'s `amount: string` — because Task 4 owns that file
+(ruling 3). Do not edit it here; a second `import type { SwapCall }` would be a duplicate
+identifier and a second `call?` a duplicate field.
 
-```ts
-import type { SwapCall } from "@/lib/quote/price";
-```
+`EnvioDataSource.quoteSwap` is the riskiest glue in this plan — the slippage percentage becoming
+integer basis points, the typed string reaching the route unrounded, the amount-0 local branch
+(ruling 9), the `routable: false` mapping and a 503 surfacing as a failure the panel can show — so
+it gets the test file the Global Constraints require, with `fetch` mocked and no network.
 
-then, immediately after the `export type VoteDir = "bull" | "bear";` line:
-
-```ts
-/**
- * The execution block the quote route returns. It lives in `src/lib/quote/price.ts` next to
- * the code that builds it; this is a type-only re-export, erased at build time, so nothing
- * client-side gains a runtime dependency on the route's internals.
- */
-export type { SwapCall };
-```
-
-and replace the `Quote` interface:
+`src/lib/data/envio.test.ts`:
 
 ```ts
-export interface Quote {
-  payAmount: number;
-  receiveAmount: number;
-  priceImpactPct: number;
-  routerFeePct: 0 | 0.5;
-  poolFeePct: number;
-  minReceived: number;
-  /**
-   * `false` when the quote route simulated the pool and could not route it, `true` when it
-   * priced it, `undefined` when nothing has been priced yet — amount 0, or the mock source's
-   * local approximation. Only an explicit `false` shows the "Not routed" card.
-   */
-  routable?: boolean;
-  /**
-   * Execution, verbatim from the route. The browser never recomputes an amount in it; it
-   * signs and sends it as it stands. Absent means "nothing can be submitted from this quote".
-   */
-  call?: SwapCall;
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Quote, TokenPair } from "@/lib/types";
+import { EnvioDataSource } from "./envio";
+
+const TOKEN = "0x000000000000000000000000000000000000000a";
+const QUOTE_ADDRESS = "0x000000000000000000000000000000000000000b";
+
+const pair = {
+  id: TOKEN, ticker: "AI", name: "Artificial Inu", address: TOKEN, quote: "NVDA", origin: "LONG",
+  tradeable: true, priceUsd: 0.1943, priceQuote: 0.000866, change1h: 0, change24h: 0, vol24h: 0,
+  mcap: 0, fdv: 0, liquidity: 1_000_000, holders: 0, createdAt: 0, bull: 0, bear: 0,
+  poolId: "0x000000000000000000000000000000000000000c", hook: "", feeTier: "0.30%",
+} as TokenPair;
+
+const PRICED = {
+  routable: true,
+  payAmount: "100",
+  receiveAmount: "1000",
+  minReceived: "990",
+  routerFeePct: 0.5,
+  routerFeeAmount: "0.5",
+  poolFeePct: 0.3,
+  priceImpactPct: 0.004,
+  call: {
+    poolKey: { currency0: TOKEN, currency1: QUOTE_ADDRESS, fee: 3000, tickSpacing: 60, hooks: "0x0000000000000000000000000000000000000000" },
+    zeroForOne: false,
+    amountIn: "100000000",
+    amountOutMin: "990000000000000000000",
+    tokenIn: QUOTE_ADDRESS,
+    tokenOut: TOKEN,
+    tokenInDecimals: 6,
+    tokenOutDecimals: 18,
+  },
+};
+
+/** What the route answers next, and what every fetch was asked for. */
+let answer: { status: number; body: unknown } = { status: 200, body: PRICED };
+const fetchMock = vi.fn(async (input: string) => {
+  const url = String(input);
+  const res =
+    url.startsWith("/api/pairs")
+      ? { ok: true, status: 200, json: async () => [pair] }
+      : { ok: answer.status < 400, status: answer.status, json: async () => answer.body };
+  return res as unknown as Response;
+});
+
+/** The one request that went to the quote route, parsed. Throws if there was none. */
+function quoteCall(): URL {
+  const url = fetchMock.mock.calls.map(([input]) => String(input)).find((u) => u.includes("/quote?"));
+  if (!url) throw new Error("the quote route was never called");
+  return new URL(url, "http://localhost:3000");
 }
+
+function source(): EnvioDataSource {
+  return new EnvioDataSource();
+}
+
+describe("EnvioDataSource.quoteSwap", () => {
+  beforeEach(() => {
+    answer = { status: 200, body: PRICED };
+    fetchMock.mockClear();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("asks the token's own quote route, with every parameter the route requires", async () => {
+    await source().quoteSwap(TOKEN, "buy", "100", "quote", false, 1);
+    const url = quoteCall();
+    expect(url.pathname).toBe(`/api/tokens/${TOKEN}/quote`);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      side: "buy",
+      amount: "100",
+      denom: "quote",
+      slippageBps: "100",
+      holder: "0",
+    });
+  });
+
+  it("tells the route the holder rate the panel is showing", async () => {
+    await source().quoteSwap(TOKEN, "sell", "5", "token", true, 0.5);
+    expect(quoteCall().searchParams.get("holder")).toBe("1");
+  });
+
+  it.each([
+    [0.5, "50"],
+    [0.1, "10"],
+    [1, "100"],
+    [0.001, "1"], // below one basis point: clamped up, never to 0
+    [100, "5000"], // above the route's ceiling: clamped down
+  ])("turns %s %% of slippage into %s basis points", async (pct, bps) => {
+    await source().quoteSwap(TOKEN, "buy", "1", "quote", false, pct);
+    expect(quoteCall().searchParams.get("slippageBps")).toBe(bps);
+  });
+
+  it.each([
+    ["125000.123456789012345678", "125000.123456789012345678"], // no double holds this
+    ["0.0000001", "0.0000001"], // String(1e-7) would have been "1e-7"
+    ["1.", "1"], // shapes the keyboard produces, which the route refuses
+    [".5", "0.5"],
+    ["0.50", "0.5"],
+    ["0001.5", "1.5"],
+  ])("sends the typed amount %s as %s, never through a float", async (typed, sent) => {
+    await source().quoteSwap(TOKEN, "buy", typed, "quote", false, 1);
+    expect(quoteCall().searchParams.get("amount")).toBe(sent);
+  });
+
+  it("answers amount 0 from the local approximation, without calling the route", async () => {
+    const quote = await source().quoteSwap(TOKEN, "buy", "0", "quote", false, 1);
+    expect(quote.call).toBeUndefined();
+    expect(quote.routable).toBeUndefined();
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual(["/api/pairs"]);
+  });
+
+  it("maps the route's numbers onto Quote and keeps the call block identical", async () => {
+    const quote = await source().quoteSwap(TOKEN, "buy", "100", "quote", false, 1);
+    expect(quote).toEqual({
+      payAmount: 100,
+      receiveAmount: 1000,
+      priceImpactPct: 0.004,
+      routerFeePct: 0.5,
+      poolFeePct: 0.3,
+      minReceived: 990,
+      routable: true,
+      call: PRICED.call,
+    } satisfies Quote);
+  });
+
+  it("maps routable:false to a zeroed quote with nothing to submit", async () => {
+    answer = { status: 200, body: { routable: false } };
+    const quote = await source().quoteSwap(TOKEN, "buy", "100", "quote", false, 1);
+    expect(quote).toEqual({
+      payAmount: 0,
+      receiveAmount: 0,
+      priceImpactPct: 0,
+      routerFeePct: 0.5,
+      poolFeePct: 0.3,
+      minReceived: 0,
+      routable: false,
+    } satisfies Quote);
+    expect(quote.call).toBeUndefined();
+  });
+
+  it("throws when the chain is unreachable, so the panel can say the quote failed", async () => {
+    answer = { status: 503, body: { error: "rpc unavailable" } };
+    await expect(source().quoteSwap(TOKEN, "buy", "100", "quote", false, 1)).rejects.toThrow("503");
+  });
+});
 ```
+
+Run: `npx vitest run src/lib/data/envio.test.ts`
+Expected: FAIL, 16 of 17. Task 4 left `quoteSwap` answering from `localQuote` for every amount, so
+the thirteen tests that read `quoteCall()` fail with "the quote route was never called", the two
+mapping tests read the approximation's numbers, and the 503 test resolves instead of throwing. Only
+the amount-0 test passes — it is the one case that is meant to stay local (ruling 9).
 
 - [ ] **Step 2: Reach the quote route from the Envio data source**
 
-`src/lib/data/envio.ts`: replace the import line and the `quoteSwap` method.
+`src/lib/data/envio.ts`: replace the import line and the `quoteSwap` method Task 4 left in place.
 
 The imports at the top of the file become:
 
@@ -3689,32 +4171,39 @@ function toSlippageBps(pct: number): number {
 }
 
 /**
- * The typed amount as a plain decimal string. `String(1e-7)` is "1e-7", which the route
- * rejects; "fullwide" never uses exponent notation and `useGrouping: false` never adds a
- * thousands separator.
+ * The typed text in the shape the route's `AMOUNT` regex accepts, using string operations only:
+ * `Number()` here would round the digits the user typed, and that string becomes `toBase`'s input
+ * and then the `amountIn` Permit2 transfers (Global Constraint 1). "1." → "1", ".5" → "0.5",
+ * "0.50" → "0.5", "0001.5" → "1.5". Junk is left alone; the route answers 400 for it.
  */
-function toDecimalString(n: number): string {
-  return n.toLocaleString("fullwide", { useGrouping: false, maximumFractionDigits: 20 });
+function toRouteAmount(text: string): string {
+  const [whole = "", fraction = ""] = text.trim().split(".");
+  const w = whole.replace(/^0+(?=\d)/, "") || "0";
+  const f = fraction.replace(/0+$/, "");
+  return f === "" ? w : `${w}.${f}`;
 }
 ```
 
 and replace `quoteSwap` with:
 
 ```ts
-  async quoteSwap(id: string, side: Side, amount: number, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
+  async quoteSwap(id: string, side: Side, amount: string, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
     const fresh = this.pairsCache && Date.now() - this.pairsCache.at < 30_000 ? this.pairsCache.list : await this.pairs();
     const pair = fresh.find((p) => p.id === id.toLowerCase());
     if (!pair) throw new Error(`Unknown token ${id}`);
 
     // The panel asks at amount 0 so the rate and the fee rows render before any input; the
     // route requires amount > 0 and answers 400 below it. The local approximation answers
-    // that one case, and carries no `call`, so nothing can be submitted from it.
-    if (!(amount > 0)) return localQuote(pair, side, amount, denom, isSuitHolder, slippagePct);
+    // that one case, and carries no `call`, so nothing can be submitted from it. `typed` is
+    // the only float here, and it decides a branch rather than an amount: a half-typed "."
+    // is NaN, which reads as 0.
+    const typed = Number(amount);
+    if (!(typed > 0)) return localQuote(pair, side, Number.isFinite(typed) ? typed : 0, denom, isSuitHolder, slippagePct);
 
     const key = id.toLowerCase();
     const query = new URLSearchParams({
       side,
-      amount: toDecimalString(amount),
+      amount: toRouteAmount(amount),
       denom,
       slippageBps: String(toSlippageBps(slippagePct)),
       holder: isSuitHolder ? "1" : "0",
@@ -3749,9 +4238,13 @@ and replace `quoteSwap` with:
   }
 ```
 
+Run: `npx vitest run src/lib/data/envio.test.ts`
+Expected: PASS, 17 tests (6 plain `it`s plus the 5-row slippage table and the 6-row amount table),
+and no network: `fetch` is stubbed for the whole file.
+
 - [ ] **Step 3: Say in the mock what its quote now is and is not**
 
-`src/lib/data/mock.ts`: replace the `quoteSwap` method with the same body under a comment that states the contract.
+`src/lib/data/mock.ts`: replace the `quoteSwap` method Task 4 left in place with the same body under a comment that states the contract.
 
 ```ts
   /**
@@ -3760,19 +4253,24 @@ and replace `quoteSwap` with:
    * of them and the demo build's panel would break. The result therefore carries no `call`,
    * which the panel reads as "nothing can be submitted" — the state a build with no
    * NEXT_PUBLIC_SVROUTER_ADDRESS is already in.
+   *
+   * `amount` is the typed string (ruling 11); this is one of the two float models allowed to
+   * parse it, because nothing it computes ever reaches the chain. A half-typed "." is NaN,
+   * which reads as 0.
    */
   async quoteSwap(
     id: string,
     side: Side,
-    amount: number,
+    amount: string,
     denom: Denom,
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote> {
+    const typed = Number(amount);
     return localQuote(
       this.pairOrThrow(id),
       side,
-      amount,
+      Number.isFinite(typed) ? typed : 0,
       denom,
       isSuitHolder,
       slippagePct,
@@ -3862,7 +4360,15 @@ const h = vi.hoisted(() => {
       addToast: vi.fn(() => 1),
       updateToast: vi.fn(),
     },
-    balances: { quote: 1250, token: 125_000 },
+    // The widened PairBalances (ruling 12): floats for display, exact strings for "Max".
+    balances: {
+      quote: 1250,
+      token: 125_000.7,
+      quoteBase: BigInt("1250000000"),
+      tokenBase: BigInt("125000700000000000000000"),
+      quoteText: "1250",
+      tokenText: "125000.7",
+    },
     quote: undefined as Quote | undefined,
     quoteError: false,
     router: true,
@@ -3870,6 +4376,7 @@ const h = vi.hoisted(() => {
     publicClient: { id: "public-client" } as unknown,
     executeSwap: vi.fn(),
     invalidate: vi.fn(),
+    seenQuoteParams: vi.fn(),
   };
 });
 
@@ -3879,7 +4386,10 @@ vi.mock("@/hooks/useTokenBalance", () => ({
   invalidatePairBalances: h.invalidate,
 }));
 vi.mock("@/hooks/useMarketsData", () => ({
-  useSwapQuote: () => ({ data: h.quote, isError: h.quoteError }),
+  useSwapQuote: (params: unknown) => {
+    h.seenQuoteParams(params);
+    return { data: h.quote, isError: h.quoteError };
+  },
 }));
 vi.mock("wagmi", () => ({
   usePublicClient: () => h.publicClient,
@@ -3916,7 +4426,14 @@ describe("TradePanel", () => {
     h.state.addToast.mockClear();
     h.state.addToast.mockReturnValue(1);
     h.state.updateToast.mockClear();
-    h.balances = { quote: 1250, token: 125_000 };
+    h.balances = {
+      quote: 1250,
+      token: 125_000.7,
+      quoteBase: BigInt("1250000000"),
+      tokenBase: BigInt("125000700000000000000000"),
+      quoteText: "1250",
+      tokenText: "125000.7",
+    };
     h.quote = PRICED;
     h.quoteError = false;
     h.router = true;
@@ -3924,6 +4441,7 @@ describe("TradePanel", () => {
     h.publicClient = { id: "public-client" };
     h.executeSwap.mockReset();
     h.invalidate.mockReset();
+    h.seenQuoteParams.mockClear();
   });
 
   it("shows the not-routed card when the route could not simulate the pool", () => {
@@ -3973,6 +4491,25 @@ describe("TradePanel", () => {
     typeAmount("100");
     expect(screen.getByText("Fetching a quote…")).toBeTruthy();
     expect(buyButton().hasAttribute("disabled")).toBe(true);
+  });
+
+  it("fills Max with the balance exactly, to the last wei", () => {
+    show();
+    // Sell, so the pay asset is the 18-decimal token whose balance no double holds exactly.
+    fireEvent.click(screen.getByRole("button", { name: "Sell" }));
+    // The 100 % button is labelled "Max"; 25/50/75 keep their display rounding.
+    fireEvent.click(screen.getByRole("button", { name: "Max" }));
+    // Not "125001": rounding Max up trips the insufficient-balance guard, rounding it down
+    // leaves dust behind. The router's fee comes out of the input, so the whole balance is
+    // spendable (spec section 5).
+    expect((screen.getByLabelText("Amount") as HTMLInputElement).value).toBe("125000.7");
+  });
+
+  it("asks the route with the typed text, never a parsed float", () => {
+    show();
+    typeAmount("125000.123456789012345678");
+    const last = h.seenQuoteParams.mock.calls.at(-1)?.[0] as { amount: unknown };
+    expect(last.amount).toBe("125000.123456789012345678");
   });
 
   it("shows the 0% router fee for a Suit holder", () => {
@@ -4069,13 +4606,14 @@ describe("TradePanel", () => {
 - [ ] **Step 5: Run the panel test to verify it fails**
 
 Run: `npx vitest run src/components/TradePanel.test.tsx`
-Expected: FAIL, 8 of 13. The not-routed, deploy-notice, call-block, `executeSwap` arguments, confirmed toast, rejection and generic-failure cases all fail; the wallet, amount, balance and fee-row cases already pass against the current panel.
+Expected: FAIL, 6 of 15: the not-routed card, the deploy notice, the "Quote unavailable" and "Fetching a quote…" reasons, Max (it reads `125001`), and the confirmed toast (it still reports the quote's number and never invalidates the balances). The other nine already pass, because Task 4's minimal edit already hands the panel the call block, the two wallet clients and the typed string.
 
 - [ ] **Step 6: Wire the panel**
 
-`src/components/TradePanel.tsx`, four replacements.
+`src/components/TradePanel.tsx`, five replacements.
 
-**(a)** Replace the import block at the top of the file (lines 1 to 11):
+**(a)** Replace everything above `const AMOUNT_RE` — the `"use client"` line and the whole import
+block, which Task 4 has already edited, so its line numbers have moved:
 
 ```tsx
 "use client";
@@ -4112,16 +4650,22 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   const buy = side === "buy";
+  // Display and gating only: every amount that reaches the route or the chain is the string
+  // above, never this (Global Constraint 1, ruling 11).
   const amountNum = parseFloat(amount) || 0;
   const payAsset = buy ? pair.quote : pair.ticker;
   const receiveAsset = buy ? pair.ticker : pair.quote;
   const payBalance = buy ? balances.quote : balances.token;
+  /** The pay balance to the last wei, for the Max button (ruling 12). */
+  const payBalanceText = buy ? balances.quoteText : balances.tokenText;
   const quoteUsd = pair.priceUsd / pair.priceQuote;
 
   const quoteQuery = useSwapQuote({
     id: pair.id,
     side,
-    amount: amountNum,
+    // The text the user typed, unrounded: `toBase` on the server turns this very string into
+    // the amountIn Permit2 transfers.
+    amount,
     denom,
     isSuitHolder: isHolder,
     slippagePct: slippage.value,
@@ -4232,10 +4776,31 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   };
 ```
 
+**(e)** Replace `quick`, so "Max" is the balance and not a rounding of it:
+
+```tsx
+  const quick = (pct: number) => {
+    setDenom(buy ? "quote" : "token");
+    if (!payBalance) {
+      setAmount("");
+      return;
+    }
+    // 100 % is the balance to the last wei (spec section 5, ruling 12): the router's fee comes
+    // out of the input, so the whole balance is spendable, and a rounded Max would either leave
+    // dust behind or trip the insufficient-balance guard. 25/50/75 keep their display rounding —
+    // they are a convenience, not a promise about a balance.
+    setAmount(
+      pct === 100
+        ? payBalanceText
+        : String(+((payBalance * pct) / 100).toFixed(buy ? 2 : 0)),
+    );
+  };
+```
+
 - [ ] **Step 7: Run the panel test to verify it passes**
 
 Run: `npx vitest run src/components/TradePanel.test.tsx`
-Expected: PASS, 13 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 8: Run the gates**
 
@@ -4245,7 +4810,7 @@ Expected: all green. Then `NEXT_PUBLIC_DATA_SOURCE=envio npm run dev` on a token
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/lib/types.ts src/lib/data/envio.ts src/lib/data/mock.ts src/components/TradePanel.tsx src/components/TradePanel.test.tsx
+git add src/lib/data/envio.ts src/lib/data/envio.test.ts src/lib/data/mock.ts src/components/TradePanel.tsx src/components/TradePanel.test.tsx
 git commit -m "Quote the trade panel from the route and execute it through SVRouter" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ```
@@ -4256,7 +4821,7 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 
 **Files:**
 - Create: `scripts/fork/anvil.sh`, `scripts/fork/deploy-local.mts`, `scripts/fork/swap-e2e.mts`
-- Modify: `package.json` (three scripts), `.gitignore`, `scripts/README.md`, `README.md`
+- Modify: `package.json` (three scripts), `.gitignore`, `scripts/README.md`, `README.md`, `.env.example` (the router variable in, the dead mock-outcome flag out)
 
 **Interfaces:**
 - Consumes: `PERMIT2_ADDRESS`, `UNIVERSAL_ROUTER_ADDRESS`, `SVROUTER_ADDRESS`, `robinhoodChain` from `src/lib/chain.ts` (Task 1); `getBackend()` and `poolKey()` from `src/lib/market/backend.ts` (Task 1); `PoolKeyRow` from `src/lib/market/poolKey.ts` (Task 1); `toHuman` from `src/lib/quote/math.ts` (Task 2); `createQuoter` from `src/lib/quote/quoter.ts` and `priceSwap` from `src/lib/quote/price.ts` (Task 3); `executeSwap` from `src/lib/swap.ts` (Task 4); the contracts repo's `script/Deploy.s.sol`.
@@ -4384,6 +4949,12 @@ if (!LOCAL_RPC.test(rpcUrl)) {
 }
 if (!existsSync(resolve(contractsDir, "script/Deploy.s.sol"))) {
   die(`No script/Deploy.s.sol under ${contractsDir}. Set CONTRACTS_DIR to the contracts repo.`);
+}
+// Same courtesy anvil.sh gives: a missing Foundry must say so, not raise ENOENT from execFileSync.
+try {
+  execFileSync("forge", ["--version"], { stdio: "ignore" });
+} catch {
+  die("forge not found. Install Foundry: https://getfoundry.sh");
 }
 
 const client = createPublicClient({ transport: http(rpcUrl) });
@@ -4523,7 +5094,8 @@ const EMPTY_SLOT = pad("0x", { size: 32 });
  * way forge's `deal` does. anvil's accounts hold ETH and nothing else, and the only large
  * NVDA holder on the fork is the v4 PoolManager, whose balance backs the pool under test.
  * Tries 32 candidate slots in both the Solidity (key ++ slot) and Vyper (slot ++ key)
- * layouts, and restores every slot that turned out not to be the balance.
+ * layouts, and restores every slot that turned out not to be the balance. Up to 64 probes and
+ * two reads each, so it prints the slot it settled on and says plainly when it gives up.
  */
 async function deal(token: Address, holder: Address, amount: bigint): Promise<void> {
   const held = await publicClient.readContract({
@@ -4548,11 +5120,18 @@ async function deal(token: Address, holder: Address, amount: bigint): Promise<vo
         functionName: "balanceOf",
         args: [holder],
       });
-      if (now === amount) return;
+      if (now === amount) {
+        // Named so a later assertion about the pool's own accounting knows which slot moved.
+        console.log(`funded ${token}: balance slot ${slot} (${index}) set to ${amount}`);
+        return;
+      }
       await testClient.setStorageAt({ address: token, index, value: before ?? EMPTY_SLOT });
     }
   }
-  throw new Error(`could not find the balance mapping slot of ${token}`);
+  throw new Error(
+    `could not find the balance mapping slot of ${token} in the first 32 slots of either layout; ` +
+      "fund the wallet another way or widen the search",
+  );
 }
 
 async function one(
@@ -4679,9 +5258,34 @@ ETH and nothing else and the only large NVDA holder on the fork is the v4 PoolMa
 balance backs the pool under test.
 ```
 
-- [ ] **Step 9: Mark the M2 stubs done in `README.md`**
+- [ ] **Step 9: Document the M2 environment and mark the stubs done**
 
-Replace the paragraph that reads
+`.env.example` first. Task 5 rewrote the `NEXT_PUBLIC_MOCK_SUIT_HOLDER` block; these two edits are
+elsewhere in the file and do not touch it. Add the router block — the switch spec section 9 lists
+first, and the only variable M2 introduces that a fresh checkout cannot otherwise learn about —
+immediately above the `NEXT_PUBLIC_SUITS_NFT_ADDRESS` block:
+
+```
+# SVRouter on Robinhood Chain, once it is deployed. Empty disables execution only: the
+# quote route still answers and every number on the trade panel is real, but the button
+# reads "Trading goes live when the router is deployed". scripts/fork/ writes a local
+# router address into .env.fork for the anvil harness.
+NEXT_PUBLIC_SVROUTER_ADDRESS=
+```
+
+and delete the mock-outcome block entirely, both lines of comment and the variable:
+
+```
+# Stubbed SVRouter outcome: "success" (default) or "failed" to exercise the
+# failed-swap toast.
+NEXT_PUBLIC_MOCK_TX_OUTCOME=success
+```
+
+Task 4 rewrote `src/lib/swap.ts` around the real path, which consults no such flag; a swap now
+fails when the chain says so. `grep -rn "MOCK_TX_OUTCOME" . --exclude-dir=node_modules
+--exclude-dir=.git` must answer nothing once this step is done.
+
+Then `README.md`. Replace the paragraph that reads
 
 ```
 Preview deployments get no database variable and stay on the mock source.
@@ -4718,15 +5322,41 @@ still answers, so every number on the panel is real before the deploy. `scripts/
 the whole path against a local anvil fork in the meantime — see `scripts/README.md`.
 ```
 
+Two lines elsewhere in the file are now false. In the watchlist paragraph, change
+
+```
+not follow the wallet to another device, and vote counts read 0 until the
+signed API lands in M2.
+```
+
+to
+
+```
+not follow the wallet to another device, and vote counts read 0 until the
+signed API lands in M3.
+```
+
+and in the `## Layout` block, change the `src/lib` line from
+
+```
+src/lib            types, formatting, market filters, chain, wagmi, swap stub, quote math
+```
+
+to
+
+```
+src/lib            types, formatting, market filters, chain, wagmi, SVRouter swap, quote math
+```
+
 - [ ] **Step 10: Run the gates**
 
 Run: `npm test && npx tsc --noEmit && npx eslint . && npm run build`
-Expected: all green. `git status` shows no `.env.fork` and no `.env.local`; `git diff package.json` shows only the three `fork:*` scripts.
+Expected: all green. `git status` shows no `.env.fork` and no `.env.local`; `git diff package.json` shows only the three `fork:*` scripts; `grep -rn "MOCK_TX_OUTCOME" . --exclude-dir=node_modules --exclude-dir=.git` matches nothing.
 
 - [ ] **Step 11: Commit**
 
 ```bash
-git add package.json .gitignore scripts/fork/anvil.sh scripts/fork/deploy-local.mts scripts/fork/swap-e2e.mts scripts/README.md README.md
+git add package.json .gitignore .env.example scripts/fork/anvil.sh scripts/fork/deploy-local.mts scripts/fork/swap-e2e.mts scripts/README.md README.md
 git commit -m "Prove the trading path on an anvil fork and mark the M2 stubs done" -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ```
