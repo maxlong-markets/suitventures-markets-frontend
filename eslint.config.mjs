@@ -21,6 +21,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The design handoff under docs/design-handoff is a static artifact, not app code.
+    "docs/**",
+    // Git-ignored tool worktrees; their build output must not be linted.
+    ".claude/**",
   ]),
 ]);
 
