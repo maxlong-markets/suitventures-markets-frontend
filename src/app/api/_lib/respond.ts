@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import { DbUnavailableError } from "@/lib/db/client";
 import { EnvioUnavailableError } from "@/lib/envio/client";
 
-export { nowSec } from "@/lib/time";
-
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 
 /** Expects an already-lowercased address; the routes lowercase the path segment first. */
@@ -32,6 +30,9 @@ export function failure(err: unknown): NextResponse {
     console.warn(`database unavailable: ${err.message}`);
     return NextResponse.json({ error: "database unavailable" }, { status: 503, headers: { ...headers, "Retry-After": "15" } });
   }
-  console.error(err);
+  // Name, code and message only, never the object: a driver error carries its query and parameters.
+  const code = (err as { code?: unknown } | null)?.code;
+  const line = err instanceof Error ? `${err.name}${typeof code === "string" ? ` (${code})` : ""}: ${err.message}` : String(err);
+  console.error(`internal error: ${line}`);
   return NextResponse.json({ error: "internal error" }, { status: 500, headers });
 }

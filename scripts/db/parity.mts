@@ -1,9 +1,9 @@
-import { createDb } from "../../src/lib/db/client";
-import type { PairsScope } from "../../src/lib/envio/pairs";
-import { createDbBackend } from "../../src/lib/market/dbBackend";
-import { createEnvioBackend } from "../../src/lib/market/envioBackend";
-import { createEnvioSource } from "../../src/lib/sync/envioSource";
-import type { TokenPair } from "../../src/lib/types";
+import { createDb } from "@/lib/db/client";
+import type { PairsScope } from "@/lib/envio/pairs";
+import { createDbBackend } from "@/lib/market/dbBackend";
+import { createEnvioBackend } from "@/lib/market/envioBackend";
+import { createEnvioSource } from "@/lib/sync/envioSource";
+import type { TokenPair } from "@/lib/types";
 
 const TOLERANCE = 0.001; // 0.1 %
 const url = process.env.DATABASE_URL_DIRECT;

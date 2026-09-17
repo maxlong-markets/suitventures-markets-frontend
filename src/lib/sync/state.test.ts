@@ -44,6 +44,15 @@ describe("sync_state", () => {
     await saveCursors(db, "market", { cursor: 101, cursor2: 201 });
     expect(await readState(db, "market")).toMatchObject({ cursor: 101, cursor2: 201, cursorText: "b", phase: "y" });
   });
+  it("accumulates rows_written and queries_used past the int4 range (they are bigint), read back as numbers", async () => {
+    const types = await db.query<{ column_name: string; data_type: string }>(
+      "select column_name, data_type from information_schema.columns where table_schema = 'market' and table_name = 'sync_state' and column_name in ('rows_written', 'queries_used') order by column_name",
+    );
+    expect(types).toEqual([{ column_name: "queries_used", data_type: "bigint" }, { column_name: "rows_written", data_type: "bigint" }]);
+    await finishRun(db, "market", { now: NOW, ok: true, rows: 2_000_000_000, queries: 2_000_000_000 });
+    await finishRun(db, "market", { now: NOW + 1, ok: true, rows: 2_000_000_000, queries: 2_000_000_000 });
+    expect(await readState(db, "market")).toMatchObject({ rowsWritten: 4_000_000_000, queriesUsed: 4_000_000_000 });
+  });
   it("keeps the highest head block ever reported on the market row, from a database that has never seen the job", async () => {
     expect(await readHeadBlock(db)).toBe(0);
     await raiseHeadBlock(db, 100);

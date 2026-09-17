@@ -20,4 +20,16 @@ describe("failure", () => {
     expect(failure(new EnvioUnavailableError("indexer responded 429")).status).toBe(503);
     expect(failure(new Error("boom")).status).toBe(500);
   });
+  it("logs only the name, code and message of an unexpected error, never the object (a driver error carries its query and parameters)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = Object.assign(new Error("boom"), { code: "XX000", query: "select secret", parameters: ["postgres://u:p@host/db"] });
+    const res = failure(err);
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toEqual({ error: "internal error" });
+    expect(error.mock.calls).toEqual([["internal error: Error (XX000): boom"]]);
+    error.mockClear();
+    expect(failure(new TypeError("no code")).status).toBe(500);
+    expect(failure("a thrown string").status).toBe(500);
+    expect(error.mock.calls).toEqual([["internal error: TypeError: no code"], ["internal error: a thrown string"]]);
+  });
 });

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import { POOL_A, QUOTE, T0, TOKEN_A, TOKEN_B, addr, balanceRec, candleRec, poolId, poolRec, priceRec, quoteRec, swapRec, tokenRec, txHash } from "./testRows";
-import { insertSwaps, markSynced, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
+import { dedupe, insertSwaps, markSynced, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
 
 let db: Db;
 beforeAll(async () => { db = await testDb(); });
@@ -12,6 +12,14 @@ beforeEach(() => db.exec(
 ));
 
 const count = async (table: string) => Number((await db.query<{ n: unknown }>(`select count(*) as n from market.${table}`))[0].n);
+
+describe("dedupe", () => {
+  it("keeps the last occurrence per key and returns the rows in key order, so every multi-row statement locks its rows in one order", () => {
+    const rows = [{ id: "b", v: 1 }, { id: "c", v: 1 }, { id: "a", v: 1 }, { id: "b", v: 2 }];
+    expect(dedupe(rows, (r) => r.id)).toEqual([{ id: "a", v: 1 }, { id: "b", v: 2 }, { id: "c", v: 1 }]);
+    expect(dedupe([] as { id: string }[], (r) => r.id)).toEqual([]);
+  });
+});
 
 describe("upsertQuotes", () => {
   it("writes quotes, leaves prices null without a price row and fills them when one exists", async () => {

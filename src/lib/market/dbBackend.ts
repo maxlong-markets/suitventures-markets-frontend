@@ -24,7 +24,15 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 type QuoteCols = { usd_price: number | null; usd_updated_at: number | null; aggregator: string | null };
 type ListedRow = { symbol: string; pool_id: string; quote_id: string } & QuoteCols;
 type TokenCols = { decimals: number; total_supply: string; holders_count: number };
-type StateRow = { job: string; cursor: number; last_ok_at: number | null; last_error: string | null };
+type StateRow = { job: string; cursor: number; phase: string; last_ok_at: number | null; last_error: string | null };
+/** A public route: a stored error (indexer or driver text) is cut to this many characters; the full text goes to the log. */
+const LAST_ERROR_SHOWN = 120;
+
+function shortError(job: string, text: string | null): string | null {
+  if (text === null || text.length <= LAST_ERROR_SHOWN) return text;
+  console.warn(`${job} last_error: ${text}`);
+  return text.slice(0, LAST_ERROR_SHOWN);
+}
 
 /** usdMap() for one stored quote: null without a feed row or when the feed is stale. */
 function quoteUsd(q: QuoteCols, now: number): number | null {
@@ -51,7 +59,7 @@ const HOLDERS_SQL = `select holder, balance::text as balance from market.token_b
   where token_id = $1 and balance > 0 order by balance desc limit ${HOLDERS_SHOWN}`;
 const REFRESH_SQL = `select refreshed_at from market.holder_refresh where token_id = $1`;
 const QUOTES_SQL = `select id, address, symbol, name, decimals, usd_price, usd_updated_at, aggregator from market.quotes order by id`;
-const STATE_SQL = `select job, cursor, last_ok_at, last_error from market.sync_state where job in ('market', 'nightly')`;
+const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('market', 'nightly')`;
 const QUOTE_AGES_SQL = `select id, usd_updated_at, aggregator from market.quotes where usd_updated_at is not null order by id`;
 
 /** SQL readers with M1's semantics (spec section 8). `now` is injectable for the tests. */
@@ -135,9 +143,13 @@ export function createDbBackend(db: Db, source: EnvioSource, now: () => number =
       const sync = {
         lastOkAgeSec: market?.last_ok_at != null ? at - market.last_ok_at : null,
         cursorAgeSec: market && market.cursor > 0 ? at - market.cursor : null,
-        lastError: market?.last_error ?? null,
+        lastError: shortError("market", market?.last_error ?? null),
       };
-      const night = { lastOkAgeSec: nightly?.last_ok_at != null ? at - nightly.last_ok_at : null, lastError: nightly?.last_error ?? null };
+      const night = {
+        lastOkAgeSec: nightly?.last_ok_at != null ? at - nightly.last_ok_at : null,
+        lastError: shortError("nightly", nightly?.last_error ?? null),
+        phase: nightly?.phase ?? "",
+      };
       const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && quotes.every((q) => !q.stale);
       return { ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night };
     },

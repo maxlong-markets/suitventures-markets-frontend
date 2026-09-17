@@ -1,8 +1,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { createDb } from "../../src/lib/db/client";
-import { newCheckpoint, runSeed, type Checkpoint } from "../../src/lib/seed/seed";
-import { createEnvioSource } from "../../src/lib/sync/envioSource";
-import { createLimiter } from "../../src/lib/sync/limiter";
+import { createDb } from "@/lib/db/client";
+import { newCheckpoint, runSeed, type Checkpoint } from "@/lib/seed/seed";
+import { createEnvioSource } from "@/lib/sync/envioSource";
+import { createLimiter } from "@/lib/sync/limiter";
 
 const CHECKPOINT = ".seed/checkpoint.json"; // git-ignored; starting over: see scripts/README.md
 const CHECKPOINT_TMP = `${CHECKPOINT}.tmp`;

@@ -11,11 +11,15 @@ function chunks<T>(rows: readonly T[]): T[][] {
   return out;
 }
 
-/** Last occurrence wins: `on conflict do update` rejects a statement that touches one row twice. */
-function dedupe<T>(rows: readonly T[], key: (r: T) => string): T[] {
+/**
+ * Last occurrence wins: `on conflict do update` rejects a statement that touches one row twice. The rows come back in
+ * key order, so every multi-row statement locks its rows in one order and the nightly's walk and a market cycle
+ * writing the same pools or tokens cannot deadlock. Exported for its test.
+ */
+export function dedupe<T>(rows: readonly T[], key: (r: T) => string): T[] {
   const m = new Map<string, T>();
   for (const r of rows) m.set(key(r), r);
-  return [...m.values()];
+  return [...m.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, r]) => r);
 }
 
 /**

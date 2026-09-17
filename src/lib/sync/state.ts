@@ -7,9 +7,10 @@ export type SyncState = {
   rowsWritten: number; queriesUsed: number; leaseUntil: number; leaseOwner: string | null;
 };
 
+/** rows_written and queries_used are bigint: a string from the postgres driver, a number from PGlite; read through Number(). */
 type Row = {
   job: SyncJob; cursor: number; cursor2: number; cursor_text: string; phase: string; last_run_at: number | null;
-  last_ok_at: number | null; last_error: string | null; rows_written: number; queries_used: number; lease_until: number; lease_owner: string | null;
+  last_ok_at: number | null; last_error: string | null; rows_written: number | string; queries_used: number | string; lease_until: number; lease_owner: string | null;
 };
 
 /** Every function starts here, so each works on a database that has never seen the job. */
@@ -23,7 +24,7 @@ export async function readState(db: Db, job: SyncJob): Promise<SyncState> {
   );
   return {
     job: r.job, cursor: r.cursor, cursor2: r.cursor2, cursorText: r.cursor_text, phase: r.phase, lastRunAt: r.last_run_at,
-    lastOkAt: r.last_ok_at, lastError: r.last_error, rowsWritten: r.rows_written, queriesUsed: r.queries_used, leaseUntil: r.lease_until, leaseOwner: r.lease_owner,
+    lastOkAt: r.last_ok_at, lastError: r.last_error, rowsWritten: Number(r.rows_written), queriesUsed: Number(r.queries_used), leaseUntil: r.lease_until, leaseOwner: r.lease_owner,
   };
 }
 

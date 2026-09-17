@@ -74,10 +74,10 @@ describe("runSeed", () => {
     expect(await db.query("select holder from market.token_balances where token_id = $1 order by balance desc", [TOKEN_A])).toEqual([{ holder: hex("a", 40) }, { holder: hex("b", 40) }]);
     expect(await count(db, "token_balances")).toBe(3);
     expect(await db.query("select id, listed_pool_id from market.tokens order by id")).toEqual([{ id: TOKEN_A, listed_pool_id: POOL_A }, { id: TOKEN_B, listed_pool_id: POOL_B }]);
-    // Every pool's history is stored up to the seed's start; the first cycles fetch from 600 s before it.
-    expect(await db.query("select id, synced_to from market.pools order by id")).toEqual([{ id: POOL_A, synced_to: NOW - 600 }, { id: POOL_B, synced_to: NOW - 600 }]);
+    // Every pool's history is stored up to the seed's start; the first cycles fetch from an hour before it.
+    expect(await db.query("select id, synced_to from market.pools order by id")).toEqual([{ id: POOL_A, synced_to: NOW - 3600 }, { id: POOL_B, synced_to: NOW - 3600 }]);
     const market = await readState(db, "market");
-    expect([market.cursor, market.cursor2]).toEqual([NOW - 600, NOW - 600]);
+    expect([market.cursor, market.cursor2]).toEqual([NOW - 3600, NOW - 3600]);
     expect((await readState(db, "nightly")).lastOkAt).toBe(NOW + 1000);
     // Swaps walk: r0 one page, r1 one page, r2 two pages (0xc,0xd then 0xe); each page saved with its last id.
     const swapSaves = saves.filter((c) => c.phase === "swaps");
@@ -116,13 +116,13 @@ describe("runSeed", () => {
     await fresh.end();
   });
 
-  it("finish stamps every pool's watermark at the start minus 600 s and never lowers one", async () => {
+  it("finish stamps every pool's watermark at the start minus 3600 s and never lowers one", async () => {
     const fresh = await testDb();
     await upsertPools(fresh, data.pools, NOW);
     await markSynced(fresh, [POOL_B], NOW + 5);
     const checkpoint: Checkpoint = { startedAt: NOW, phase: "finish", ranges: {}, done: ["quotes", "tokens", "pools", "swaps", "candles", "balances"] };
     await runSeed(fresh, new FakeSource(data), seedOpts(checkpoint, []));
-    expect(await fresh.query("select id, synced_to from market.pools order by id")).toEqual([{ id: POOL_A, synced_to: NOW - 600 }, { id: POOL_B, synced_to: NOW + 5 }]);
+    expect(await fresh.query("select id, synced_to from market.pools order by id")).toEqual([{ id: POOL_A, synced_to: NOW - 3600 }, { id: POOL_B, synced_to: NOW + 5 }]);
     await fresh.end();
   });
 });

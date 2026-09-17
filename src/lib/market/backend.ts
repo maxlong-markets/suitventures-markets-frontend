@@ -12,7 +12,7 @@ export type HealthReport = {
   quotes: { id: string; ageSec: number; stale: boolean }[];
   db?: { latencyMs: number };
   sync?: { lastOkAgeSec: number | null; cursorAgeSec: number | null; lastError: string | null };
-  nightly?: { lastOkAgeSec: number | null; lastError: string | null };
+  nightly?: { lastOkAgeSec: number | null; lastError: string | null; phase: string }; // phase "" is a finished re-pull
   error?: string;
 };
 

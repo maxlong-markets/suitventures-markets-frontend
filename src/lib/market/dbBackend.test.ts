@@ -239,7 +239,7 @@ describe("createDbBackend health", () => {
     const h = await backend().health();
     expect(h).toMatchObject({
       ok: false, backend: "db", lag: 5, quotes: [{ id: NVDA, ageSec: 60, stale: false }],
-      sync: { lastOkAgeSec: null, cursorAgeSec: null, lastError: null }, nightly: { lastOkAgeSec: null, lastError: null },
+      sync: { lastOkAgeSec: null, cursorAgeSec: null, lastError: null }, nightly: { lastOkAgeSec: null, lastError: null, phase: "" },
     });
     expect(h.db!.latencyMs).toBeGreaterThanOrEqual(0);
   });
@@ -251,7 +251,7 @@ describe("createDbBackend health", () => {
     await finishRun(db, "market", { now: NOW - 30, ok: true, rows: 10, queries: 4 });
     await finishRun(db, "nightly", { now: NOW - 3600, ok: true, rows: 0, queries: 0 });
     expect(await backend().health()).toMatchObject({
-      ok: true, sync: { lastOkAgeSec: 30, cursorAgeSec: 120, lastError: null }, nightly: { lastOkAgeSec: 3600, lastError: null },
+      ok: true, sync: { lastOkAgeSec: 30, cursorAgeSec: 120, lastError: null }, nightly: { lastOkAgeSec: 3600, lastError: null, phase: "" },
     });
   });
 
@@ -270,5 +270,29 @@ describe("createDbBackend health", () => {
   it("answers not ok with no report when the database does not answer", async () => {
     const broken: Db = { ...db, query: async () => { throw new Error("connection refused"); } };
     expect(await createDbBackend(broken, source, () => now).health()).toEqual({ ok: false, backend: "db", lag: null, quotes: [], error: "database unavailable" });
+  });
+
+  it("surfaces the nightly's phase, so a budget-stopped re-pull does not read as finished", async () => {
+    await saveCursors(db, "nightly", { phase: "pools", cursorText: PA });
+    expect((await backend().health()).nightly).toMatchObject({ lastOkAgeSec: 3600, phase: "pools" });
+    await saveCursors(db, "nightly", { phase: "", cursorText: "" });
+    expect((await backend().health()).nightly).toMatchObject({ phase: "" });
+  });
+
+  it("cuts a long last_error to 120 characters on the public route and keeps the full text in the log", async () => {
+    const long = `relation "market.pools" does not exist; ${"x".repeat(200)}`;
+    await finishRun(db, "market", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
+    await finishRun(db, "nightly", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
+    const h = await backend().health();
+    expect(h.sync!.lastError).toBe(long.slice(0, 120));
+    expect(h.sync!.lastError).toHaveLength(120);
+    expect(h.nightly!.lastError).toBe(long.slice(0, 120));
+    expect(console.warn).toHaveBeenCalledWith(`market last_error: ${long}`);
+    expect(console.warn).toHaveBeenCalledWith(`nightly last_error: ${long}`);
+    // A short error travels whole, and is not logged again by the health check.
+    vi.mocked(console.warn).mockClear();
+    await finishRun(db, "market", { now: NOW, ok: false, error: "indexer responded 429", rows: 0, queries: 1 });
+    expect((await backend().health()).sync!.lastError).toBe("indexer responded 429");
+    expect(console.warn).toHaveBeenCalledTimes(1); // the nightly's long one
   });
 });

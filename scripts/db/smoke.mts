@@ -1,6 +1,12 @@
-/** Round-trips the Db interface against DATABASE_URL_DIRECT: COPY, query, a rolled-back transaction. Prints "ok". Run: npm run db:smoke */
+/**
+ * Round-trips the Db interface against DATABASE_URL_DIRECT: COPY, query, a rolled-back transaction, and one
+ * upsertTokens with a hostile name inside a transaction that rolls back (so market.tokens must exist: run
+ * db:migrate first). Prints "ok" only when every round trip matched. Run: npm run db:smoke
+ */
 import assert from "node:assert/strict";
 import { createDb } from "@/lib/db/client";
+import type { TokenRec } from "@/lib/sync/source";
+import { upsertTokens } from "@/lib/sync/writers";
 
 const url = process.env.DATABASE_URL_DIRECT;
 if (!url) {
@@ -35,6 +41,29 @@ try {
     });
   const [count] = await db.query<{ n: string | number }>("select count(*) as n from smoke");
   assert.equal(Number(count.n), 3);
+  // The array-parameter writers depend on the driver serialising a text[] of names with quotes, braces, a backslash
+  // and a comma exactly; prove it through the real upsertTokens (insert, then the on-conflict update) inside a
+  // transaction that rolls back, so the smoke leaves market.tokens as it found it.
+  const hostile = `Hos"tile {name}, with \\backslash, 'quotes' and \u00e9`;
+  const id = "0x" + "5".repeat(40);
+  const token: TokenRec = {
+    id, address: id, symbol: 'S"y,m{b}ol', name: hostile, decimals: 18, totalSupply: "1" + "0".repeat(27), holdersCount: 0,
+    poolCount: 0, origin: "Other", createdAt: 0, primaryPool_id: null, metadataLoaded: true,
+  };
+  let seen: { name: string; symbol: string } | undefined;
+  await db
+    .tx(async (t) => {
+      await upsertTokens(t, [token], 0);
+      await upsertTokens(t, [{ ...token, holdersCount: 1 }], 1);
+      seen = (await t.query<{ name: string; symbol: string }>("select name, symbol from market.tokens where id = $1", [id]))[0];
+      throw new Error("rollback on purpose");
+    })
+    .catch((err: unknown) => {
+      if (!(err instanceof Error) || err.message !== "rollback on purpose") throw err;
+    });
+  assert.deepEqual(seen, { name: hostile, symbol: token.symbol });
+  const [left] = await db.query<{ n: string | number }>("select count(*) as n from market.tokens where id = $1", [id]);
+  assert.equal(Number(left.n), 0);
   console.log("ok");
 } finally {
   await db.end();

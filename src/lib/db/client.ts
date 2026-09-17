@@ -23,16 +23,21 @@ export interface Db {
   end(): Promise<void>;
 }
 
-/** Socket and driver codes that mean "the database cannot be reached"; SQLSTATE 08xxx (connection), 53xxx (resources) and 57P01 (admin shutdown) join them below. */
+/**
+ * Socket, DNS, TLS and driver codes that mean "the database cannot be reached"; SQLSTATE 08xxx (connection), 53xxx
+ * (resources), 57P01 (admin shutdown) and XX000 (how Supavisor reports "max client connections reached") join them below.
+ */
 const UNAVAILABLE_CODES = new Set([
-  "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE",
+  "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE", "ENETUNREACH", "EHOSTUNREACH", "ECONNABORTED",
+  "CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT",
   "CONNECT_TIMEOUT", "CONNECTION_CLOSED", "CONNECTION_ENDED", "CONNECTION_DESTROYED",
 ]);
 
-function unavailableCode(err: unknown): string | null {
+/** The error's code when it means the database is unavailable (the routes answer 503), else null. Exported for its test only. */
+export function unavailableCode(err: unknown): string | null {
   const code = (err as { code?: unknown } | null)?.code;
   if (typeof code !== "string") return null;
-  return UNAVAILABLE_CODES.has(code) || code.startsWith("08") || code.startsWith("53") || code === "57P01" ? code : null;
+  return UNAVAILABLE_CODES.has(code) || code.startsWith("08") || code.startsWith("53") || code === "57P01" || code === "XX000" ? code : null;
 }
 
 /** Rethrows connection failures as DbUnavailableError. Only the code travels: driver messages can carry the host. */

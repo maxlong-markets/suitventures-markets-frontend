@@ -8,8 +8,8 @@ lives in `.env.local` only.
 | Command | What it does |
 |---|---|
 | `npm run db:migrate` | Applies every `supabase/migrations/*.sql` not yet recorded in `market.schema_migrations`, in filename order, and prints the names applied. |
-| `npm run db:smoke` | One round trip; prints `ok`. Run it after changing `.env.local`. |
-| `npm run seed` | The one-off load from Envio: quotes, tokens, pools, then swaps, candles and balances by id ranges with three workers at 200 queries a minute, then the finish phase (top 100 holders per token, listed pools, every pool's `synced_to` watermark and the sync cursors at the seed's start minus 600 s). About eight hours. |
+| `npm run db:smoke` | Round-trips COPY, a query, a rolled-back transaction, and one `upsertTokens` with a hostile token name (quotes, braces, a backslash, a comma) inside a transaction that rolls back; prints `ok` only when every round trip matched. Needs the migration applied, so run it after `db:migrate`, and again after changing `.env.local`. |
+| `npm run seed` | The one-off load from Envio: quotes, tokens, pools, then swaps, candles and balances by id ranges with three workers at 200 queries a minute, then the finish phase (top 100 holders per token, listed pools, every pool's `synced_to` watermark and the sync cursors at the seed's start minus 3600 s, an hour of slack for the indexer's own lag; none of them is ever lowered). About eight hours. |
 | `npm run db:parity` | Loads `pairs("all")` and `pairs("launchpad")` through both backends and prints every token missing on either side, every field differing by more than 0.1 % (numbers) or at all (strings), then the counts. |
 
 Seed, on a laptop that must not sleep:
@@ -31,4 +31,6 @@ first duplicate key. A fresh start is, in the Supabase SQL editor,
 (quotes, tokens and pools are upserted and may stay), then delete `.seed/checkpoint.json` and run the seed again.
 
 Run `npm run db:parity` once the sync has run for an hour (rollout step R5) and again a day after the flip.
-The only expected differences are tokens that traded after the last sync cycle.
+Expected differences: tokens that traded after the last sync cycle (a field difference or a token missing on
+either side), and `missing on Envio` lines for tokens beyond M1's recovery window (its 1000-candidate, 7-day
+query), which the store lists anyway. Anything else is a defect.

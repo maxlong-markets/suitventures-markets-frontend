@@ -112,8 +112,8 @@ create table market.sync_state (
   last_run_at int,
   last_ok_at int,
   last_error text,
-  rows_written int not null default 0,
-  queries_used int not null default 0,
+  rows_written bigint not null default 0,
+  queries_used bigint not null default 0,
   lease_until int not null default 0,
   lease_owner text
 );
