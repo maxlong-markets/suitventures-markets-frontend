@@ -132,8 +132,8 @@ describe("replaceHolders", () => {
   });
   it("keeps the old rows and stamp when the transaction fails after the delete", async () => {
     await replaceHolders(db, TOKEN_A, [balanceRec()], T0);
-    // 80 digits overflow numeric(78,0) inside the transaction, after the delete has run.
-    await expect(replaceHolders(db, TOKEN_A, [balanceRec({ balance: "1".repeat(80) })], T0 + 300)).rejects.toThrow();
+    // updated_at is int4: 2^31 overflows it inside the transaction, after the delete has run.
+    await expect(replaceHolders(db, TOKEN_A, [balanceRec({ updatedAt: 2 ** 31 })], T0 + 300)).rejects.toThrow();
     expect(await db.query("select holder from market.token_balances")).toEqual([{ holder: balanceRec().holder }]);
     expect(await db.query("select refreshed_at from market.holder_refresh")).toEqual([{ refreshed_at: T0 }]);
   });
