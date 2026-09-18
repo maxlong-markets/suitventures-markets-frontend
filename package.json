@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test": "vitest run --passWithNoTests",
     "db:migrate": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/migrate.mts",
+    "db:reset-swaps": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/reset-swaps.mts",
     "db:smoke": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/smoke.mts",
     "db:parity": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/parity.mts",
     "seed": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/seed/seed.mts",

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DbUnavailableError, type Db } from "@/lib/db/client";
 import { FakeSource } from "@/lib/sync/fakeSource";
+import { retentionCutoff } from "@/lib/sync/retention";
 import type { BalanceRec, CandleRec, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { readState } from "@/lib/sync/state";
 import { insertSwaps, markSynced, upsertPools } from "@/lib/sync/writers";
@@ -39,8 +40,8 @@ const pool = (id: string, tokenId: string): PoolRec => ({
   id, token_id: tokenId, quote_id: QUOTE, tokenIsCurrency0: true, hooks: hex("0", 40), fee: 3000, tickSpacing: 60, origin: "LONG",
   createdAt: NOW - 100, priceQuote: "1", tvlToken: null, tvlQuote: null, swapCount: 2, lastSwapAt: NOW - 50, volumeQuoteAllTime: "1",
 });
-const swap = (tx: string): SwapRec => ({
-  id: `${tx}-0`, pool_id: POOL_A, token_id: TOKEN_A, timestamp: NOW, side: "buy", amountToken: "1", amountQuote: "1", priceQuote: "1", wallet: hex("5", 40), txHash: tx,
+const swap = (tx: string, timestamp = NOW): SwapRec => ({
+  id: `${tx}-0`, pool_id: POOL_A, token_id: TOKEN_A, timestamp, side: "buy", amountToken: "1", amountQuote: "1", priceQuote: "1", wallet: hex("5", 40), txHash: tx,
 });
 const candle = (poolId: string, t: number): CandleRec => ({ id: `${poolId}-m1-${t}`, pool_id: poolId, t, open: "1", high: "1", low: "1", close: "1", volumeQuote: "1", volumeToken: "1", trades: 1 });
 const balance = (tokenId: string, holder: string, bal: string): BalanceRec => ({ id: `${tokenId}-${holder}`, token_id: tokenId, holder, balance: bal, updatedAt: NOW });
@@ -96,6 +97,18 @@ describe("runSeed", () => {
     expect(await fresh.query("select tx_hash from market.swaps order by tx_hash")).toEqual([{ tx_hash: hex("d", 64) }, { tx_hash: hex("e", 64) }]);
     expect(cp.done).toEqual([...SEED_PHASES]);
     expect(await count(fresh, "candles")).toBe(4);
+    await fresh.end();
+  });
+
+  it("writes only swaps inside the retention window, still advancing the cursor and checkpointing over the old ones", async () => {
+    const fresh = await testDb();
+    const cutoff = retentionCutoff(NOW);
+    const oldTx = hex("5", 64), recentTx = hex("6", 64); // both land in idRanges(3)'s r1 (0x5-0xa)
+    const source = new FakeSource({ ...data, swaps: [swap(oldTx, cutoff - 10), swap(recentTx, cutoff + 10)] });
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "swaps", ranges: {}, done: ["quotes", "tokens", "pools"] };
+    const cp = await runSeed(fresh, source, seedOpts(checkpoint, []));
+    expect(cp.done).toEqual([...SEED_PHASES]);
+    expect(await fresh.query("select tx_hash from market.swaps")).toEqual([{ tx_hash: recentTx }]);
     await fresh.end();
   });
 

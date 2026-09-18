@@ -1,5 +1,6 @@
 import { DbUnavailableError, type Db } from "@/lib/db/client";
 import { parseCandleId, parseSwapId } from "@/lib/sync/ids";
+import { retentionCutoff } from "@/lib/sync/retention";
 import type { BalanceRec, CandleRec, EnvioSource, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { finishRun, readState, saveCursors } from "@/lib/sync/state";
 import { insertSwaps, recomputeListedPools, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
@@ -68,7 +69,10 @@ async function upsertBalances(db: Db, rows: readonly BalanceRec[]): Promise<numb
 
 /**
  * Runs the phases from checkpoint.phase, saving the checkpoint at each phase start; big tables walk
- * `idRanges(workers)` concurrently with COPY per page and save the last id per range after each page; "finish"
+ * `idRanges(workers)` concurrently with COPY per page and save the last id per range after each page; the swaps
+ * phase writes only rows with timestamp >= retentionCutoff(cp.startedAt) (the store's 10-day trade window,
+ * retention.ts) — pagination, `after` and the checkpoint still walk every row, unfiltered, so a page of entirely
+ * stale rows still advances the cursor and still ends the range when it comes back short; "finish"
  * trims balances to holdersKept per token, recomputes
  * every listed pool, raises every pool's synced_to and sync_state.market cursor and cursor2 to startedAt − 3600 (none
  * of them is ever lowered), and marks nightly ok.
@@ -163,9 +167,19 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
       case "pools":
         await walk<PoolRec>(phase, single, (after, _before, limit) => source.poolsPage(after, limit), (batch) => upsertPools(db, batch, opts.now()));
         break;
-      case "swaps":
-        await ranged<SwapRec>(phase, (a, b, l) => source.swapsPage(a, b, l), (batch) => db.copy("market.swaps", SWAP_COLS, batch.map(swapRow)), (batch) => insertSwaps(db, batch));
+      case "swaps": {
+        // The page fetched, `after` and the checkpoint stay unfiltered (walkRange, above); only what gets written
+        // is narrowed to the retention window, so a page that is entirely outside it still advances the walk.
+        const swapCutoff = retentionCutoff(cp.startedAt);
+        const inWindow = (batch: SwapRec[]) => batch.filter((s) => s.timestamp >= swapCutoff);
+        await ranged<SwapRec>(
+          phase,
+          (a, b, l) => source.swapsPage(a, b, l),
+          (batch) => db.copy("market.swaps", SWAP_COLS, inWindow(batch).map(swapRow)),
+          (batch) => insertSwaps(db, inWindow(batch)),
+        );
         break;
+      }
       case "candles":
         await ranged<CandleRec>(phase, (a, b, l) => source.candlesPage(a, b, l), (batch) => db.copy("market.candles", CANDLE_COLS, batch.map(candleRow)), (batch) => upsertCandles(db, batch));
         break;
