@@ -73,7 +73,8 @@ export function useHolders(id: string) {
 export interface SwapQuoteParams {
   id: string;
   side: Side;
-  amount: number;
+  /** The raw typed text, never a parsed float: Global Constraint 1. */
+  amount: string;
   denom: Denom;
   isSuitHolder: boolean;
   slippagePct: number;

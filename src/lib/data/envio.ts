@@ -39,11 +39,13 @@ export class EnvioDataSource implements MarketsDataSource {
     return (await getJson<{ holders: Holder[] }>(`/api/tokens/${id}/holders`)).holders;
   }
 
-  async quoteSwap(id: string, side: Side, amount: number, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
+  async quoteSwap(id: string, side: Side, amount: string, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
     const fresh = this.pairsCache && Date.now() - this.pairsCache.at < 30_000 ? this.pairsCache.list : await this.pairs();
     const pair = fresh.find((p) => p.id === id.toLowerCase());
     if (!pair) throw new Error(`Unknown token ${id}`);
-    return localQuote(pair, side, amount, denom, isSuitHolder, slippagePct);
+    // The approximation is a float model; a half-typed "." parses to NaN, which reads as 0.
+    const typed = Number(amount);
+    return localQuote(pair, side, Number.isFinite(typed) ? typed : 0, denom, isSuitHolder, slippagePct);
   }
 
   async watchlist(address: Address): Promise<string[]> {

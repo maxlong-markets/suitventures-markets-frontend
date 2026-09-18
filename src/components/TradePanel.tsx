@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePublicClient, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
 import { usePairBalances } from "@/hooks/useTokenBalance";
 import { useSwapQuote } from "@/hooks/useMarketsData";
 import { ORIGIN_URLS } from "@/lib/chain";
 import { fmtAmt, fmtQuote, fmtTradeAmt, fmtUsd } from "@/lib/format";
-import { executeSwap, SwapFailedError } from "@/lib/swap";
+import { executeSwap, SwapFailedError, SwapRejectedError } from "@/lib/swap";
 import type { Denom, Side, TokenPair } from "@/lib/types";
 import { GearIcon, Spinner } from "./ui";
 
@@ -172,6 +173,8 @@ function SlippagePopover({
 
 function TradeForm({ pair }: { pair: TokenPair }) {
   const { isConnected, address, isHolder, addToast, updateToast } = useAppState();
+  const { data: walletClient } = useWalletClient();
+  const publicClient = usePublicClient();
   const balances = usePairBalances(pair);
   const [side, setSide] = useState<Side>("buy");
   const [denom, setDenom] = useState<Denom>("quote");
@@ -191,7 +194,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   const quoteQuery = useSwapQuote({
     id: pair.id,
     side,
-    amount: amountNum,
+    amount,
     denom,
     isSuitHolder: isHolder,
     slippagePct: slippage.value,
@@ -265,17 +268,24 @@ function TradeForm({ pair }: { pair: TokenPair }) {
     setSlipOpen(false);
     const toastId = addToast({ kind: "pending", message: `${verb} ${line}` });
     try {
-      const handle = await executeSwap({
-        ticker: pair.ticker,
-        side,
-        payAmount,
-        payAsset,
-        receiveAmount,
-        receiveAsset,
-        slippagePct: slippage.value,
-        account: address,
-        isSuitHolder: isHolder,
-      });
+      if (!quote?.call || !walletClient || !publicClient) {
+        throw new SwapFailedError("Trading goes live when the router is deployed. Nothing was spent.");
+      }
+      const handle = await executeSwap(
+        {
+          ticker: pair.ticker,
+          side,
+          payAmount,
+          payAsset,
+          receiveAmount,
+          receiveAsset,
+          slippagePct: slippage.value,
+          account: address,
+          isSuitHolder: isHolder,
+          call: quote.call,
+        },
+        { wallet: walletClient, publicClient, account: address },
+      );
       updateToast(toastId, { hash: handle.hash });
       await handle.confirmation;
       updateToast(toastId, { kind: "confirmed", message: `${done} ${line}` });
@@ -284,7 +294,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
       updateToast(toastId, {
         kind: "failed",
         message:
-          err instanceof SwapFailedError
+          err instanceof SwapFailedError || err instanceof SwapRejectedError
             ? err.message
             : "Swap failed. Nothing was spent.",
       });

@@ -235,15 +235,16 @@ export class MockDataSource implements MarketsDataSource {
   async quoteSwap(
     id: string,
     side: Side,
-    amount: number,
+    amount: string,
     denom: Denom,
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote> {
+    const typed = Number(amount);
     return localQuote(
       this.pairOrThrow(id),
       side,
-      amount,
+      Number.isFinite(typed) ? typed : 0,
       denom,
       isSuitHolder,
       slippagePct,

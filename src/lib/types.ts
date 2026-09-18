@@ -1,3 +1,5 @@
+import type { SwapCall } from "./quote/price";
+
 /**
  * Typed models for SuitVentures Markets. Every component consumes these —
  * never literals — so the Envio/Alchemy layer can replace the mock source
@@ -12,6 +14,15 @@ export type Side = "buy" | "sell";
 /** Which asset the typed trade amount is denominated in. */
 export type Denom = "quote" | "token";
 export type VoteDir = "bull" | "bear";
+
+/**
+ * The execution block the quote route returns. It lives in `src/lib/quote/price.ts` next to the
+ * code that builds it; this is a type-only re-export, erased at build time, so nothing client-side
+ * gains a runtime dependency on the route's internals. Both sides of the
+ * `types.ts` ↔ `quote/price.ts` pair import the other with `import type`, so nothing circular
+ * survives to runtime.
+ */
+export type { SwapCall };
 
 export interface QuoteAsset {
   symbol: string;
@@ -99,6 +110,17 @@ export interface Quote {
   routerFeePct: 0 | 0.5;
   poolFeePct: number;
   minReceived: number;
+  /**
+   * `false` when the quote route simulated the pool and could not route it, `true` when it priced
+   * it, `undefined` when nothing has been priced yet — amount 0, or the mock source's local
+   * approximation. Only an explicit `false` shows the "Not routed" card.
+   */
+  routable?: boolean;
+  /**
+   * Execution, verbatim from the route. The browser never recomputes an amount in it; it signs and
+   * sends it as it stands. Absent means "nothing can be submitted from this quote".
+   */
+  call?: SwapCall;
 }
 
 export interface MarketsDataSource {
@@ -109,10 +131,16 @@ export interface MarketsDataSource {
   candles(id: string, interval: Interval): Promise<Candle[]>;
   trades(id: string): Promise<Trade[]>;
   holders(id: string): Promise<Holder[]>;
+  /**
+   * The typed amount travels as the string the user typed: a float would round it to 17
+   * significant digits before `toBase` turned it into the amount Permit2 transfers (Global
+   * Constraint 1). Only the two float models — `localQuote` and the panel's display gating —
+   * parse it.
+   */
   quoteSwap(
     id: string,
     side: Side,
-    amount: number,
+    amount: string,
     denom: Denom,
     isSuitHolder: boolean,
     slippagePct: number,
