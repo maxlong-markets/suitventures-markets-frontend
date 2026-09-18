@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearTtlCache } from "@/lib/envio/cache";
 import { gql } from "@/lib/envio/client";
 import { AI, NOW, NVDA, POOL, aiPoolKey, aiTokenBroken, prices, windowRows } from "@/lib/envio/fixtures";
-import { POOL_KEY_QUERY, TOKEN_QUERY } from "@/lib/envio/queries";
+import { PAIRS_QUERY, PAIRS_RECOVERY_QUERY, POOL_KEY_QUERY, TOKEN_QUERY } from "@/lib/envio/queries";
 import { shapePairs, usdMap, windowStats } from "@/lib/envio/shape";
 import { NotRoutableError, QuoterUnavailableError, type Quoter } from "@/lib/quote/quoter";
 import { createEnvioBackend } from "./envioBackend";
@@ -95,13 +95,26 @@ describe("createEnvioBackend", () => {
       await probing.pair(AI);
       await probing.pair(AI);
       expect(exactIn).toHaveBeenCalledTimes(1);
+      // The window is 300 s, not forever: past it the pool is probed again (fake timers drive Date.now).
+      vi.advanceTimersByTime(301_000);
+      await probing.pair(AI);
+      expect(exactIn).toHaveBeenCalledTimes(2);
     });
 
     it("pairs() never calls the quoter — 500 probes a request is not acceptable", async () => {
-      gqlMock.mockResolvedValue({ Token: [], QuotePrice: [] });
+      // A real, non-empty list: with `Token: []` a probe loop would iterate zero times and this test
+      // could never fail (the review's mutation probe proved it).
+      gqlMock.mockImplementation(async (query: string) => {
+        if (query === PAIRS_QUERY) return { Token: [aiTokenBroken], QuotePrice: prices } as never;
+        if (query === PAIRS_RECOVERY_QUERY) return { Token: [], QuotePrice: [] } as never;
+        if (query.startsWith("query Window")) return { w0: windowRows } as never;
+        return {} as never;
+      });
       const exactIn = vi.fn(async () => 1n);
       const probing = createEnvioBackend({ quoter: fakeQuoter(exactIn) });
-      await probing.pairs("all");
+      const list = await probing.pairs("all");
+      expect(list.length).toBeGreaterThan(0);
+      expect(list.every((p) => p.tradeable)).toBe(true);
       expect(exactIn).not.toHaveBeenCalled();
     });
   });
