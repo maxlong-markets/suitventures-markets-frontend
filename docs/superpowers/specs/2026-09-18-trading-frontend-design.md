@@ -129,8 +129,10 @@ uses ceiling, the fee uses floor, `amountOutMin` uses floor.
 value, so the route calls them through viem `simulateContract` against the
 chain in `src/lib/chain.ts`. A revert that is not the quoter's own return
 means the pool cannot be routed: the route answers 200 with
-`{ routable: false }` and no `call`, and the panel shows the existing
-"Not routed" card.
+`{ routable: false }` and no `call`. The panel keeps the form, disables the
+button and says "This amount can't be routed through the pool. Try a smaller
+amount." The "Not routed" card is reserved for `tradeable: false`, the
+list-level flag: a refusal is a verdict on one amount, not on the pool.
 
 **Tradeability cache (D28).** Routability is decided per quote by the same
 simulation above; nothing is cached at this layer. `/api/pairs` keeps

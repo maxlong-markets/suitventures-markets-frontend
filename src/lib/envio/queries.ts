@@ -129,7 +129,7 @@ const POOL_KEY_FIELDS = "id quote_id tokenIsCurrency0 hooks fee tickSpacing pric
  * `listed_pool_id`. Trading is a looser bar: any sane-priced pool is routable whether or not it
  * has swapped yet, because a freshly launched token can have liquidity and zero trades and still
  * be perfectly tradeable (see MarketBackend.poolKey) — so this fallback drops the swap-count
- * filter and orders by swap count, then recency, then id, so the pick is deterministic.
+ * filter and orders by swap count, then id, then id, so the pick is deterministic.
  * Carries the quote's own address — the field QUOTES_QUERY already selects on the same entity —
  * because a PoolKey needs both currencies and `quote_id` is an id, not an address the swap can
  * sign over.

@@ -47,7 +47,7 @@ describe("createEnvioBackend", () => {
     expect(gqlMock).toHaveBeenCalledTimes(1);
   });
 
-  it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, ordered by swap count then recency then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {
+  it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, ordered by swap count then id then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {
     // TOKEN_QUERY's fallbackPool (what pairs/candles/trades list) filters on swapCount > 0 — the
     // store's listed_pool_id has the same rule (LISTED_POOL, spec section 6). Trading is a looser
     // bar: a fresh launch with liquidity and zero trades is still perfectly routable, so

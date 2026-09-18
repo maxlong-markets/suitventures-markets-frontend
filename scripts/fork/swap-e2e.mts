@@ -120,6 +120,13 @@ const quoter = createQuoter({ client: publicClient });
  * that inspect the account's code — so only the signer needs this, and only on this local fork:
  * `anvil_setCode` to empty clears the inherited delegation without touching the real chain.
  */
+// The chain-id check comes BEFORE the first node mutation: `anvil_setCode` does not exist off
+// anvil, but a script that alters node state before it has proven where it is running is the
+// wrong shape, and scripts/README.md promises the check happens before anything else.
+{
+  const chainId = await publicClient.getChainId();
+  assert.equal(chainId, 4663, `the node at ${rpcUrl} reports chain id ${chainId}, not 4663`);
+}
 await testClient.setCode({ address: account.address, bytecode: "0x" });
 
 /**
@@ -230,6 +237,14 @@ async function one(
     `${label}: Trade fee ${receipt.fee} is not amountIn*50/10000 = ${expectedFee}`,
   );
   assert.equal(receipt.holderRate, false, `${label}: Trade holderRate is ${receipt.holderRate}, expected false`);
+  // The event names the pool that actually traded. Without this, every other assertion holds for
+  // ANY tradeable pool, so a wrong pool (the "AI" ticker collision, or a changed routing rule)
+  // would pass unnoticed.
+  assert.equal(
+    receipt.poolId.toLowerCase(),
+    pool.poolId.toLowerCase(),
+    `${label}: Trade poolId ${receipt.poolId} is not the pool that was priced, ${pool.poolId}`,
+  );
   const outDecimals = call.tokenOutDecimals;
   console.log(
     `${label}: in ${toHuman(BigInt(call.amountIn), call.tokenInDecimals)} · ` +
@@ -269,8 +284,6 @@ async function roundTrip(
 }
 
 try {
-  const chainId = await publicClient.getChainId();
-  assert.equal(chainId, 4663, `the node at ${rpcUrl} reports chain id ${chainId}, not 4663`);
   for (const { ticker, quote, tokenAddress, poolId } of POOLS) {
     await roundTrip(ticker, quote, tokenAddress, poolId);
   }

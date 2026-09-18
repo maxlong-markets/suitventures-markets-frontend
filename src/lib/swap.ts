@@ -43,7 +43,8 @@ export interface SwapRequest {
 }
 
 /** What the `Trade` event reported: the truth the confirmed toast shows, not the quote's guess. */
-export type SwapReceipt = { amountOut: bigint; fee: bigint; holderRate: boolean };
+/** The Trade event's numbers plus the pool it names, so a caller can prove which pool actually traded. */
+export type SwapReceipt = { amountOut: bigint; fee: bigint; holderRate: boolean; poolId: Hex };
 
 export interface SwapHandle {
   /** Transaction hash, known once the wallet has signed and sent. */
@@ -171,7 +172,7 @@ async function confirm(deps: SwapDeps, router: Address, hash: Address, slippageP
   // lie in the one place the user trusts a number.
   const ours = trades.find((t) => isAddressEqual(t.args.user, deps.account));
   if (!ours) throw new SwapFailedError("Swap failed. Nothing was spent.");
-  return { amountOut: ours.args.amountOut, fee: ours.args.fee, holderRate: ours.args.holderRate };
+  return { amountOut: ours.args.amountOut, fee: ours.args.fee, holderRate: ours.args.holderRate, poolId: ours.args.poolId };
 }
 
 export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<SwapHandle> {

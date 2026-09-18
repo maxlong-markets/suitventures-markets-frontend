@@ -210,6 +210,7 @@ describe("executeSwap", () => {
       amountOut: 198_500_000_000_000_000_000n,
       fee: 500_000n,
       holderRate: false,
+      poolId: POOL_ID,
     });
     expect(h.waitForTransactionReceipt).toHaveBeenCalledWith({ hash: SWAP_HASH });
   });
@@ -228,6 +229,7 @@ describe("executeSwap", () => {
       amountOut: 198_500_000_000_000_000_000n,
       fee: 500_000n,
       holderRate: false,
+      poolId: POOL_ID,
     });
   });
 
@@ -338,6 +340,6 @@ describe("a Trade event naming another account", () => {
     const mine = tradeLog({ amountOut: 42n, fee: 7n, holderRate: false });
     h.waitForTransactionReceipt.mockResolvedValue({ status: "success", logs: [foreign, mine] });
     const handle = await executeSwap(REQUEST, h.deps);
-    await expect(handle.confirmation).resolves.toMatchObject({ amountOut: 42n, fee: 7n });
+    await expect(handle.confirmation).resolves.toMatchObject({ amountOut: 42n, fee: 7n, poolId: POOL_ID });
   });
 });
