@@ -37,7 +37,9 @@ const UNAVAILABLE_CODES = new Set([
 export function unavailableCode(err: unknown): string | null {
   const code = (err as { code?: unknown } | null)?.code;
   if (typeof code !== "string") return null;
-  return UNAVAILABLE_CODES.has(code) || code.startsWith("08") || code.startsWith("53") || code === "57P01" || code === "XX000" ? code : null;
+  // 57P01 admin shutdown, 57P02 crash shutdown, 57P03 "the database system is starting up" (what a
+  // compute resize or restart answers for a minute): all mean "come back later", none mean "bug".
+  return UNAVAILABLE_CODES.has(code) || code.startsWith("08") || code.startsWith("53") || code.startsWith("57P0") || code === "XX000" ? code : null;
 }
 
 /** Rethrows connection failures as DbUnavailableError. Only the code travels: driver messages can carry the host. */

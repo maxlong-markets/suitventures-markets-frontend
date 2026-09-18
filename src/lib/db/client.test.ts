@@ -30,6 +30,12 @@ describe("createDb", () => {
 });
 
 describe("unavailableCode", () => {
+  it("treats a server that is still starting up (57P03) as unavailable, like a shutdown", () => {
+    // A compute resize restarts Postgres; for a minute every connection is answered with 57P03.
+    expect(unavailableCode({ code: "57P03" })).toBe("57P03");
+    expect(unavailableCode({ code: "57P02" })).toBe("57P02");
+    expect(unavailableCode({ code: "57014" })).toBeNull(); // query_canceled is a real error, not an outage
+  });
   it.each([
     // sockets and DNS
     "ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE", "ENETUNREACH", "EHOSTUNREACH", "ECONNABORTED",
