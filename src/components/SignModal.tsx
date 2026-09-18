@@ -4,15 +4,9 @@ import { useEffect, useState } from "react";
 import { useSignMessage } from "wagmi";
 import { useAppState, type GateKind } from "@/context/AppState";
 import { robinhoodChain } from "@/lib/chain";
-import type { Address } from "@/lib/types";
+import type { Address, SignMessage } from "@/lib/types";
 import { short } from "@/lib/format";
 import { Spinner, SuitsMark } from "./ui";
-
-function makeNonce(): string {
-  const bytes = new Uint8Array(4);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 function SignDialog({
   kind,
@@ -22,15 +16,18 @@ function SignDialog({
 }: {
   kind: GateKind;
   address: Address;
-  onSigned(signature: string): void;
+  onSigned(sign: SignMessage, address: Address): Promise<void>;
   onCancel(): void;
 }) {
-  const [nonce] = useState(makeNonce);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const { signMessageAsync, isPending } = useSignMessage();
-  // The preview shortens the address for the eye; the signed statement carries it in full.
-  const statement = (addr: string) =>
-    `SuitVentures Markets wants you to sign in with ${addr} · Chain ${robinhoodChain.id} · Nonce ${nonce}`;
+  /**
+   * A description of what is about to be signed, not the bytes: the EIP-4361 message is built at
+   * sign time around a nonce only the server can issue, so it does not exist yet. The address is
+   * shortened for the eye; the message carries it in full.
+   */
+  const preview = `Sign in to SuitVentures Markets · ${short(address)} · Chain ${robinhoodChain.id}`;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -42,11 +39,15 @@ function SignDialog({
 
   const sign = async () => {
     setError(null);
+    setBusy(true);
     try {
-      const signature = await signMessageAsync({ message: statement(address) });
-      onSigned(signature);
+      await onSigned((message: string) => signMessageAsync({ message }), address);
     } catch {
-      setError("Signature declined. Nothing was saved.");
+      // One line for both refusals: the wallet's and the server's. Neither may name a host,
+      // a cookie or a status code in the UI.
+      setError("Sign-in didn't complete. Nothing was saved.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -81,7 +82,7 @@ function SignDialog({
           no transaction, nothing moves.
         </p>
         <div className="mt-4 break-all border border-hairline px-3 py-[10px] font-mono text-[10.5px] leading-[1.6] text-ink-50">
-          {statement(short(address))}
+          {preview}
         </div>
         {error ? (
           <div role="alert" className="mt-2 font-mono text-[10.5px] text-down">
@@ -99,10 +100,10 @@ function SignDialog({
           <button
             type="button"
             onClick={sign}
-            disabled={isPending}
+            disabled={busy || isPending}
             className="flex h-10 items-center justify-center gap-2 bg-chalk font-mono text-[10px] uppercase tracking-[0.22em] text-void hover:bg-white disabled:cursor-wait disabled:bg-[rgba(244,238,218,0.55)]"
           >
-            {isPending ? (
+            {busy || isPending ? (
               <>
                 <Spinner dark /> Confirm in wallet
               </>

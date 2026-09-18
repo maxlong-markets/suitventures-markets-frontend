@@ -15,6 +15,15 @@ export type Side = "buy" | "sell";
 export type Denom = "quote" | "token";
 export type VoteDir = "bull" | "bear";
 
+/** A 0x-prefixed hex string. Spelt here rather than imported from viem, exactly as `Address` is. */
+export type Hex = `0x${string}`;
+
+/**
+ * Signs an EIP-191 personal message: wagmi's `signMessageAsync` with its options object adapted
+ * away, so the data source can run the sign-in flow without importing a React hook.
+ */
+export type SignMessage = (message: string) => Promise<Hex>;
+
 /**
  * The execution block the quote route returns. It lives in `src/lib/quote/price.ts` next to the
  * code that builds it; this is a type-only re-export, erased at build time, so nothing client-side
@@ -147,33 +156,31 @@ export interface MarketsDataSource {
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote>;
-  /** token addresses */
-  watchlist(address: Address): Promise<string[]>;
-  setWatch(
-    address: Address,
-    id: string,
-    on: boolean,
-    signature: string,
-  ): Promise<void>;
-  /**
-   * Casting the same direction twice clears the vote; casting the other
-   * direction switches it.
-   */
-  vote(
-    address: Address,
-    id: string,
-    dir: VoteDir,
-    signature: string,
-  ): Promise<void>;
+  // --- The signed-in user's own data ------------------------------------
+  // None of these takes an address: the `svm_session` cookie is the only identity the user
+  // routes trust (spec section 2), and a client-supplied address would be a claim, not a fact.
 
-  // --- Additions beyond the handoff interface ---------------------------
-
+  /** The token addresses this session has starred. Empty when nobody is signed in. */
+  watchlist(): Promise<string[]>;
+  setWatch(id: string, on: boolean): Promise<void>;
   /**
-   * The caller's current vote per token address. Not in the handoff
-   * interface; the token page needs it to render the voted state after a
-   * reload.
+   * The caller's current vote per token address. Not in the handoff interface; the token page
+   * needs it to render the voted state after a reload.
    */
-  votes(address: Address): Promise<Record<string, VoteDir>>;
+  votes(): Promise<Record<string, VoteDir>>;
+  /**
+   * Casting the same direction twice clears the vote; casting the other direction switches it.
+   * Answers the direction that now stands, or null when the vote was cleared.
+   */
+  vote(id: string, dir: VoteDir): Promise<VoteDir | null>;
+
+  // --- Session ----------------------------------------------------------
+
+  /** The signed-in address, or null: nobody signed in, or sessions are not configured. */
+  session(): Promise<Address | null>;
+  /** Nonce, EIP-4361 message, signature, cookie. Answers the address the server accepted. */
+  signIn(sign: SignMessage, address: Address): Promise<Address>;
+  signOut(): Promise<void>;
 }
 
 /**

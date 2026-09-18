@@ -22,7 +22,7 @@ import {
   type PresetKey,
   type SortKey,
 } from "@/lib/markets";
-import type { Address, TokenPair, VoteDir } from "@/lib/types";
+import type { Address, SignMessage, TokenPair, VoteDir } from "@/lib/types";
 import { useIsSuitHolder } from "@/lib/suits";
 import { keys, useVotes, useWatchlist } from "@/hooks/useMarketsData";
 import { useDataSource } from "./DataSource";
@@ -42,8 +42,9 @@ export interface Toast {
 
 export type GateKind = "star" | "vote";
 interface GateContext {
+  /** The signed-in address. M4's two gated actions no longer need it — the cookie is the
+   *  identity — but the gate keeps handing it over for the ones that will. */
   address: Address;
-  signature: string;
 }
 type GatedAction = (ctx: GateContext) => void | Promise<void>;
 
@@ -69,13 +70,21 @@ export interface AppState {
   vote(id: string, dir: VoteDir): void;
 
   signModal: { kind: GateKind } | null;
-  completeSign(signature: string): void;
+  completeSign(sign: SignMessage, address: Address): Promise<void>;
   cancelSign(): void;
 
   toasts: Toast[];
   addToast(t: Omit<Toast, "id">): number;
   updateToast(id: number, patch: Partial<Omit<Toast, "id">>): void;
   dismissToast(id: number): void;
+}
+
+/**
+ * The session's address comes from the server and is lowercase; wagmi's is checksummed. Comparing
+ * them with `===` would call every signed-in wallet a stranger and re-open the modal for ever.
+ */
+function sameAddress(a?: string, b?: string): boolean {
+  return Boolean(a && b && a.toLowerCase() === b.toLowerCase());
 }
 
 const AppStateContext = createContext<AppState | null>(null);
@@ -121,14 +130,35 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), []);
 
-  // --- session signature + gate ---------------------------------------
-  const [session, setSession] = useState<{
-    address: Address;
-    signature: string;
-  } | null>(null);
-  const signed = Boolean(session && address && session.address === address);
+  // --- session + gate ---------------------------------------------------
+  const [session, setSession] = useState<{ address: Address } | null>(null);
+  const signed = sameAddress(session?.address, address);
   const [signModal, setSignModal] = useState<{ kind: GateKind } | null>(null);
   const pendingRef = useRef<{ kind: GateKind; run: GatedAction } | null>(null);
+
+  // On load the cookie says whether this browser is already signed in, so a wallet that signed in
+  // on another device sees its watchlist here without signing again. A failed probe means "not
+  // signed in"; the functional update keeps a sign-in that raced ahead of it.
+  useEffect(() => {
+    let alive = true;
+    void ds
+      .session()
+      .then((addr) => {
+        if (alive && addr) setSession((s) => s ?? { address: addr });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [ds]);
+
+  // Stars and votes belong to a session, not to a browser tab: the moment this wallet stops being
+  // the signed-in one, the previous wallet's answers leave the cache rather than render for a frame.
+  useEffect(() => {
+    if (signed) return;
+    qc.removeQueries({ queryKey: keys.watchlist });
+    qc.removeQueries({ queryKey: keys.votes });
+  }, [signed, qc]);
 
   const gate = useCallback(
     (kind: GateKind, run: GatedAction) => {
@@ -137,12 +167,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         openConnectModal?.();
         return;
       }
-      if (!session || session.address !== address) {
+      if (!sameAddress(session?.address, address)) {
         pendingRef.current = { kind, run };
         setSignModal({ kind });
         return;
       }
-      void run({ address, signature: session.signature });
+      void run({ address });
     },
     [address, isConnected, openConnectModal, session],
   );
@@ -150,25 +180,30 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   // A wallet connected while an action was waiting: continue to the signature.
   useEffect(() => {
     if (!isConnected || !address || !pendingRef.current) return;
-    if (session && session.address === address) {
+    if (sameAddress(session?.address, address)) {
       const { run } = pendingRef.current;
       pendingRef.current = null;
-      void run({ address, signature: session.signature });
+      void run({ address });
     } else {
       setSignModal({ kind: pendingRef.current.kind });
     }
   }, [isConnected, address, session]);
 
+  /**
+   * Nonce, message, signature, cookie — all inside the data source. It throws when the wallet
+   * refuses or the server does; `SignModal` catches that and shows its own line, so the modal
+   * stays open on a failure and closes only on a session the server actually issued.
+   */
   const completeSign = useCallback(
-    (signature: string) => {
-      if (!address) return;
-      setSession({ address, signature });
+    async (sign: SignMessage, addr: Address) => {
+      const signedAddress = await ds.signIn(sign, addr);
+      setSession({ address: signedAddress });
       setSignModal(null);
       const pending = pendingRef.current;
       pendingRef.current = null;
-      if (pending) void pending.run({ address, signature });
+      if (pending) void pending.run({ address: signedAddress });
     },
-    [address],
+    [ds],
   );
 
   const cancelSign = useCallback(() => {
@@ -177,7 +212,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // --- watchlist -------------------------------------------------------
-  const watchlistQuery = useWatchlist(address);
+  const watchlistQuery = useWatchlist(signed);
   const stars = useMemo(
     () => new Set(watchlistQuery.data ?? []),
     [watchlistQuery.data],
@@ -185,17 +220,17 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const toggleStar = useCallback(
     (id: string) => {
-      gate("star", async ({ address: addr, signature }) => {
-        const key = keys.watchlist(addr);
-        const current = qc.getQueryData<string[]>(key) ?? [];
+      gate("star", async () => {
+        const current = qc.getQueryData<string[]>(keys.watchlist) ?? [];
         const on = !current.includes(id);
-        qc.setQueryData<string[]>(key, (old = []) =>
+        qc.setQueryData<string[]>(keys.watchlist, (old = []) =>
           on ? [...old.filter((t) => t !== id), id] : old.filter((t) => t !== id),
         );
         try {
-          await ds.setWatch(addr, id, on, signature);
+          await ds.setWatch(id, on);
         } finally {
-          void qc.invalidateQueries({ queryKey: key });
+          // Also the rollback: a refused write is followed by the server's own answer.
+          void qc.invalidateQueries({ queryKey: keys.watchlist });
         }
       });
     },
@@ -203,19 +238,18 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   // --- votes -----------------------------------------------------------
-  const votesQuery = useVotes(address);
+  const votesQuery = useVotes(signed);
   const votes = useMemo(() => votesQuery.data ?? {}, [votesQuery.data]);
 
   const vote = useCallback(
     (id: string, dir: VoteDir) => {
-      gate("vote", async ({ address: addr, signature }) => {
-        const voteKey = keys.votes(addr);
-        const book = qc.getQueryData<Record<string, VoteDir>>(voteKey) ?? {};
+      gate("vote", async () => {
+        const book = qc.getQueryData<Record<string, VoteDir>>(keys.votes) ?? {};
         const prev = book[id];
         const next = { ...book };
         if (prev === dir) delete next[id];
         else next[id] = dir;
-        qc.setQueryData(voteKey, next);
+        qc.setQueryData(keys.votes, next);
         qc.setQueryData<TokenPair[]>(keys.pairs, (old) =>
           old?.map((p) => {
             if (p.id !== id) return p;
@@ -226,9 +260,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           }),
         );
         try {
-          await ds.vote(addr, id, dir, signature);
+          await ds.vote(id, dir);
         } finally {
-          void qc.invalidateQueries({ queryKey: voteKey });
+          void qc.invalidateQueries({ queryKey: keys.votes });
           void qc.invalidateQueries({ queryKey: keys.pairs });
         }
       });
@@ -274,7 +308,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setQuery,
       resetFilters,
       stars,
-      watchlistLoading: Boolean(address) && watchlistQuery.isPending,
+      watchlistLoading: signed && watchlistQuery.isPending,
       toggleStar,
       votes,
       vote,

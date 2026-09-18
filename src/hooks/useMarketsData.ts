@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useDataSource } from "@/context/DataSource";
-import type { Address, Denom, Interval, Side, TokenPair } from "@/lib/types";
+import type { Denom, Interval, Side, TokenPair } from "@/lib/types";
 
 export const keys = {
   pairs: ["pairs"] as const,
@@ -12,9 +12,11 @@ export const keys = {
     ["candles", id, interval] as const,
   trades: (id: string) => ["trades", id] as const,
   holders: (id: string) => ["holders", id] as const,
-  watchlist: (address: Address) =>
-    ["watchlist", address.toLowerCase()] as const,
-  votes: (address: Address) => ["votes", address.toLowerCase()] as const,
+  // The session cookie is the identity, so neither key names a wallet. `AppState` drops both
+  // caches the moment `signed` goes false, which is what keeps a second wallet in the same tab
+  // from seeing the first one's stars.
+  watchlist: ["watchlist"] as const,
+  votes: ["votes"] as const,
 };
 
 export function usePairs() {
@@ -93,20 +95,13 @@ export function useSwapQuote(params: SwapQuoteParams) {
   });
 }
 
-export function useWatchlist(address?: Address) {
+/** Disabled until the session cookie says who the caller is; the data source sends no address. */
+export function useWatchlist(enabled: boolean) {
   const ds = useDataSource();
-  return useQuery({
-    queryKey: address ? keys.watchlist(address) : ["watchlist", "none"],
-    queryFn: () => (address ? ds.watchlist(address) : Promise.resolve([])),
-    enabled: Boolean(address),
-  });
+  return useQuery({ queryKey: keys.watchlist, queryFn: () => ds.watchlist(), enabled });
 }
 
-export function useVotes(address?: Address) {
+export function useVotes(enabled: boolean) {
   const ds = useDataSource();
-  return useQuery({
-    queryKey: address ? keys.votes(address) : ["votes", "none"],
-    queryFn: () => (address ? ds.votes(address) : Promise.resolve({})),
-    enabled: Boolean(address),
-  });
+  return useQuery({ queryKey: keys.votes, queryFn: () => ds.votes(), enabled });
 }

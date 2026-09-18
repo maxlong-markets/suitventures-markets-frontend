@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Quote, SwapCall, TokenPair } from "@/lib/types";
+import { parseSiweMessage } from "viem/siwe";
+import type { Address, Hex, Quote, SwapCall, TokenPair } from "@/lib/types";
 import { EnvioDataSource } from "./envio";
 
 const TOKEN = "0x000000000000000000000000000000000000000a";
@@ -199,5 +200,146 @@ describe("EnvioDataSource.quoteSwap", () => {
         `Unknown token ${TOKEN}`,
       );
     });
+  });
+});
+
+describe("EnvioDataSource sessions and user data", () => {
+  const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
+  /** What the next fetch answers, by path. */
+  let routes: Record<string, { status: number; body?: unknown }>;
+  const calls: { url: string; init?: RequestInit }[] = [];
+
+  const sessionFetch = vi.fn(async (input: string, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, init });
+    const key = `${init?.method ?? "GET"} ${url.split("?")[0]}`;
+    const answer = routes[key] ?? { status: 404 };
+    return {
+      ok: answer.status >= 200 && answer.status < 300,
+      status: answer.status,
+      json: async () => answer.body,
+    } as unknown as Response;
+  });
+
+  beforeEach(() => {
+    calls.length = 0;
+    routes = {
+      "GET /api/session/nonce": { status: 200, body: { nonce: "cafebabe" } },
+      "GET /api/session": { status: 200, body: { address: WALLET.toLowerCase() } },
+      "POST /api/session": { status: 200, body: { address: WALLET.toLowerCase() } },
+      "DELETE /api/session": { status: 204 },
+      "GET /api/me/watchlist": { status: 200, body: [TOKEN] },
+      [`PUT /api/me/watchlist/${TOKEN}`]: { status: 204 },
+      [`DELETE /api/me/watchlist/${TOKEN}`]: { status: 204 },
+      "GET /api/me/votes": { status: 200, body: { [TOKEN]: "bull" } },
+      [`POST /api/me/votes/${TOKEN}`]: { status: 200, body: { dir: "bull" } },
+    };
+    sessionFetch.mockClear();
+    vi.stubGlobal("fetch", sessionFetch);
+    // This file runs under the `node` project, which has no `window`; `signIn` reads the page's
+    // own host and origin, so the test says what page the user is on.
+    vi.stubGlobal("window", {
+      location: { host: "markets.suitventures.xyz", origin: "https://markets.suitventures.xyz" },
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function call(url: string): { url: string; init?: RequestInit } {
+    const found = calls.find((c) => c.url.split("?")[0] === url);
+    if (!found) throw new Error(`${url} was never called`);
+    return found;
+  }
+
+  it("reads the session from the cookie route", async () => {
+    await expect(source().session()).resolves.toBe(WALLET.toLowerCase());
+  });
+
+  it.each([401, 503])("answers null when the session route says %i", async (status) => {
+    routes["GET /api/session"] = { status };
+    await expect(source().session()).resolves.toBeNull();
+  });
+
+  it("signs in: nonce, then the signed message, then the cookie", async () => {
+    // Typed with an explicit parameter (rather than `vi.fn(async () => ...)`) so `mock.calls[0]`
+    // is `[string]`, not `[]`: TS2493 otherwise, since vitest's `MockParameters` is `Parameters<T>`
+    // of the implementation actually passed in.
+    const sign = vi.fn(async (_message: string) => "0xsig" as Hex);
+    await expect(source().signIn(sign, WALLET)).resolves.toBe(WALLET.toLowerCase());
+    expect(calls.map((c) => `${c.init?.method ?? "GET"} ${c.url}`)).toEqual([
+      "GET /api/session/nonce",
+      "POST /api/session",
+    ]);
+    const body = JSON.parse(String(call("/api/session").init?.body)) as { message: string; signature: string };
+    expect(body.signature).toBe("0xsig");
+    expect(body.message).toBe(sign.mock.calls[0][0]);
+  });
+
+  it("builds an EIP-4361 message with the page's domain, chain 4663 and a seven-day expiry", async () => {
+    let signedMessage = "";
+    await source().signIn(async (message) => {
+      signedMessage = message;
+      return "0xsig" as Hex;
+    }, WALLET);
+    const parsed = parseSiweMessage(signedMessage);
+    expect(parsed.domain).toBe("markets.suitventures.xyz");
+    expect(parsed.uri).toBe("https://markets.suitventures.xyz");
+    expect(parsed.chainId).toBe(4663);
+    expect(parsed.version).toBe("1");
+    expect(parsed.statement).toBe("Sign in to SuitVentures Markets");
+    expect(parsed.nonce).toBe("cafebabe");
+    expect(parsed.address?.toLowerCase()).toBe(WALLET.toLowerCase());
+    const issuedAt = parsed.issuedAt as Date;
+    const expires = parsed.expirationTime as Date;
+    expect(expires.getTime() - issuedAt.getTime()).toBe(7 * 86_400 * 1000);
+  });
+
+  it("throws when the server refuses the signature, so the modal can stay open", async () => {
+    routes["POST /api/session"] = { status: 401, body: { error: "bad signature" } };
+    await expect(source().signIn(async () => "0xsig" as Hex, WALLET)).rejects.toThrow("401");
+  });
+
+  it("signs out through DELETE, and treats an already-dead cookie as success", async () => {
+    await source().signOut();
+    expect(call("/api/session").init?.method).toBe("DELETE");
+    routes["DELETE /api/session"] = { status: 401 };
+    await expect(source().signOut()).resolves.toBeUndefined();
+  });
+
+  it("reads the watchlist and the votes without sending an address anywhere", async () => {
+    const ds = source();
+    await expect(ds.watchlist()).resolves.toEqual([TOKEN]);
+    await expect(ds.votes()).resolves.toEqual({ [TOKEN]: "bull" });
+    expect(calls.every((c) => !c.url.includes(WALLET.toLowerCase()))).toBe(true);
+    expect(call("/api/me/watchlist").init?.credentials).toBe("same-origin");
+  });
+
+  it.each([401, 503])("answers an empty watchlist and no votes on %i, never an error", async (status) => {
+    routes["GET /api/me/watchlist"] = { status };
+    routes["GET /api/me/votes"] = { status };
+    const ds = source();
+    await expect(ds.watchlist()).resolves.toEqual([]);
+    await expect(ds.votes()).resolves.toEqual({});
+  });
+
+  it("stars with PUT and unstars with DELETE, on the token's own path", async () => {
+    const ds = source();
+    await ds.setWatch(TOKEN.toUpperCase().replace("0X", "0x"), true);
+    expect(call(`/api/me/watchlist/${TOKEN}`).init?.method).toBe("PUT");
+    calls.length = 0;
+    await ds.setWatch(TOKEN, false);
+    expect(call(`/api/me/watchlist/${TOKEN}`).init?.method).toBe("DELETE");
+  });
+
+  it("posts a vote and answers the direction that now stands", async () => {
+    routes[`POST /api/me/votes/${TOKEN}`] = { status: 200, body: { dir: null } };
+    await expect(source().vote(TOKEN, "bull")).resolves.toBeNull();
+    const posted = call(`/api/me/votes/${TOKEN}`);
+    expect(posted.init?.method).toBe("POST");
+    expect(JSON.parse(String(posted.init?.body))).toEqual({ dir: "bull" });
+  });
+
+  it("throws when a write is refused, so the optimistic star can be rolled back", async () => {
+    routes[`PUT /api/me/watchlist/${TOKEN}`] = { status: 401 };
+    await expect(source().setWatch(TOKEN, true)).rejects.toThrow("401");
   });
 });

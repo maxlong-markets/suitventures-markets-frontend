@@ -1,7 +1,8 @@
-import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, TokenPair, Trade, VoteDir } from "@/lib/types";
+import { createSiweMessage } from "viem/siwe";
+import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, VoteDir } from "@/lib/types";
 import type { PriceResult } from "@/lib/quote/price";
+import { robinhoodChain } from "@/lib/chain";
 import { localQuote, poolFeePctFor } from "@/lib/quote";
-import { LocalWatchStore } from "./localStore";
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path, { cache: "no-store" });
@@ -27,10 +28,22 @@ function toRouteAmount(text: string): string {
   return f === "" ? w : `${w}.${f}`;
 }
 
+/**
+ * The ASCII statement the wallet shows above the EIP-4361 fields. Fixed text: a statement that
+ * varied per action would train the user to skim the one line that says what they are signing.
+ */
+const SIWE_STATEMENT = "Sign in to SuitVentures Markets";
+
+/**
+ * How long the signed message stays valid. The server's cookie lives exactly as long
+ * (`SESSION_TTL_SEC` in `src/lib/session/cookie.ts`); the number is repeated rather than imported
+ * because that module reads `SESSION_SECRET` and must never be resolvable from a client bundle.
+ */
+const SIGN_IN_TTL_MS = 7 * 86_400 * 1000;
+
 /** Live data through the app's own route handlers (the only Envio clients). */
 export class EnvioDataSource implements MarketsDataSource {
   readonly kind = "envio" as const;
-  private readonly store = new LocalWatchStore();
   private pairsCache: { at: number; list: TokenPair[] } | null = null;
 
   async pairs(): Promise<TokenPair[]> {
@@ -111,18 +124,95 @@ export class EnvioDataSource implements MarketsDataSource {
     };
   }
 
-  async watchlist(address: Address): Promise<string[]> {
-    return this.store.watchlist(address);
+  // --- The signed-in user's own data ------------------------------------
+  // Every request below is same-origin, so `fetch` sends and stores `svm_session` on its own;
+  // `credentials: "same-origin"` is the default and is written out to say that it is load-bearing.
+  //
+  // A read answers empty for 401 and 503 instead of throwing: a cookie that lapsed between the
+  // page load and a refetch must not put an error card over the markets table, and an empty
+  // watchlist is exactly what a signed-out user already sees. A write throws on any refusal,
+  // because `AppState` has already painted the star and needs its invalidate to undo it.
+
+  async watchlist(): Promise<string[]> {
+    const res = await fetch("/api/me/watchlist", { cache: "no-store", credentials: "same-origin" });
+    if (res.status === 401 || res.status === 503) return [];
+    if (!res.ok) throw new Error(`/api/me/watchlist: ${res.status}`);
+    return (await res.json()) as string[];
   }
-  async setWatch(address: Address, id: string, on: boolean, signature: string): Promise<void> {
-    if (!signature) throw new Error("A session signature is required.");
-    this.store.setWatch(address, id, on);
+
+  async setWatch(id: string, on: boolean): Promise<void> {
+    const res = await fetch(`/api/me/watchlist/${id.toLowerCase()}`, {
+      method: on ? "PUT" : "DELETE",
+      credentials: "same-origin",
+    });
+    if (!res.ok) throw new Error(`/api/me/watchlist: ${res.status}`);
   }
-  async votes(address: Address): Promise<Record<string, VoteDir>> {
-    return this.store.votes(address);
+
+  async votes(): Promise<Record<string, VoteDir>> {
+    const res = await fetch("/api/me/votes", { cache: "no-store", credentials: "same-origin" });
+    if (res.status === 401 || res.status === 503) return {};
+    if (!res.ok) throw new Error(`/api/me/votes: ${res.status}`);
+    return (await res.json()) as Record<string, VoteDir>;
   }
-  async vote(address: Address, id: string, dir: VoteDir, signature: string): Promise<void> {
-    if (!signature) throw new Error("A session signature is required.");
-    this.store.vote(address, id, dir);
+
+  async vote(id: string, dir: VoteDir): Promise<VoteDir | null> {
+    const res = await fetch(`/api/me/votes/${id.toLowerCase()}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dir }),
+    });
+    if (!res.ok) throw new Error(`/api/me/votes: ${res.status}`);
+    return ((await res.json()) as { dir: VoteDir | null }).dir;
+  }
+
+  // --- Session ----------------------------------------------------------
+
+  /**
+   * 503 reads as null, not as a failure: `SESSION_SECRET` unset means "nobody can be signed in",
+   * and the whole read-only app must keep working around it (spec section 2).
+   */
+  async session(): Promise<Address | null> {
+    const res = await fetch("/api/session", { cache: "no-store", credentials: "same-origin" });
+    if (res.status === 401 || res.status === 503) return null;
+    if (!res.ok) throw new Error(`/api/session: ${res.status}`);
+    return ((await res.json()) as { address: Address }).address;
+  }
+
+  /**
+   * Sign-In with Ethereum, EIP-4361. The server issues the nonce and holds its HMAC in `svm_nonce`,
+   * so a message this client made up cannot be replayed; `domain` and `uri` come from the page the
+   * user is actually looking at, which is what the server checks the message against.
+   */
+  async signIn(sign: SignMessage, address: Address): Promise<Address> {
+    const { nonce } = await getJson<{ nonce: string }>("/api/session/nonce");
+    const issuedAt = new Date();
+    const message = createSiweMessage({
+      address,
+      chainId: robinhoodChain.id,
+      domain: window.location.host,
+      uri: window.location.origin,
+      statement: SIWE_STATEMENT,
+      version: "1",
+      nonce,
+      issuedAt,
+      expirationTime: new Date(issuedAt.getTime() + SIGN_IN_TTL_MS),
+    });
+    const signature = await sign(message);
+    const res = await fetch("/api/session", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message, signature }),
+    });
+    if (!res.ok) throw new Error(`/api/session: ${res.status}`);
+    // The address the server put in the cookie, lowercase — not the one we asked for.
+    return ((await res.json()) as { address: Address }).address;
+  }
+
+  async signOut(): Promise<void> {
+    const res = await fetch("/api/session", { method: "DELETE", credentials: "same-origin" });
+    // 401 is "already signed out", which is the state the caller wanted.
+    if (!res.ok && res.status !== 401) throw new Error(`/api/session: ${res.status}`);
   }
 }

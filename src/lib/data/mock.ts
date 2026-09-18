@@ -8,6 +8,7 @@ import type {
   Quote,
   QuoteAsset,
   Side,
+  SignMessage,
   TokenPair,
   Trade,
   VoteDir,
@@ -69,8 +70,13 @@ function writeStore(key: string, value: unknown): void {
   }
 }
 
-function requireSignature(signature: string): void {
-  if (!signature) throw new Error("A session signature is required.");
+/**
+ * The demo's writes are the loud half of Ruling 1: `setWatch` and `vote` throw while nobody has
+ * signed in, so an optimistic star rolls back. The reads answer empty instead — see `watchlist()`.
+ */
+function requireSession(address: Address | null): Address {
+  if (!address) throw new Error("Sign in first.");
+  return address;
 }
 
 function generateCandles(pair: TokenPair, interval: Interval, now: number): Candle[] {
@@ -145,6 +151,12 @@ function generateHolders(pair: TokenPair): Holder[] {
 export interface MockOptions {
   /** Simulated network latency for list calls, so loading states are visible. */
   latencyMs?: number;
+  /**
+   * A wallet the demo starts already signed in as. `createDataSource()` passes none, so the demo
+   * asks for a signature once per browser session exactly as it did before M4; a test or a
+   * storybook-style harness can hand one over and skip the modal.
+   */
+  address?: Address;
 }
 
 export class MockDataSource implements MarketsDataSource {
@@ -159,6 +171,7 @@ export class MockDataSource implements MarketsDataSource {
   private readonly watchBook = new Map<string, string[]>();
   private readonly voteBook = new Map<string, Record<string, VoteDir>>();
   private readonly defaultWatchlist: string[];
+  private signedAddress: Address | null;
 
   constructor(opts: MockOptions = {}) {
     this.latencyMs = opts.latencyMs ?? 350;
@@ -168,6 +181,7 @@ export class MockDataSource implements MarketsDataSource {
     this.defaultWatchlist = DEFAULT_WATCHLIST_TICKERS.flatMap((t) =>
       this.pairList.filter((p) => p.ticker === t).map((p) => p.id),
     );
+    this.signedAddress = opts.address ? (opts.address.toLowerCase() as Address) : null;
   }
 
   private async delay(): Promise<void> {
@@ -262,6 +276,17 @@ export class MockDataSource implements MarketsDataSource {
     );
   }
 
+  // The demo keeps its watchlist and votes in this browser, keyed by the signed-in address —
+  // the local persistence the contract protects. Nothing here talks to a route: a demo build has
+  // no market store behind it and every mock token is a generated address no backend knows.
+  //
+  // Ruling 1 applies to this source too: the two reads answer `[]` and `{}` while nobody has
+  // signed in rather than throwing. That is a real behaviour change — before M4 a demo build
+  // showed the SUIT/AI default watchlist to anyone who opened it, and from M4 it appears once the
+  // wallet signs, because a watchlist now belongs to an address rather than to a browser. The
+  // spec does not require the demo to gate reads, so nothing else about it changes: sign in and
+  // the same `localStorage` list, defaults and all, is exactly where it was.
+
   private loadWatch(address: Address): string[] {
     const key = address.toLowerCase();
     let list = this.watchBook.get(key);
@@ -275,18 +300,15 @@ export class MockDataSource implements MarketsDataSource {
     return list;
   }
 
-  async watchlist(address: Address): Promise<string[]> {
+  /** Empty rather than a throw while nobody is signed in — Ruling 1, the same as the live source. */
+  async watchlist(): Promise<string[]> {
+    const address = this.signedAddress;
     await this.delay();
-    return [...this.loadWatch(address)];
+    return address ? [...this.loadWatch(address)] : [];
   }
 
-  async setWatch(
-    address: Address,
-    id: string,
-    on: boolean,
-    signature: string,
-  ): Promise<void> {
-    requireSignature(signature);
+  async setWatch(id: string, on: boolean): Promise<void> {
+    const address = requireSession(this.signedAddress);
     const list = this.loadWatch(address);
     const next = on
       ? list.includes(id)
@@ -308,24 +330,23 @@ export class MockDataSource implements MarketsDataSource {
     return book;
   }
 
-  async votes(address: Address): Promise<Record<string, VoteDir>> {
+  /** Empty rather than a throw while nobody is signed in — Ruling 1, the same as the live source. */
+  async votes(): Promise<Record<string, VoteDir>> {
+    const address = this.signedAddress;
     await this.delay();
-    return { ...this.loadVotes(address) };
+    return address ? { ...this.loadVotes(address) } : {};
   }
 
-  async vote(
-    address: Address,
-    id: string,
-    dir: VoteDir,
-    signature: string,
-  ): Promise<void> {
-    requireSignature(signature);
+  async vote(id: string, dir: VoteDir): Promise<VoteDir | null> {
+    const address = requireSession(this.signedAddress);
     const pair = this.pairOrThrow(id);
     const book = { ...this.loadVotes(address) };
     const prev = book[pair.id];
     if (prev) pair[prev] -= 1;
+    let now: VoteDir | null = dir;
     if (prev === dir) {
       delete book[pair.id];
+      now = null;
     } else {
       book[pair.id] = dir;
       pair[dir] += 1;
@@ -333,5 +354,24 @@ export class MockDataSource implements MarketsDataSource {
     this.voteBook.set(address.toLowerCase(), book);
     writeStore(storageKey("votes", address), book);
     await this.delay();
+    return now;
+  }
+
+  // --- Session ----------------------------------------------------------
+  // No signature is verified and no message is built: the demo has no server to verify one.
+  // `signIn` resolves immediately so the modal closes and the gated action runs, which is the
+  // whole of what the demo needs from a sign-in.
+
+  async session(): Promise<Address | null> {
+    return this.signedAddress;
+  }
+
+  async signIn(_sign: SignMessage, address: Address): Promise<Address> {
+    this.signedAddress = address.toLowerCase() as Address;
+    return this.signedAddress;
+  }
+
+  async signOut(): Promise<void> {
+    this.signedAddress = null;
   }
 }
