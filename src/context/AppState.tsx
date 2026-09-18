@@ -132,6 +132,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   // --- session + gate ---------------------------------------------------
   const [session, setSession] = useState<{ address: Address } | null>(null);
+  // True until the cookie probe below settles, one way or the other. `watchlistLoading` folds
+  // this in so `/watchlist` shows its loading state rather than the signed-out empty copy for
+  // the one render where "not signed in yet" and "still probing" would otherwise look the same
+  // (Task 4 review F6).
+  const [sessionLoading, setSessionLoading] = useState(true);
   const signed = sameAddress(session?.address, address);
   const [signModal, setSignModal] = useState<{ kind: GateKind } | null>(null);
   const pendingRef = useRef<{ kind: GateKind; run: GatedAction } | null>(null);
@@ -146,7 +151,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       .then((addr) => {
         if (alive && addr) setSession((s) => s ?? { address: addr });
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setSessionLoading(false);
+      });
     return () => {
       alive = false;
     };
@@ -196,7 +204,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
    */
   const completeSign = useCallback(
     async (sign: SignMessage, addr: Address) => {
-      const signedAddress = await ds.signIn(sign, addr);
+      let signedAddress: Address;
+      try {
+        signedAddress = await ds.signIn(sign, addr);
+      } catch (err) {
+        // A refusal — the wallet's or the server's — drops the queued action rather than leaving
+        // it to fire on some later, unrelated sign-in; only a fresh gesture may queue another one.
+        pendingRef.current = null;
+        throw err;
+      }
       setSession({ address: signedAddress });
       setSignModal(null);
       const pending = pendingRef.current;
@@ -308,7 +324,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setQuery,
       resetFilters,
       stars,
-      watchlistLoading: signed && watchlistQuery.isPending,
+      watchlistLoading: sessionLoading || (signed && watchlistQuery.isPending),
       toggleStar,
       votes,
       vote,
@@ -334,6 +350,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setQuery,
       resetFilters,
       stars,
+      sessionLoading,
       watchlistQuery.isPending,
       toggleStar,
       votes,

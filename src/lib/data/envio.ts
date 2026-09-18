@@ -3,6 +3,7 @@ import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote
 import type { PriceResult } from "@/lib/quote/price";
 import { robinhoodChain } from "@/lib/chain";
 import { localQuote, poolFeePctFor } from "@/lib/quote";
+import { SIWE_STATEMENT } from "@/lib/session/siwe";
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path, { cache: "no-store" });
@@ -27,12 +28,6 @@ function toRouteAmount(text: string): string {
   const f = fraction.replace(/0+$/, "");
   return f === "" ? w : `${w}.${f}`;
 }
-
-/**
- * The ASCII statement the wallet shows above the EIP-4361 fields. Fixed text: a statement that
- * varied per action would train the user to skim the one line that says what they are signing.
- */
-const SIWE_STATEMENT = "Sign in to SuitVentures Markets";
 
 /**
  * How long the signed message stays valid. The server's cookie lives exactly as long
@@ -185,7 +180,13 @@ export class EnvioDataSource implements MarketsDataSource {
    * user is actually looking at, which is what the server checks the message against.
    */
   async signIn(sign: SignMessage, address: Address): Promise<Address> {
-    const { nonce } = await getJson<{ nonce: string }>("/api/session/nonce");
+    // A direct fetch, not the shared `getJson`: this is the one read in the sign-in flow whose
+    // cookie (`svm_nonce`) the POST below must echo back, so it keeps its own explicit
+    // `credentials` rather than inheriting whatever `getJson` does for the public reads that
+    // also call it.
+    const nonceRes = await fetch("/api/session/nonce", { cache: "no-store", credentials: "same-origin" });
+    if (!nonceRes.ok) throw new Error(`/api/session/nonce: ${nonceRes.status}`);
+    const { nonce } = (await nonceRes.json()) as { nonce: string };
     const issuedAt = new Date();
     const message = createSiweMessage({
       address,

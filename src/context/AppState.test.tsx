@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Address, Hex, SignMessage, VoteDir } from "@/lib/types";
+import { keys } from "@/hooks/useMarketsData";
 import { act, fireEvent, queryHarness, render, screen, waitFor } from "@/test/dom";
 import { AppStateProvider, useAppState, type AppState } from "./AppState";
 
@@ -69,14 +70,20 @@ function Probe() {
 }
 
 function show() {
-  const { wrapper: QueryWrapper } = queryHarness();
-  return render(
+  const { client, wrapper: QueryWrapper } = queryHarness();
+  // A factory, not a single element kept around: `rerender` with the very same element object
+  // gives every fiber down to `Probe` referentially-equal props, which lets React bail out of
+  // the subtree entirely — including the `useAccount()` call a wallet-switch test depends on. A
+  // freshly built element each time has the same shape but a new identity, so nothing bails out.
+  const buildTree = () => (
     <QueryWrapper>
       <AppStateProvider>
         <Probe />
       </AppStateProvider>
-    </QueryWrapper>,
+    </QueryWrapper>
   );
+  const result = render(buildTree());
+  return { ...result, client, rerenderApp: () => result.rerender(buildTree()) };
 }
 
 describe("AppStateProvider sign-in", () => {
@@ -154,5 +161,53 @@ describe("AppStateProvider sign-in", () => {
     fireEvent.click(screen.getByText("star"));
     expect(h.openConnectModal).toHaveBeenCalled();
     expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("drops the queued action on a refused sign-in, so a later successful sign-in does not run it", async () => {
+    h.ds.signIn.mockRejectedValueOnce(new Error("401"));
+    show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByText("star"));
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+
+    // First attempt: the wallet or the server refuses. The modal stays open for a retry, but the
+    // queued star must not survive the refusal.
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.ds.signIn).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("signed").textContent).toBe("false");
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+
+    // Second attempt from the same still-open modal: the mocked signIn now resolves (the
+    // one-time rejection above is already consumed), so the sign-in itself succeeds — but the
+    // star queued before the refusal must not fire on its own.
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    expect(h.ds.setWatch).not.toHaveBeenCalled();
+  });
+
+  it("drops a previous wallet's watchlist and votes the moment a different wallet connects", async () => {
+    const WALLET_B = "0x1111111111111111111111111111111111111111" as Address;
+    h.ds.session.mockResolvedValue(LOWER);
+    h.ds.votes.mockResolvedValue({ [TOKEN]: "bull" });
+    const { client, rerenderApp } = show();
+
+    await waitFor(() => expect(screen.getByTestId("stars").textContent).toBe(TOKEN));
+    await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" }));
+
+    // Wallet A disconnects and a different wallet, B, takes its place in the same tab. Nothing
+    // about B has signed in yet, so B must not render a single answer that belongs to A.
+    h.account = { address: WALLET_B, isConnected: true };
+    rerenderApp();
+
+    await waitFor(() => expect(client.getQueryData(keys.watchlist)).toBeUndefined());
+    expect(client.getQueryData(keys.votes)).toBeUndefined();
+    expect(screen.getByTestId("signed").textContent).toBe("false");
+    expect(screen.getByTestId("stars").textContent).toBe("");
   });
 });

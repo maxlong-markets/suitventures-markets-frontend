@@ -153,8 +153,10 @@ export interface MockOptions {
   latencyMs?: number;
   /**
    * A wallet the demo starts already signed in as. `createDataSource()` passes none, so the demo
-   * asks for a signature once per browser session exactly as it did before M4; a test or a
-   * storybook-style harness can hand one over and skip the modal.
+   * opens the sign-in modal on the first gated action like the live source does — but `signIn`
+   * below never asks the wallet for a signature, only records the address, so the modal closes
+   * on that first click. A test or a storybook-style harness can hand one over here and skip the
+   * modal entirely.
    */
   address?: Address;
 }

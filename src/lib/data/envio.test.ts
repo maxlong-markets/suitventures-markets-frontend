@@ -342,4 +342,22 @@ describe("EnvioDataSource sessions and user data", () => {
     routes[`PUT /api/me/watchlist/${TOKEN}`] = { status: 401 };
     await expect(source().setWatch(TOKEN, true)).rejects.toThrow("401");
   });
+
+  // Task 4 review F3/F4: `credentials: "same-origin"` is load-bearing on every one of these —
+  // including `signIn`'s nonce GET, which used to ride the shared `getJson` and so carried no
+  // explicit marker at all. One row per method; stripping the marker from any single fetch call
+  // any of them makes, including the nonce GET inside `signIn`, fails that row.
+  it.each([
+    ["session", () => source().session()],
+    ["signIn", () => source().signIn(async () => "0xsig" as Hex, WALLET)],
+    ["signOut", () => source().signOut()],
+    ["watchlist", () => source().watchlist()],
+    ["setWatch", () => source().setWatch(TOKEN, true)],
+    ["votes", () => source().votes()],
+    ["vote", () => source().vote(TOKEN, "bull")],
+  ])("%s: every request it makes carries credentials: same-origin", async (_name, run) => {
+    await run();
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((c) => c.init?.credentials === "same-origin")).toBe(true);
+  });
 });
