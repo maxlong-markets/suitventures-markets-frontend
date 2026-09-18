@@ -18,19 +18,29 @@ export type RunReport = {
 
 /** The last_error an invocation records when the indexer reports a block below the store's mark (spec 5.3a). */
 export const INDEXER_BEHIND = "indexer behind the store";
+/** The last_error an invocation records when the nightly's probe phase had candidates but the quoter answered
+ * not one of them (I2b): every candidate came back "skipped", which otherwise looks byte-identical to a clean
+ * sweep — this is what makes a dead RPC visible instead of a nightly report that quietly does nothing. */
+export const PROBE_UNREACHABLE = "probe: quoter unreachable";
 
 const sec = (ms: number) => Math.floor(ms / 1000);
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const rowsOf = (r: CycleResult | NightlyResult) =>
   "done" in r ? r.tokens + r.pools + r.listed : r.pools + r.swaps + r.candles + r.tokens + r.newPools;
+/** True exactly when a nightly result's probe phase ran against candidates and got zero verdicts back — every one
+ * skipped (I2b). Always false for a market CycleResult, which carries none of these fields. */
+const probeUnreachable = (r: CycleResult | NightlyResult) => "routable" in r && r.routable === 0 && r.unroutable === 0 && r.skipped > 0;
 
 /**
  * Takes the lease (or reports skipped: "lease"); market: yields (skipped: "nightly") while the nightly holds its
  * lease; probes the indexer's head block once and skips ("indexer", with last_error set) while it is below the
  * store's mark, raising the mark otherwise; market: runs cycles until
  * windowSec has elapsed, sleeping so cycles start intervalSec apart, sharing one queryBudget across the invocation
- * (the probe counts); nightly: one runNightly. Every cycle ends with finishRun (ok or error); the first error,
- * the probe's included, ends the invocation. Always releases the lease.
+ * (the head-block probe counts); nightly: one runNightly. Every cycle ends with finishRun (ok or error); the first
+ * thrown error, the head-block probe's included, ends the invocation. A nightly cycle whose own routable-pool
+ * probe phase got zero verdicts back is a different case (I2b): it is not thrown, so the cycle's result and
+ * cursor stand, but finishRun still records it as an error (PROBE_UNREACHABLE) rather than a clean run. Always
+ * releases the lease.
  */
 export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promise<RunReport> {
   const report: RunReport = { job: opts.job, skipped: null, cycles: 0, results: [], error: null };
@@ -79,7 +89,15 @@ export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promi
       report.results.push(result);
       report.cycles += 1;
       budget -= result.queries;
-      await finishRun(db, opts.job, { now: sec(opts.now()), ok: true, rows: rowsOf(result), queries: result.queries + pending });
+      // A severed probe (I2b) still finishes normally — its own cursor and phase are already persisted by the
+      // time we get here — but must not be recorded as a clean run: finishRun sees it exactly like a thrown
+      // error, so /api/health's lastError shows a dead RPC instead of a report indistinguishable from success.
+      const severed = probeUnreachable(result);
+      if (severed) report.error = PROBE_UNREACHABLE;
+      await finishRun(db, opts.job, {
+        now: sec(opts.now()), ok: !severed, error: severed ? PROBE_UNREACHABLE : undefined,
+        rows: rowsOf(result), queries: result.queries + pending,
+      });
       pending = 0;
       const nextMs = cycleStartMs + opts.intervalSec * 1000;
       if (opts.job === "nightly" || budget <= 0 || nextMs >= endMs) break;

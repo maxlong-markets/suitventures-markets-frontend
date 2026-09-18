@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
+import { QuoterUnavailableError, type Quoter } from "@/lib/quote/quoter";
 import { testDb } from "@/test/db";
 import { FakeSource } from "./fakeSource";
-import { runSync, type RunOpts } from "./run";
+import { PROBE_UNREACHABLE, runSync, type RunOpts } from "./run";
 import { acquireLease, raiseHeadBlock, readHeadBlock, readState } from "./state";
-import { T0, poolRec, priceRec, quoteRec, tokenRec } from "./testRows";
+import { POOL_A, T0, poolRec, priceRec, quoteRec, tokenRec } from "./testRows";
+import { upsertQuotes } from "./writers";
 
 const NOW_MS = (T0 + 1000) * 1000;
 let db: Db;
@@ -61,6 +63,35 @@ describe("runSync", () => {
     expect(report.results[0]).toMatchObject({ done: true, phase: "", tokens: 1, pools: 1, listed: 1 });
     expect(o.slept).toEqual([]);
     expect(await readState(db, "nightly")).toMatchObject({ rowsWritten: 3, queriesUsed: 3, leaseOwner: null });
+  });
+  it("forwards opts.quoter through to the nightly's probe phase (I2a wiring)", async () => {
+    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    const calls: string[] = [];
+    const quoter: Quoter = {
+      exactIn: async (call) => { calls.push(call.poolKey.poolId); return 1n; },
+      exactOut: async () => { throw new Error("unused by probePools"); },
+    };
+    const o = opts({ job: "nightly", windowSec: 250, queryBudget: 400, leaseSec: 300, quoter });
+    const report = await runSync(db, src, o);
+    expect(calls).toEqual([POOL_A]);
+    expect(report.results[0]).toMatchObject({ routable: 1, unroutable: 0, skipped: 0 });
+  });
+  it("records PROBE_UNREACHABLE through finishRun when every probe candidate is skipped (I2b), keeping the cursor and finishing the phase", async () => {
+    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    const quoter: Quoter = {
+      exactIn: async () => { throw new QuoterUnavailableError(new Error("down")); },
+      exactOut: async () => { throw new Error("unused by probePools"); },
+    };
+    const o = opts({ job: "nightly", windowSec: 250, queryBudget: 400, leaseSec: 300, quoter });
+    const report = await runSync(db, src, o);
+    expect(report.error).toBe(PROBE_UNREACHABLE);
+    expect(report.results[0]).toMatchObject({ done: true, phase: "", routable: 0, unroutable: 0, skipped: 1 });
+    // Not a thrown-error abort: tokens/pools/listed already wrote real rows, and the probe phase's own cursor
+    // and phase are already persisted (I3) by the time finishRun records the error — a dead RPC must not erase
+    // either, only stop the run from reading as healthy.
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "", lastError: PROBE_UNREACHABLE, rowsWritten: 3, leaseOwner: null });
   });
 });
 

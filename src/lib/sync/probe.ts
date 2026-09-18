@@ -11,7 +11,13 @@ export const PROBE_RUN_CAP = 3000;
 /** A pool untraded this long cannot appear in the table (spec section 2): probing it would be wasted RPC. */
 export const PROBE_ACTIVE_SEC = 7 * 86_400;
 
-export type ProbeOpts = { now: number; deadlineMs: number; afterId: string; cap?: number };
+export type ProbeOpts = {
+  now: number; deadlineMs: number; afterId: string; cap?: number;
+  /** Called after each page's writes have all landed, with the page's last id (spec section 2: "persisting the
+   * cursor like the other phases"). The nightly wires this to saveCursors so a crash mid-walk loses at most one
+   * page's progress, not the whole call's (I3). */
+  onPage?: (lastId: string) => Promise<void>;
+};
 export type ProbeResult = { probed: number; routable: number; unroutable: number; skipped: number; lastId: string; done: boolean };
 
 /** The candidate set, joined for poolKeyRow()'s fields exactly as dbBackend's POOL_KEY_SQL joins them (poolKey.ts's
@@ -91,7 +97,10 @@ async function probeOne(db: Db, quoter: Quoter, row: CandidateRow, now: number):
  * Stops at `cap` (default PROBE_RUN_CAP) or opts.deadlineMs, both checked before every batch is dispatched and
  * before every page is fetched, never after one is already running. `done` is true only once a fetched page
  * comes back shorter than requested — the candidate set genuinely ran out within the cap and the deadline —
- * exactly as the tokens/pools phases' own walk treats a short page as "the end" (nightly.ts).
+ * exactly as the tokens/pools phases' own walk treats a short page as "the end" (nightly.ts). `opts.onPage`, when
+ * given, fires once per fetched page — after that page's own batches have all written, whether the page ran to
+ * its end or was cut short by the cap or the deadline — so a caller can persist the cursor as we go (I3) instead
+ * of only once this whole call returns.
  */
 export async function probePools(db: Db, quoter: Quoter, opts: ProbeOpts): Promise<ProbeResult> {
   const cap = opts.cap ?? PROBE_RUN_CAP;
@@ -111,10 +120,10 @@ export async function probePools(db: Db, quoter: Quoter, opts: ProbeOpts): Promi
     const rows = await db.query<CandidateRow>(CANDIDATES_SQL, [activeSince, afterId, pageSize]);
     if (rows.length === 0) return stop(true);
 
+    let cutShort = false; // the cap or the deadline stopped this page before every one of its rows was probed
     for (let i = 0; i < rows.length; ) {
       const room = cap - probed;
-      if (room <= 0) return stop(false);
-      if (Date.now() >= opts.deadlineMs) return stop(false);
+      if (room <= 0 || Date.now() >= opts.deadlineMs) { cutShort = true; break; }
       const batch = rows.slice(i, i + Math.min(PROBE_CONCURRENCY, room));
       const outcomes = await Promise.all(batch.map((row) => probeOne(db, quoter, row, opts.now)));
       for (const outcome of outcomes) {
@@ -126,6 +135,8 @@ export async function probePools(db: Db, quoter: Quoter, opts: ProbeOpts): Promi
       afterId = batch[batch.length - 1].id;
       i += batch.length;
     }
+    await opts.onPage?.(afterId);
+    if (cutShort) return stop(false);
     if (rows.length < pageSize) return stop(true);
   }
 }
