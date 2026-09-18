@@ -60,6 +60,17 @@ const BLOCK_POLL_MS = 10_000;
  * Disconnected returns zeroes, and so does every state where a scale is still unknown: a
  * balance rendered at the wrong scale is worse than no balance.
  */
+/**
+ * The block watcher's options. `enabled` MUST be present: wagmi computes the watcher's enabled as
+ * `(query.enabled ?? true) && watch.enabled`, so a watch object without it is always false and the
+ * poll silently never starts — balances then refresh only on window focus. This shipped once,
+ * caught by counting `eth_blockNumber` calls against a real provider, not by any test. Exported so
+ * a test can pin it.
+ */
+export function blockWatch(ready: boolean): { enabled: boolean; poll: true; pollingInterval: number } {
+  return { enabled: ready, poll: true, pollingInterval: BLOCK_POLL_MS };
+}
+
 export function usePairBalances(pair: TokenPair): PairBalances {
   const { address, isConnected } = useAccount();
   const quotes = useQuotes();
@@ -110,10 +121,7 @@ export function usePairBalances(pair: TokenPair): PairBalances {
 
   const { data: blockNumber } = useBlockNumber({
     chainId: robinhoodChain.id,
-    // `enabled` is required inside `watch`: wagmi computes the watcher's enabled as
-    // `(query.enabled ?? true) && watch.enabled`, so an object without it is always false and the
-    // poll silently never starts. Proven by counting eth_blockNumber calls against a real provider.
-    watch: { enabled: ready, poll: true, pollingInterval: BLOCK_POLL_MS },
+    watch: blockWatch(ready),
     query: { enabled: ready },
   });
 

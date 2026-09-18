@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Address, QuoteAsset, TokenPair } from "@/lib/types";
 import { queryHarness, renderHook } from "@/test/dom";
-import { invalidatePairBalances, usePairBalances } from "./useTokenBalance";
+import { invalidatePairBalances, usePairBalances, blockWatch } from "./useTokenBalance";
 
 const h = vi.hoisted(() => ({
   account: { address: undefined as `0x${string}` | undefined, isConnected: false },
@@ -204,5 +204,20 @@ describe("usePairBalances", () => {
     const spy = vi.spyOn(client, "invalidateQueries");
     await invalidatePairBalances(client);
     expect(spy).toHaveBeenCalledWith({ queryKey: ["readContracts"] });
+  });
+});
+
+describe("blockWatch", () => {
+  it("always carries its own enabled flag", () => {
+    // wagmi ANDs watch.enabled with the query's, so a watch object missing `enabled` is always
+    // false and the poll never starts. This exact omission shipped and no test caught it.
+    expect(blockWatch(true)).toEqual({ enabled: true, poll: true, pollingInterval: expect.any(Number) });
+    expect(blockWatch(false).enabled).toBe(false);
+    expect(Object.keys(blockWatch(true))).toContain("enabled");
+  });
+
+  it("polls on a human timescale, not per block", () => {
+    // Robinhood Chain produces a block about every 100 ms; polling per block would be absurd.
+    expect(blockWatch(true).pollingInterval).toBeGreaterThanOrEqual(5_000);
   });
 });
