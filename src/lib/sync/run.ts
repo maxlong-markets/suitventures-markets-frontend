@@ -1,4 +1,5 @@
 import type { Db } from "@/lib/db/client";
+import type { Quoter } from "@/lib/quote/quoter";
 import { runMarketCycle, type CycleResult } from "./market";
 import { runNightly, type NightlyResult } from "./nightly";
 import type { EnvioSource } from "./source";
@@ -7,6 +8,8 @@ import { acquireLease, finishRun, raiseHeadBlock, readHeadBlock, readState, rele
 export type RunOpts = {
   job: SyncJob; owner: string; now: () => number; sleep: (ms: number) => Promise<void>;
   windowSec: number; intervalSec: number; queryBudget: number; leaseSec: number;
+  /** Forwarded into runNightly's own opts (nightly.ts); deps.ts supplies it for "nightly", the market job ignores it. */
+  quoter?: Quoter;
 };
 export type RunReport = {
   job: SyncJob; skipped: "lease" | "nightly" | "indexer" | null; cycles: number;
@@ -65,7 +68,7 @@ export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promi
       const cycleStartMs = opts.now();
       const before = source.queries;
       // The cycle watches the real clock; hand it the window's remainder as measured on the injected one.
-      const cycleOpts = { now: sec(cycleStartMs), queryBudget: budget, deadlineMs: Date.now() + Math.max(0, endMs - cycleStartMs) };
+      const cycleOpts = { now: sec(cycleStartMs), queryBudget: budget, deadlineMs: Date.now() + Math.max(0, endMs - cycleStartMs), quoter: opts.quoter };
       let result: CycleResult | NightlyResult;
       try {
         result = opts.job === "market" ? await runMarketCycle(db, source, cycleOpts) : await runNightly(db, source, cycleOpts);

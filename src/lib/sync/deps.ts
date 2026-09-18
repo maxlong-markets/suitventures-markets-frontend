@@ -1,10 +1,12 @@
 import { getDb, type Db } from "@/lib/db/client";
+import { createQuoter, type Quoter } from "@/lib/quote/quoter";
 import { createEnvioSource } from "./envioSource";
 import { createLimiter, type RetryOpts } from "./limiter";
 import type { EnvioSource } from "./source";
 import type { SyncJob } from "./state";
 
-export type SyncDeps = { db: Db; source: EnvioSource };
+/** `quoter` is only ever set for "nightly" (its probe phase, nightly.ts); the market job has no use for one. */
+export type SyncDeps = { db: Db; source: EnvioSource; quoter?: Quoter };
 type Factory = (job: SyncJob) => SyncDeps;
 let override: Factory | null = null;
 
@@ -21,10 +23,11 @@ export const SYNC_RETRY: RetryOpts = { attempts: 3 };
  */
 export const SOURCE_PER_MINUTE: Record<SyncJob, number> = { market: 200, nightly: 120 };
 
-/** What a cron route runs against: the process Db (getDb throws DbUnavailableError without DATABASE_URL) and the real source with the job's limiter. */
+/** What a cron route runs against: the process Db (getDb throws DbUnavailableError without DATABASE_URL), the real source with the job's limiter, and — for "nightly" only — a real Quoter for its probe phase. */
 export function syncDeps(job: SyncJob): SyncDeps {
   if (override) return override(job);
-  return { db: getDb(), source: createEnvioSource({ limiter: createLimiter(SOURCE_PER_MINUTE[job]), retry: SYNC_RETRY }) };
+  const deps: SyncDeps = { db: getDb(), source: createEnvioSource({ limiter: createLimiter(SOURCE_PER_MINUTE[job]), retry: SYNC_RETRY }) };
+  return job === "nightly" ? { ...deps, quoter: createQuoter() } : deps;
 }
 /** Tests only: substitute PGlite and a FakeSource (the factory may ignore the job); null restores the defaults. */
 export function setSyncDeps(factory: Factory | null): void {
