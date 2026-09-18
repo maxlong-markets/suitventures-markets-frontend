@@ -188,6 +188,17 @@ the balance, since the fee comes out of the input rather than on top.
 
 ## 6. Suits holder check
 
+**Ruling of 18 Sep 2026 (MAXLONG, through Kobe): no holder discount for now.**
+Every user pays 0.5 %. This needs no contract change and no code change: the
+router is deployed with `SUITS_NFT` unset, and `feeFor` then skips the NFT
+call entirely and charges `feeBps` to everyone. `setSuitsNft` can switch the
+perk on later without redeploying. `NEXT_PUBLIC_SUITS_NFT_ADDRESS` therefore
+stays empty, and the quote route always receives `holder=0`.
+
+This makes the mock default below load-bearing rather than cosmetic: an
+unconfigured build that reported "holder" would show 0 % in the panel while
+the contract charged 0.5 %, which is a mis-quote, not a display bug.
+
 Already real when `NEXT_PUBLIC_SUITS_NFT_ADDRESS` is set. Two changes: the
 mock default flips from "holder" to "not a holder", so an unconfigured build
 shows the fee every user will actually pay; and the check is passed to the
