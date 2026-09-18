@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearTtlCache } from "@/lib/envio/cache";
+import { clearCountsCache } from "@/lib/social/countsCache";
 import { EnvioUnavailableError } from "@/lib/envio/client";
 import type { TokenPair } from "@/lib/types";
 import { GET } from "./route";
@@ -28,6 +29,7 @@ const found = { id: ADDR, ticker: "AI", name: "Artificial Inu" } as TokenPair;
 describe("GET /api/tokens/[address]", () => {
   beforeEach(() => {
     clearTtlCache();
+    clearCountsCache();
     pair.mockReset();
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
@@ -73,6 +75,9 @@ describe("GET /api/tokens/[address] vote counts", () => {
     // clear, the 30 s `pair:<addr>` memo the earlier cases filled is still live and the 404 case
     // below would be served a 200 out of it.
     clearTtlCache();
+    // The counts merge shares one per-id cache with `/api/votes` (review I1); it survives a
+    // `ttlCache` clear, so each case below must start from an empty one to reach the store.
+    clearCountsCache();
     pair.mockReset();
     holder.db = null;
     voteCounts.mockReset();

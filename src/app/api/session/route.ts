@@ -50,6 +50,11 @@ const MAX_USED_NONCES = 10_000;
  * true for a nonce already spent by an earlier successful POST — even though the nonce cookie
  * itself, and the signature over it, would both still verify — so a captured request cannot be
  * replayed into a second session for as long as the browser holds the cookie.
+ *
+ * Per serverless instance, like both rate-limit stores (`rateLimit.ts`): a captured POST replayed
+ * against a *different* instance inside the nonce's ten minutes would still be spent there. The
+ * impact is low — whoever can capture the POST can read the `Set-Cookie` in its reply — and a
+ * shared store is the M5 answer, but this is best-effort, not a guarantee (review M2).
  */
 function nonceUsed(nonce: string, now: number): boolean {
   const exp = usedNonces.get(nonce);
@@ -142,7 +147,12 @@ export async function GET(req: Request) {
   return noStore({ address: session.address });
 }
 
-/** Signing out needs no key, so this works even while SESSION_SECRET is unset. */
+/**
+ * Signing out needs no key, so this works even while SESSION_SECRET is unset. It clears this
+ * browser's cookie and nothing else: sessions are stateless and there is no server-side
+ * revocation list, so a token already copied elsewhere stays valid until its own 7-day `exp`.
+ * Acceptable for M4; revocation is M5 (review M3).
+ */
 export async function DELETE() {
   const res = new NextResponse(null, { status: 204, headers: { "Cache-Control": "no-store" } });
   clearCookie(res, SESSION_COOKIE);

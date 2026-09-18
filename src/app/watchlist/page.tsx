@@ -12,8 +12,16 @@ import { usePairs } from "@/hooks/useMarketsData";
 import { selectPairs } from "@/lib/markets";
 
 export default function WatchlistPage() {
-  const { isConnected, filters, stars, watchlistLoading, toggleStar, sortBy } =
-    useAppState();
+  const {
+    isConnected,
+    signed,
+    filters,
+    stars,
+    watchlistLoading,
+    promptSignIn,
+    toggleStar,
+    sortBy,
+  } = useAppState();
   const { openConnectModal } = useConnectModal();
   const pairsQuery = usePairs();
 
@@ -25,6 +33,13 @@ export default function WatchlistPage() {
   );
 
   const loading = pairsQuery.isPending || watchlistLoading;
+  /**
+   * The list lives on the server behind a session, so a connected wallet that has not signed in
+   * *here* has no stars to show and may well have twenty on it. Telling it the watchlist is empty
+   * is simply false, and the star gate was the only sign-in affordance in the app (review I5).
+   * `watchlistLoading` folds the cookie probe in, so this never fires while that is in flight.
+   */
+  const needsSignIn = isConnected && !signed && !watchlistLoading;
 
   return (
     <>
@@ -32,13 +47,31 @@ export default function WatchlistPage() {
       <section className="px-4 pb-8 tablet:px-5 desktop:px-6">
         <div className="mt-[18px] flex items-baseline gap-[14px]">
           <h1 className="text-[18px] font-medium tracking-[-0.01em]">Watchlist</h1>
-          {isConnected && !loading ? (
+          {isConnected && !needsSignIn && !loading ? (
             <span className="font-mono text-[10.5px] uppercase tracking-[0.16em] text-ink-40">
               {rows.length} token{rows.length === 1 ? "" : "s"}
             </span>
           ) : null}
         </div>
-        {isConnected ? (
+        {needsSignIn ? (
+          <div className="mt-[14px] border-t border-hairline px-4 py-[72px] text-center">
+            <SuitsMark size={36} className="mx-auto opacity-80" />
+            <div className="mb-[6px] mt-[18px] text-[17px]">
+              Sign in to load your watchlist.
+            </div>
+            <div className="text-[12.5px] text-ink-50">
+              One signature, no gas. Your stars live with your wallet, not with
+              this browser.
+            </div>
+            <button
+              type="button"
+              onClick={promptSignIn}
+              className={`${walletButtonClass} mx-auto mt-[22px] h-[34px] px-[18px]`}
+            >
+              Sign In
+            </button>
+          </div>
+        ) : isConnected ? (
           <>
             <MarketsToolbar total={rows.length} loading={loading} />
             <PairsTable

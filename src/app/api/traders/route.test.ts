@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DbUnavailableError } from "@/lib/db/client";
 import { clearTtlCache } from "@/lib/envio/cache";
 import type { Address, TraderRow } from "@/lib/types";
-import { GET } from "./route";
+import { GET, maxDuration } from "./route";
 
 const h = vi.hoisted(() => ({
   hasDb: vi.fn<() => boolean>(),
@@ -34,6 +34,12 @@ describe("GET /api/traders", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => vi.restoreAllMocks());
+
+  // Review I3: the board's is the heaviest query in the app — a day of `market.swaps` joined and
+  // hash-aggregated — and it was the only store route inheriting the platform's default duration.
+  it("pins a duration budget, like every other route that touches the store", () => {
+    expect(maxDuration).toBe(30);
+  });
 
   it("answers 503 with a sentence the page can print and a machine-readable code when there is no store", async () => {
     h.hasDb.mockReturnValue(false);

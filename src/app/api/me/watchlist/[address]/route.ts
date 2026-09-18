@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db/client";
 import { allowWrite } from "@/lib/social/rateLimit";
-import { setWatch } from "@/lib/social/store";
+import { WalletCapError, setWatch } from "@/lib/social/store";
 import { nowSec } from "@/lib/time";
-import { badRequest, failure, isAddress, tooManyRequests } from "../../../_lib/respond";
+import { badRequest, conflict, failure, isAddress, tooManyRequests } from "../../../_lib/respond";
 import { requireSession } from "../../../_lib/session";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +27,9 @@ async function write(req: Request, ctx: Ctx, on: boolean) {
     await setWatch(getDb(), session.address, id, on, now);
     return new NextResponse(null, { status: 204, headers: { "Cache-Control": "no-store" } });
   } catch (err) {
+    // The wallet is full, which is neither its fault this second nor a server fault: 409, so the
+    // client can tell it apart from the 429 budget and the 503 outage (review I4).
+    if (err instanceof WalletCapError) return conflict("watchlist full");
     return failure(err);
   }
 }

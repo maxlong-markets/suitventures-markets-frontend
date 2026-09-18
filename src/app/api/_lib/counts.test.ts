@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GET as votesGET } from "@/app/api/votes/route";
 import type { Db } from "@/lib/db/client";
 import { DbUnavailableError } from "@/lib/db/client";
-import { clearTtlCache } from "@/lib/envio/cache";
+import { clearCountsCache } from "@/lib/social/countsCache";
 import type { VoteCount } from "@/lib/social/store";
 import type { TokenPair } from "@/lib/types";
-import { VOTES_TTL, voteCountsFor, withVoteCounts } from "./counts";
+import { VOTES_TTL, zeros, withVoteCounts } from "./counts";
 
 const { holder, voteCounts } = vi.hoisted(() => ({
   holder: { db: null as Db | null },
@@ -24,36 +25,18 @@ const T2 = `0x${"2".repeat(40)}`;
 const pair = (id: string) => ({ id, ticker: "AI", bull: 0, bear: 0 }) as TokenPair;
 
 beforeEach(() => {
-  clearTtlCache();
+  clearCountsCache();
   voteCounts.mockReset();
   holder.db = {} as Db; // a database is configured; the store itself is mocked
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe("voteCountsFor", () => {
-  it("caches for thirty seconds, keyed by the ids whatever order they arrive in", async () => {
+describe("zeros", () => {
+  it("shapes an answer for every id without asking the store anything", () => {
     expect(VOTES_TTL).toBe(30);
-    voteCounts.mockResolvedValue({ [T1]: { bull: 3, bear: 1 }, [T2]: { bull: 0, bear: 0 } });
-    await expect(voteCountsFor([T1, T2])).resolves.toEqual({ [T1]: { bull: 3, bear: 1 }, [T2]: { bull: 0, bear: 0 } });
-    voteCounts.mockResolvedValue({ [T1]: { bull: 99, bear: 99 }, [T2]: { bull: 99, bear: 99 } });
-    await expect(voteCountsFor([T2, T1])).resolves.toEqual({ [T1]: { bull: 3, bear: 1 }, [T2]: { bull: 0, bear: 0 } });
-    expect(voteCounts).toHaveBeenCalledTimes(1);
-  });
-
-  it("answers zeros without a database and never asks the store", async () => {
-    holder.db = null;
-    await expect(voteCountsFor([T1, T2])).resolves.toEqual({ [T1]: { bull: 0, bear: 0 }, [T2]: { bull: 0, bear: 0 } });
+    expect(zeros([T1, T2])).toEqual({ [T1]: { bull: 0, bear: 0 }, [T2]: { bull: 0, bear: 0 } });
+    expect(zeros([])).toEqual({});
     expect(voteCounts).not.toHaveBeenCalled();
-  });
-
-  it("answers an empty map for no ids at all", async () => {
-    await expect(voteCountsFor([])).resolves.toEqual({});
-    expect(voteCounts).not.toHaveBeenCalled();
-  });
-
-  it("lets a store outage travel, so the route can answer 503", async () => {
-    voteCounts.mockRejectedValue(new DbUnavailableError("database unavailable (ECONNREFUSED)"));
-    await expect(voteCountsFor([T1])).rejects.toBeInstanceOf(DbUnavailableError);
   });
 });
 
@@ -91,5 +74,30 @@ describe("withVoteCounts", () => {
   it("does nothing at all for an empty list", async () => {
     await expect(withVoteCounts([])).resolves.toEqual([]);
     expect(voteCounts).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Review I1: the merge used to keep its own `votes:{sorted ids}` memo in the uncapped `ttlCache`,
+   * so the pairs table and `/api/votes` each held a separate thirty seconds of the same numbers and
+   * could disagree about one token. One cache, keyed per id, means the second reader is a hit.
+   */
+  it("serves ids the public counts route already cached, without a second store query", async () => {
+    voteCounts.mockResolvedValue({ [T1]: { bull: 3, bear: 1 }, [T2]: { bull: 0, bear: 0 } });
+    const res = await votesGET(new Request(`http://localhost:3000/api/votes?ids=${T1},${T2}`));
+    expect(res.status).toBe(200);
+    expect(voteCounts).toHaveBeenCalledTimes(1);
+
+    voteCounts.mockResolvedValue({ [T1]: { bull: 99, bear: 99 }, [T2]: { bull: 99, bear: 99 } });
+    const merged = await withVoteCounts([pair(T1), pair(T2)]);
+    expect(merged.map((p) => [p.bull, p.bear])).toEqual([[3, 1], [0, 0]]); // the route's numbers, not a fresh read
+    expect(voteCounts).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks once for a set of ids, in id order, whatever order the pairs arrive in", async () => {
+    voteCounts.mockResolvedValue({ [T1]: { bull: 1, bear: 0 }, [T2]: { bull: 0, bear: 2 } });
+    await withVoteCounts([pair(T2), pair(T1)]);
+    expect(voteCounts.mock.calls[0][1]).toEqual([T2, T1]);
+    await withVoteCounts([pair(T1), pair(T2)]);
+    expect(voteCounts).toHaveBeenCalledTimes(1); // both already cached, in either order
   });
 });

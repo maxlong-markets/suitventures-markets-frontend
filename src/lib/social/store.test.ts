@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import type { Address } from "@/lib/types";
 import { testDb } from "@/test/db";
-import { MAX_VOTE_IDS, setWatch, toggleVote, topTraders, voteCounts, votes, watchlist } from "./store";
+import { MAX_VOTE_IDS, VOTES_CAP, WATCHLIST_CAP, WalletCapError, setWatch, toggleVote, topTraders, voteCounts, votes, watchlist } from "./store";
 
 const addr = (c: string) => `0x${c.repeat(40)}` as Address;
 const T1 = addr("1"), T2 = addr("2"), T3 = addr("3"), T9 = addr("9");
@@ -83,6 +83,72 @@ describe("watchlist", () => {
     expect(await watchlist(db, W1)).toEqual([T1]);
     expect(await watchlist(db, W2)).toEqual([T2]);
     expect(await watchlist(db, W3)).toEqual([]);
+  });
+});
+
+/**
+ * Fills a wallet to `count` rows in one statement. Going through `setWatch`/`toggleVote` 500 and
+ * 2 000 times would be the same rows and twenty seconds of PGlite; the guard under test reads the
+ * table, not the path the rows arrived by. The ids are `0x0…1` upward, so none collides with the
+ * T1…T9 the cases below use as the *new* row.
+ */
+const fillWatchlist = (wallet: string, count: number) =>
+  db.query(
+    "insert into market.watchlist (wallet, token_id, created_at) select $1, '0x' || lpad(to_hex(g), 40, '0'), $2 from generate_series(1, $3) g",
+    [wallet, NOW, count],
+  );
+const fillVotes = (wallet: string, count: number) =>
+  db.query(
+    "insert into market.votes (wallet, token_id, dir, updated_at) select $1, '0x' || lpad(to_hex(g), 40, '0'), 'bull', $2 from generate_series(1, $3) g",
+    [wallet, NOW, count],
+  );
+const SEEDED = `0x${"0".repeat(39)}1`; // the first id the two fills above write
+
+// Review I4: nothing bounded how many rows one wallet could append, and wallets are free to mint.
+describe("watchlist cap", () => {
+  it("refuses the row past the cap and keeps every row already there", async () => {
+    expect(WATCHLIST_CAP).toBe(500);
+    await fillWatchlist(W1, WATCHLIST_CAP);
+    await expect(setWatch(db, W1, T1, true, NOW)).rejects.toBeInstanceOf(WalletCapError);
+    const after = await watchlist(db, W1);
+    expect(after).toHaveLength(WATCHLIST_CAP);
+    expect(after).not.toContain(T1);
+  });
+
+  it("still lets a full wallet re-star what it already has, and unstar", async () => {
+    await fillWatchlist(W1, WATCHLIST_CAP);
+    await expect(setWatch(db, W1, SEEDED, true, NOW + 9)).resolves.toBeUndefined(); // already there: not a new row
+    expect(await db.query("select created_at from market.watchlist where wallet = $1 and token_id = $2", [W1, SEEDED])).toEqual([
+      { created_at: NOW },
+    ]);
+    await expect(setWatch(db, W1, SEEDED, false, NOW)).resolves.toBeUndefined();
+    expect(await watchlist(db, W1)).toHaveLength(WATCHLIST_CAP - 1);
+    // One row freed, so the star that was refused a moment ago now lands.
+    await setWatch(db, W1, T1, true, NOW);
+    expect(await watchlist(db, W1)).toContain(T1);
+  });
+
+  it("counts each wallet on its own", async () => {
+    await fillWatchlist(W1, WATCHLIST_CAP);
+    await setWatch(db, W2, T1, true, NOW);
+    expect(await watchlist(db, W2)).toEqual([T1]);
+  });
+});
+
+describe("votes cap", () => {
+  it("refuses a vote on a new token past the cap and casts nothing", async () => {
+    expect(VOTES_CAP).toBe(2_000);
+    await fillVotes(W1, VOTES_CAP);
+    await expect(toggleVote(db, W1, T1, "bull", NOW)).rejects.toBeInstanceOf(WalletCapError);
+    expect(await db.query("select count(*)::int as n from market.votes where wallet = $1", [W1])).toEqual([{ n: VOTES_CAP }]);
+  });
+
+  it("never refuses a wallet changing a vote it already holds", async () => {
+    await fillVotes(W1, VOTES_CAP);
+    expect(await toggleVote(db, W1, SEEDED, "bear", NOW + 1)).toBe("bear"); // switched at the cap
+    expect(await toggleVote(db, W1, SEEDED, "bear", NOW + 2)).toBeNull(); // and cleared
+    // Clearing freed a row, so the token refused above now takes it.
+    expect(await toggleVote(db, W1, T1, "bull", NOW + 3)).toBe("bull");
   });
 });
 

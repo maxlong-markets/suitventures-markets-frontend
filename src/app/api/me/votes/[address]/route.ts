@@ -1,8 +1,8 @@
 import { getDb } from "@/lib/db/client";
 import { allowWrite } from "@/lib/social/rateLimit";
-import { toggleVote } from "@/lib/social/store";
+import { WalletCapError, toggleVote } from "@/lib/social/store";
 import { nowSec } from "@/lib/time";
-import { badRequest, failure, isAddress, noStore, tooManyRequests } from "../../../_lib/respond";
+import { badRequest, conflict, failure, isAddress, noStore, tooManyRequests } from "../../../_lib/respond";
 import { requireSession } from "../../../_lib/session";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +29,9 @@ export async function POST(req: Request, ctx: Ctx) {
   try {
     return noStore({ dir: await toggleVote(getDb(), session.address, id, dir, now) });
   } catch (err) {
+    // Only a vote on a token this wallet has never voted on can reach here: switching or clearing
+    // one it already holds is never refused (review I4).
+    if (err instanceof WalletCapError) return conflict("too many votes");
     return failure(err);
   }
 }

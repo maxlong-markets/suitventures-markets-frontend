@@ -344,6 +344,17 @@ describe("EnvioDataSource sessions and user data", () => {
     expect(JSON.parse(String(posted.init?.body))).toEqual({ dir: "bull" });
   });
 
+  // Review M9: the id went into the path raw. The server validates the segment either way, so this
+  // is habit rather than a hole — but a path segment is built, not interpolated.
+  it("escapes the token id it puts in a write path", async () => {
+    const hostile = "0xab/../session?x=1";
+    const escaped = encodeURIComponent(hostile);
+    await expect(source().setWatch(hostile, true)).rejects.toThrow("404");
+    expect(calls.at(-1)?.url).toBe(`/api/me/watchlist/${escaped}`);
+    await expect(source().vote(hostile, "bull")).rejects.toThrow("404");
+    expect(calls.at(-1)?.url).toBe(`/api/me/votes/${escaped}`);
+  });
+
   it("throws when a write is refused, so the optimistic star can be rolled back", async () => {
     routes[`PUT /api/me/watchlist/${TOKEN}`] = { status: 401 };
     await expect(source().setWatch(TOKEN, true)).rejects.toThrow("401");

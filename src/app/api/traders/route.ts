@@ -2,10 +2,13 @@ import { NextResponse } from "next/server";
 import { ttlCache } from "@/lib/envio/cache";
 import { getDb, hasDb } from "@/lib/db/client";
 import { topTraders } from "@/lib/social/store";
+import { nowSec } from "@/lib/time";
 import type { TradersBy } from "@/lib/types";
 import { badRequest, cached, failure } from "../_lib/respond";
 
 export const dynamic = "force-dynamic";
+/** Like every other route here that touches the store; the aggregation's real cost is measured against the seeded store in the R4/R6 runbook steps (review I3). */
+export const maxDuration = 30;
 
 const TTL = 60;
 /** The board's window. Well inside the store's 10-day trade retention (D39, amended 18 Sep 2026). */
@@ -37,7 +40,7 @@ export async function GET(req: Request) {
     // One memo per ordering, and the window ends whenever the memo is refilled, not when this
     // module loaded.
     const rows = await ttlCache(`traders:${by}`, TTL * 1000, () =>
-      topTraders(getDb(), { sinceTs: Math.floor(Date.now() / 1000) - WINDOW_SEC, by, limit: LIMIT }),
+      topTraders(getDb(), { sinceTs: nowSec() - WINDOW_SEC, by, limit: LIMIT }),
     );
     return cached(rows, TTL);
   } catch (err) {

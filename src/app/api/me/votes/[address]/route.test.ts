@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { WRITE_LIMIT, allowWrite, rateLimitSize, resetRateLimit } from "@/lib/social/rateLimit";
-import { votes } from "@/lib/social/store";
+import { VOTES_CAP, votes } from "@/lib/social/store";
 import { nowSec } from "@/lib/time";
 import type { Address } from "@/lib/types";
 import { testDb } from "@/test/db";
@@ -87,6 +87,20 @@ describe("POST /api/me/votes/[address]", () => {
     expect(res.status).toBe(429);
     await expect(res.text()).resolves.toBe("too many requests");
     expect(await votes(db, WALLET)).toEqual({});
+  });
+
+  it("answers 409 once the wallet is at its row cap, but still lets it change a vote it holds (review I4)", async () => {
+    const SEEDED = `0x${"0".repeat(39)}1`;
+    await db.query(
+      "insert into market.votes (wallet, token_id, dir, updated_at) select $1, '0x' || lpad(to_hex(g), 40, '0'), 'bull', 0 from generate_series(1, $2) g",
+      [WALLET, VOTES_CAP],
+    );
+    const res = await post(T1, { dir: "bull" }, sessionHeader(WALLET));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.json()).resolves.toEqual({ error: "too many votes" });
+    // A token the wallet already voted on is not a new row, so the switch goes through at the cap.
+    await expect((await post(SEEDED, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: "bear" });
   });
 
   it("ignores a wallet query parameter and a body wallet field: the vote still lands under the cookie's wallet", async () => {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DbUnavailableError } from "@/lib/db/client";
 import { EnvioUnavailableError } from "@/lib/envio/client";
-import { failure, noStore, tooManyRequests, unauthorized } from "./respond";
+import { badRequest, conflict, failure, noStore, tooManyRequests, unauthorized } from "./respond";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -47,6 +47,20 @@ describe("answers that must never be cached", () => {
     expect(res.status).toBe(401);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     await expect(res.json()).resolves.toEqual({ error: "not signed in" });
+  });
+
+  it("answers 400 with a fixed reason and no-store (review M7)", async () => {
+    const res = badRequest("bad address");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.json()).resolves.toEqual({ error: "bad address" });
+  });
+
+  it("answers 409 with a fixed reason and no-store", async () => {
+    const res = conflict("watchlist full");
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.json()).resolves.toEqual({ error: "watchlist full" });
   });
 
   it("answers 429 with a plain body and a retry hint", async () => {

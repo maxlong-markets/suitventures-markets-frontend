@@ -9,8 +9,18 @@ export function isAddress(id: string): boolean {
   return ADDRESS.test(id);
 }
 
+/** `no-store` like every other refusal: a 400 is about this request, and six new routes can answer one (review M7). */
 export function badRequest(error: string): NextResponse {
-  return NextResponse.json({ error }, { status: 400 });
+  return NextResponse.json({ error }, { status: 400, headers: { "Cache-Control": "no-store" } });
+}
+
+/**
+ * 409 for a write the store will not take as things stand — today, a wallet at its row cap
+ * (`WalletCapError`). `error` is a fixed constant the client can show; it names no wallet and no
+ * count, and it is never cached.
+ */
+export function conflict(error: string): NextResponse {
+  return NextResponse.json({ error }, { status: 409, headers: { "Cache-Control": "no-store" } });
 }
 
 export function cached<T>(data: T, ttlSec: number): NextResponse {

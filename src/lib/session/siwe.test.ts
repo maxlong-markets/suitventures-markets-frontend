@@ -114,6 +114,17 @@ describe("verifySiwe", () => {
     }
   });
 
+  // Review M1: `version` went unchecked. viem parses `Version:` as free text, so a message
+  // declaring another version verified as happily as a real one; EIP-4361 defines only "1".
+  it("refuses a message that declares a version EIP-4361 does not define", async () => {
+    const { message, signature } = await signed();
+    const forged = message.replace("Version: 1", "Version: 2");
+    expect(forged).toContain("Version: 2"); // the replacement actually landed
+    await expect(
+      verifySiwe({ message: forged, signature, expectedNonce: NONCE, domain: DOMAIN, now: NOW }, mockClient()),
+    ).resolves.toEqual({ error: "malformed message" });
+  });
+
   it("refuses anything that is not an EIP-4361 message", async () => {
     for (const junk of ["", "hello", "longmarkets.xyz wants you to sign in"]) {
       await expect(

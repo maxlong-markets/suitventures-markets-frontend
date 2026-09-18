@@ -18,6 +18,9 @@ export async function verifySiwe(input: SiweVerifyInput, client: PublicClient): 
   const { message, signature, expectedNonce, domain, now } = input;
   const parsed = parseSiweMessage(message);
   if (!parsed.address || !parsed.nonce) return { error: "malformed message" };
+  // EIP-4361 defines exactly one version. viem parses `Version:` as free text, so a message
+  // claiming another one reaches here intact; there is no version 2 to be lenient towards.
+  if (parsed.version !== "1") return { error: "malformed message" };
   if (parsed.domain !== domain) return { error: "wrong domain" };
   if (parsed.chainId !== robinhoodChain.id) return { error: "wrong chain" };
   if (parsed.nonce !== expectedNonce) return { error: "nonce mismatch" };

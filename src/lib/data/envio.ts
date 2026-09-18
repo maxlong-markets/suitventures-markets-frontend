@@ -161,7 +161,7 @@ export class EnvioDataSource implements MarketsDataSource {
   }
 
   async setWatch(id: string, on: boolean): Promise<void> {
-    const res = await fetch(`/api/me/watchlist/${id.toLowerCase()}`, {
+    const res = await fetch(`/api/me/watchlist/${encodeURIComponent(id.toLowerCase())}`, {
       method: on ? "PUT" : "DELETE",
       credentials: "same-origin",
     });
@@ -176,7 +176,7 @@ export class EnvioDataSource implements MarketsDataSource {
   }
 
   async vote(id: string, dir: VoteDir): Promise<VoteDir | null> {
-    const res = await fetch(`/api/me/votes/${id.toLowerCase()}`, {
+    const res = await fetch(`/api/me/votes/${encodeURIComponent(id.toLowerCase())}`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },

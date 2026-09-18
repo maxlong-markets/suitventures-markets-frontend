@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { WRITE_LIMIT, rateLimitSize, resetRateLimit } from "@/lib/social/rateLimit";
-import { watchlist } from "@/lib/social/store";
+import { WATCHLIST_CAP, watchlist } from "@/lib/social/store";
 import type { Address } from "@/lib/types";
 import { testDb } from "@/test/db";
 import { TEST_SESSION_SECRET, sessionHeader } from "@/test/session";
@@ -102,6 +102,21 @@ describe("PUT|DELETE /api/me/watchlist/[address]", () => {
     expect(res.headers.get("Retry-After")).toBe("60");
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     await expect(res.text()).resolves.toBe("too many requests");
+  });
+
+  it("answers 409 once the wallet is at its row cap, and stars nothing more (review I4)", async () => {
+    await db.query(
+      "insert into market.watchlist (wallet, token_id, created_at) select $1, '0x' || lpad(to_hex(g), 40, '0'), 0 from generate_series(1, $2) g",
+      [WALLET, WATCHLIST_CAP],
+    );
+    const res = await put(T1, sessionHeader(WALLET));
+    expect(res.status).toBe(409);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.json()).resolves.toEqual({ error: "watchlist full" });
+    expect(await watchlist(db, WALLET)).toHaveLength(WATCHLIST_CAP);
+    // Unstarring is never refused, and it makes room for the star that was just turned away.
+    expect((await del(`0x${"0".repeat(39)}1`, sessionHeader(WALLET))).status).toBe(204);
+    expect((await put(T1, sessionHeader(WALLET))).status).toBe(204);
   });
 
   it("ignores a wallet query parameter: the write still lands under the cookie's wallet", async () => {

@@ -42,6 +42,26 @@ const sign: SignMessage = vi.fn(async () => "0xsignature" as Hex);
  */
 let api: AppState | null = null;
 
+/** The one line a refused star or vote puts on screen; pinned here so the test fails if it drifts. */
+const FAILED_TOAST = "failed:Couldn't save that. Try again.";
+
+/**
+ * Node reports a promise nobody held here. Vitest also fails the run on one, but a gated action is
+ * fired and forgotten (`void run(...)`), so "the refusal was caught" is the assertion these two
+ * cases are actually about — worth making locally rather than leaning on the runner.
+ */
+function watchUnhandled(): { seen: unknown[]; stop(): void } {
+  const seen: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    seen.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  return { seen, stop: () => void process.off("unhandledRejection", onUnhandled) };
+}
+
+/** One macrotask, which is when Node decides a rejection is going unhandled. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 function Probe() {
   const s = useAppState();
   useEffect(() => {
@@ -52,8 +72,12 @@ function Probe() {
       <div data-testid="signed">{String(s.signed)}</div>
       <div data-testid="modal">{s.signModal?.kind ?? "none"}</div>
       <div data-testid="stars">{[...s.stars].join(",")}</div>
+      <div data-testid="toasts">{s.toasts.map((t) => `${t.kind}:${t.message}`).join("|")}</div>
       <button type="button" onClick={() => s.toggleStar(TOKEN)}>
         star
+      </button>
+      <button type="button" onClick={() => s.vote(TOKEN, "bull")}>
+        vote
       </button>
       <button
         type="button"
@@ -209,5 +233,84 @@ describe("AppStateProvider sign-in", () => {
     expect(client.getQueryData(keys.votes)).toBeUndefined();
     expect(screen.getByTestId("signed").textContent).toBe("false");
     expect(screen.getByTestId("stars").textContent).toBe("");
+  });
+});
+
+/**
+ * Review I2: a refused write used to fail silently. The star flipped back (the `finally`
+ * invalidate did that much) and the rejection floated as `Uncaught (in promise)`, so the only
+ * signal a 429, a 503 or an offline network gave the user was a star that would not stay put.
+ */
+describe("AppStateProvider refused writes", () => {
+  beforeEach(() => {
+    api = null;
+    h.account = { address: WALLET, isConnected: true };
+    h.openConnectModal.mockClear();
+    h.ds.session.mockReset().mockResolvedValue(LOWER);
+    h.ds.signIn.mockReset().mockResolvedValue(LOWER);
+    h.ds.watchlist.mockReset().mockResolvedValue([TOKEN]);
+    h.ds.votes.mockReset().mockResolvedValue({});
+    h.ds.setWatch.mockReset().mockResolvedValue(undefined);
+    h.ds.vote.mockReset().mockResolvedValue("bull");
+  });
+
+  it("tells the user when a star is refused, puts the star back, and floats no rejection", async () => {
+    h.ds.setWatch.mockRejectedValue(new Error("/api/me/watchlist: 429"));
+    const unhandled = watchUnhandled();
+    try {
+      const { client } = show();
+      await waitFor(() => expect(screen.getByTestId("stars").textContent).toBe(TOKEN));
+
+      // The token starts starred, so this click unstars it: the optimistic write empties the
+      // list before the refusal, which is what the invalidate below has to undo.
+      fireEvent.click(screen.getByText("star"));
+      expect(client.getQueryData(keys.watchlist)).toEqual([]);
+
+      await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
+      await waitFor(() => expect(screen.getByTestId("stars").textContent).toBe(TOKEN));
+      await flush();
+      expect(unhandled.seen).toEqual([]);
+    } finally {
+      unhandled.stop();
+    }
+  });
+
+  it("tells the user when a vote is refused, restores the server's answer, and floats no rejection", async () => {
+    h.ds.vote.mockRejectedValue(new Error("/api/me/votes: 503"));
+    const unhandled = watchUnhandled();
+    try {
+      const { client } = show();
+      await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+      await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+
+      fireEvent.click(screen.getByText("vote"));
+      expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" }); // painted first
+
+      await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
+      await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+      await flush();
+      expect(unhandled.seen).toEqual([]);
+    } finally {
+      unhandled.stop();
+    }
+  });
+
+  // Review M4: a vote on a token outside the 500-row pairs list lives under `keys.pair(id)`, so
+  // invalidating only `keys.pairs` left a deep-linked token's counts on the pre-vote number.
+  it("invalidates the deep-linked token's own key as well as the list and the votes", async () => {
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    fireEvent.click(screen.getByText("vote"));
+    await waitFor(() => expect(h.ds.vote).toHaveBeenCalledWith(TOKEN, "bull"));
+
+    await waitFor(() => {
+      const invalidated = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
+      expect(invalidated).toContainEqual(keys.votes);
+      expect(invalidated).toContainEqual(keys.pairs);
+      expect(invalidated).toContainEqual(keys.pair(TOKEN));
+    });
+    invalidate.mockRestore();
   });
 });

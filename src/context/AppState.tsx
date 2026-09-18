@@ -70,6 +70,8 @@ export interface AppState {
   vote(id: string, dir: VoteDir): void;
 
   signModal: { kind: GateKind } | null;
+  /** Opens the connect or sign-in flow with nothing queued behind it; `/watchlist` uses it. */
+  promptSignIn(): void;
   completeSign(sign: SignMessage, address: Address): Promise<void>;
   cancelSign(): void;
 
@@ -90,6 +92,14 @@ function sameAddress(a?: string, b?: string): boolean {
 const AppStateContext = createContext<AppState | null>(null);
 
 const CONFIRMED_TOAST_TTL = 7_000;
+
+/**
+ * One line for every refused star or vote — a 429 from the write budget, a 503 from the store, a
+ * wallet at its row cap, an offline network. It names no status and no host: the user's only
+ * move is the same in all four cases, and the `finally` invalidate has already put the true
+ * state back underneath it (review I2).
+ */
+const WRITE_FAILED = "Couldn't save that. Try again.";
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const ds = useDataSource();
@@ -130,6 +140,29 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), []);
 
+  // --- toasts ----------------------------------------------------------
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastId = useRef(0);
+  const dismissToast = useCallback((id: number) => {
+    setToasts((list) => list.filter((t) => t.id !== id));
+  }, []);
+  const addToast = useCallback((t: Omit<Toast, "id">) => {
+    const id = ++toastId.current;
+    setToasts((list) => [...list, { ...t, id }]);
+    return id;
+  }, []);
+  const updateToast = useCallback(
+    (id: number, patch: Partial<Omit<Toast, "id">>) => {
+      setToasts((list) =>
+        list.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+      );
+      if (patch.kind === "confirmed") {
+        window.setTimeout(() => dismissToast(id), CONFIRMED_TOAST_TTL);
+      }
+    },
+    [dismissToast],
+  );
+
   // --- session + gate ---------------------------------------------------
   const [session, setSession] = useState<{ address: Address } | null>(null);
   // True until the cookie probe below settles, one way or the other. `watchlistLoading` folds
@@ -168,6 +201,28 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     qc.removeQueries({ queryKey: keys.votes });
   }, [signed, qc]);
 
+  /**
+   * Every gated action is fired and forgotten, so this is where a rejection stops: without it a
+   * refused write floats as `Uncaught (in promise)` and the user sees nothing but a star that
+   * flips back (review I2). Both of today's actions also catch their own failure, so they can
+   * toast while their `finally` restores the truth; this is the backstop for whatever is gated
+   * next, and for a synchronous throw.
+   */
+  const fire = useCallback(
+    (run: GatedAction, ctx: GateContext) => {
+      const failed = () => addToast({ kind: "failed", message: WRITE_FAILED });
+      try {
+        // `run(ctx)` is called here rather than inside a `.then`, so its optimistic write still
+        // lands in the same tick as the click; only the rejection is deferred. The `try` is for
+        // a synchronous throw, which an async action cannot make but a plain one can.
+        void Promise.resolve(run(ctx)).catch(failed);
+      } catch {
+        failed();
+      }
+    },
+    [addToast],
+  );
+
   const gate = useCallback(
     (kind: GateKind, run: GatedAction) => {
       if (!isConnected || !address) {
@@ -180,10 +235,17 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         setSignModal({ kind });
         return;
       }
-      void run({ address });
+      fire(run, { address });
     },
-    [address, isConnected, openConnectModal, session],
+    [address, fire, isConnected, openConnectModal, session],
   );
+
+  /**
+   * The sign-in affordance `/watchlist` needs for a connected wallet that has not signed in here
+   * (review I5): the same gate the star and the vote use, running nothing. Signing in is the whole
+   * effect — `signed` flips, and the watchlist query it enables loads the wallet's real list.
+   */
+  const promptSignIn = useCallback(() => gate("star", () => {}), [gate]);
 
   // A wallet connected while an action was waiting: continue to the signature.
   useEffect(() => {
@@ -191,11 +253,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     if (sameAddress(session?.address, address)) {
       const { run } = pendingRef.current;
       pendingRef.current = null;
-      void run({ address });
+      fire(run, { address });
     } else {
       setSignModal({ kind: pendingRef.current.kind });
     }
-  }, [isConnected, address, session]);
+  }, [isConnected, address, fire, session]);
 
   /**
    * Nonce, message, signature, cookie — all inside the data source. It throws when the wallet
@@ -217,9 +279,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setSignModal(null);
       const pending = pendingRef.current;
       pendingRef.current = null;
-      if (pending) void pending.run({ address: signedAddress });
+      if (pending) fire(pending.run, { address: signedAddress });
     },
-    [ds],
+    [ds, fire],
   );
 
   const cancelSign = useCallback(() => {
@@ -244,13 +306,17 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         );
         try {
           await ds.setWatch(id, on);
+        } catch {
+          // The status is deliberately not read: 429, 503 and a dead network all leave the user
+          // the same move, and the `finally` below is what puts the real list back.
+          addToast({ kind: "failed", message: WRITE_FAILED });
         } finally {
           // Also the rollback: a refused write is followed by the server's own answer.
           void qc.invalidateQueries({ queryKey: keys.watchlist });
         }
       });
     },
-    [ds, gate, qc],
+    [addToast, ds, gate, qc],
   );
 
   // --- votes -----------------------------------------------------------
@@ -277,36 +343,18 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         );
         try {
           await ds.vote(id, dir);
+        } catch {
+          addToast({ kind: "failed", message: WRITE_FAILED });
         } finally {
           void qc.invalidateQueries({ queryKey: keys.votes });
           void qc.invalidateQueries({ queryKey: keys.pairs });
+          // A token outside the 500-row list has its own key, and the optimistic write above
+          // never touched it: without this its counts stay on the pre-vote number (review M4).
+          void qc.invalidateQueries({ queryKey: keys.pair(id) });
         }
       });
     },
-    [ds, gate, qc],
-  );
-
-  // --- toasts ----------------------------------------------------------
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const toastId = useRef(0);
-  const dismissToast = useCallback((id: number) => {
-    setToasts((list) => list.filter((t) => t.id !== id));
-  }, []);
-  const addToast = useCallback((t: Omit<Toast, "id">) => {
-    const id = ++toastId.current;
-    setToasts((list) => [...list, { ...t, id }]);
-    return id;
-  }, []);
-  const updateToast = useCallback(
-    (id: number, patch: Partial<Omit<Toast, "id">>) => {
-      setToasts((list) =>
-        list.map((t) => (t.id === id ? { ...t, ...patch } : t)),
-      );
-      if (patch.kind === "confirmed") {
-        window.setTimeout(() => dismissToast(id), CONFIRMED_TOAST_TTL);
-      }
-    },
-    [dismissToast],
+    [addToast, ds, gate, qc],
   );
 
   const value = useMemo<AppState>(
@@ -329,6 +377,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       votes,
       vote,
       signModal,
+      promptSignIn,
       completeSign,
       cancelSign,
       toasts,
@@ -356,6 +405,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       votes,
       vote,
       signModal,
+      promptSignIn,
       completeSign,
       cancelSign,
       toasts,

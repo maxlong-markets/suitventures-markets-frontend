@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { clearTtlCache } from "@/lib/envio/cache";
+import { clearCountsCache } from "@/lib/social/countsCache";
 import { EnvioUnavailableError } from "@/lib/envio/client";
 import type { PairsScope } from "@/lib/envio/pairs";
 import type { VoteCount } from "@/lib/social/store";
@@ -29,6 +30,10 @@ const call = (scope?: string) => GET(new Request(`http://localhost:3000/api/pair
 
 beforeEach(() => {
   clearTtlCache();
+  // The counts merge shares one per-id cache with `/api/votes` (review I1), and it outlives a
+  // `ttlCache` clear: without this, a case that mocks a rejection is served the previous case's
+  // numbers instead of reaching the store at all.
+  clearCountsCache();
   pairs.mockReset();
   voteCounts.mockReset();
   pairs.mockResolvedValue([pair(T1), pair(T2)]);
