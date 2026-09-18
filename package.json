@@ -11,7 +11,10 @@
     "db:migrate": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/migrate.mts",
     "db:smoke": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/smoke.mts",
     "db:parity": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/parity.mts",
-    "seed": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/seed/seed.mts"
+    "seed": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/seed/seed.mts",
+    "fork:anvil": "bash scripts/fork/anvil.sh",
+    "fork:deploy": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/fork/deploy-local.mts",
+    "fork:e2e": "node --env-file-if-exists=.env.local --env-file-if-exists=.env.fork --conditions=react-server --import tsx scripts/fork/swap-e2e.mts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.11",

@@ -1,6 +1,6 @@
-# Database scripts
+# Scripts
 
-All four run from the repo root through `node --env-file-if-exists=.env.local --conditions=react-server --import tsx`
+The four database scripts run from the repo root through `node --env-file-if-exists=.env.local --conditions=react-server --import tsx`
 (see `package.json`). They read `DATABASE_URL_DIRECT`, the Supabase session pooler on port 5432, never the
 app's `DATABASE_URL`. Never paste a connection string into a terminal, a chat, a commit or this file: it
 lives in `.env.local` only.
@@ -34,3 +34,46 @@ Run `npm run db:parity` once the sync has run for an hour (rollout step R5) and 
 Expected differences: tokens that traded after the last sync cycle (a field difference or a token missing on
 either side), and `missing on Envio` lines for tokens beyond M1's recovery window (its 1000-candidate, 7-day
 query), which the store lists anyway. Anything else is a defect.
+
+## Fork scripts (M2 trading)
+
+Three scripts prove the whole trading path on a local anvil fork of Robinhood Chain, without
+touching mainnet and without waiting on the SVRouter deploy. They need Foundry
+(https://getfoundry.sh) and the contracts repo checked out beside this one
+(`../SuitVenturesMarket-contracts`, or set `CONTRACTS_DIR`).
+
+| Command | What it does |
+|---|---|
+| `npm run fork:anvil` | Starts `anvil --fork-url <public RPC> --chain-id 4663` and prints the funded test accounts. Leave it running. `FORK_RPC_URL`, `FORK_PORT` and `FORK_BLOCK` override the defaults; the public endpoint keeps only about 80 minutes of state, so an old `FORK_BLOCK` will not serve. |
+| `npm run fork:deploy` | Runs the contracts repo's `script/Deploy.s.sol` against that anvil with the spec's Universal Router and Permit2, reads the router address out of forge's broadcast log, and writes `.env.fork` with `NEXT_PUBLIC_RPC_URL`, `NEXT_PUBLIC_SVROUTER_ADDRESS` and a funded key. |
+| `npm run fork:e2e` | A real buy and a real sell on AI/NVDA and MARIO/NVDA through the app's own modules — `priceSwap` over the V4 Quoter for the numbers, `executeSwap` for the Permit2 signature and the `swapExactIn` call. Asserts every `Trade` event's `amountOut` is at least the `amountOutMin` the quote signed for, that `fee` is exactly 0.5 % of the input (floored, no holder discount — the fork deploy leaves `SUITS_NFT` unset), and that `holderRate` is `false`; exits non-zero on any failed assertion. |
+
+Run them in that order, `fork:anvil` in its own shell. `fork:e2e` reads `.env.local` as well,
+because it resolves pool keys through the market backend (`getBackend()`), which needs either
+`DATABASE_URL` or the `ENVIO_GRAPHQL_URL` / `ENVIO_GRAPHQL_KEY` pair, whichever backend is
+configured there; `.env.fork` is loaded second so the fork's RPC and router win over anything
+`.env.local` sets.
+
+`.env.fork` is git-ignored and never carries a real key: the only key in it is anvil's own
+published test account #0, which is public knowledge and funded only on the local fork. Both
+scripts refuse to broadcast to anything but a localhost RPC, and both check the node reports
+chain id 4663 before they sign anything.
+
+The e2e funds the test wallet by writing each token's balance mapping directly (forge's `deal`
+trick, done from viem): `eth_createAccessList` on a `balanceOf` call reports exactly which
+storage slot the token touched, `anvil_setStorageAt` writes it, and a read-back confirms the
+slot was not packed with anything else. A fixed small-slot guess does not work on this chain —
+NVDA, AI and MARIO are all beacon-proxied, not plain storage — which is why the harness asks the
+EVM instead of computing a candidate slot by hand.
+
+Two more things this chain's real state costs you, both proven while building this harness and
+both handled by the scripts, not by the person running them:
+
+- **A ticker is not a token.** More than one on-chain token can answer to "AI"; the e2e resolves
+  each pool by the token's own contract address (`pair(id)`) and then double-checks the pool id,
+  never by searching a ticker/quote pair.
+- **anvil's own test accounts are not blank on this chain.** Every "test test test … junk"
+  address already carries a live EIP-7702 delegation on Robinhood Chain mainnet — inherited by
+  the fork like any other account state — which makes Permit2 take the smart-contract signature
+  path and reject a plain ECDSA signature. The e2e clears it locally with `anvil_setCode` before
+  it signs anything; the real chain is never touched.

@@ -80,9 +80,11 @@ Live mode needs these variables; all but the first are server-only:
 | `ENVIO_GRAPHQL_URL` | the indexer's GraphQL endpoint |
 | `ENVIO_GRAPHQL_KEY` | the endpoint API key from Envio Cloud's Security tab (not the HyperSync token) |
 
-Preview deployments get no database variable and stay on the mock source.
-Both sources share the swap math in `src/lib/quote.ts` — a constant-product
-approximation until the v4 Quoter lands in M2.
+Preview deployments get no database variable and stay on the mock source. The live source
+prices a trade through `GET /api/tokens/[address]/quote`, which simulates the V4 Quoter and
+returns both the display numbers and the execution `call` block; `src/lib/quote.ts` keeps its
+constant-product approximation for the mock source and for the amount-0 case the route does
+not answer.
 
 `GET /api/tokens/[address]/logo` proxies the token's logo, resolved per token
 from the contract's `logo()` (Pons), its `tokenURI()` JSON (LONG) or
@@ -92,21 +94,26 @@ RPC those reads use, defaulting to the public one.
 Watchlist and votes are browser-local in live mode
 (`src/lib/data/localStore.ts`, `localStorage` keyed by wallet address): they do
 not follow the wallet to another device, and vote counts read 0 until the
-signed API lands in M2.
+signed API lands in M3.
 
 Two methods were added beyond the handoff interface: `votes(address)` (the
 caller's current vote per token address) and `pair(id)` (one token by address,
 listed or not) — see the comments in `types.ts`.
 
-## Stubs still to wire (M2)
+## Stubs still to wire
 
-| Stub | Where | Real implementation |
+| Stub | Where | Status |
 |---|---|---|
-| Swap execution | `src/lib/swap.ts` | SVRouter via wagmi `writeContract`, Permit2 + Universal Router v4 |
-| Wallet balances | `src/hooks/useTokenBalance.ts` | ERC-20 `balanceOf` reads for quote and pair token |
-| Suit holder check | `src/lib/suits.ts` | Live once `NEXT_PUBLIC_SUITS_NFT_ADDRESS` is set; mock flag until then |
-| Watchlist / votes persistence | localStorage, in both sources | Route handlers keyed by address, authorised by the session signature |
-| Launchpad links for untradeable pools | `src/lib/chain.ts` | Bags dapp URL |
+| Swap execution | `src/lib/swap.ts` | **Done (M2)** — Permit2 signature and `SVRouter.swapExactIn`, the receipt's `Trade` event parsed for the real output |
+| Swap quote | `src/lib/quote.ts` `localQuote` | **Done (M2)** — the V4 Quoter behind `GET /api/tokens/[address]/quote`; the approximation stays for the mock source |
+| Wallet balances | `src/hooks/useTokenBalance.ts` | **Done (M2)** — batched ERC-20 `balanceOf` reads for the quote asset and the pair token |
+| Suit holder check | `src/lib/suits.ts` | **Done (M2)** — live `balanceOf` when `NEXT_PUBLIC_SUITS_NFT_ADDRESS` is set; the mock flag now defaults to "not a holder" |
+| Watchlist / votes persistence | localStorage, in both sources | M3 — route handlers keyed by address, authorised by the session signature |
+| Launchpad links for untradeable pools | `src/lib/chain.ts` | M3 — Bags dapp URL |
+
+Execution is off until `NEXT_PUBLIC_SVROUTER_ADDRESS` names a deployed router; the quote route
+still answers, so every number on the panel is real before the deploy. `scripts/fork/` proves
+the whole path against a local anvil fork in the meantime — see `scripts/README.md`.
 
 ## Layout
 
@@ -115,7 +122,7 @@ src/app            routes, layout, global CSS (design tokens)
 src/components     UI, one file per handoff component group
 src/context        Providers (wagmi, query, RainbowKit theme), AppState, DataSource
 src/hooks          breakpoint, data queries, balances
-src/lib            types, formatting, market filters, chain, wagmi, swap stub, quote math
+src/lib            types, formatting, market filters, chain, wagmi, SVRouter swap, quote math
 src/lib/data       seed data, mock source, Envio source, local watch store
 src/lib/db         Db interface (postgres driver, PGlite in tests), migrations
 src/lib/sync       Envio source boundary, writers, cursor state, market cycle, nightly

@@ -54,3 +54,8 @@ next-env.d.ts
 
 # Supabase CLI scratch (link state, version check)
 supabase/.temp/
+
+# Fork harness output: the local anvil RPC, the local router address and anvil's own
+# published test key. The .env* rule above already covers it; named here so nobody
+# re-adds it by hand, and so a reader knows the file exists.
+.env.fork
