@@ -20,9 +20,17 @@ const erc721BalanceAbi = [
 ] as const;
 
 /**
- * isSuitHolder = balanceOf(SuitsNFT, address) > 0. Until the contract address
- * is configured, NEXT_PUBLIC_MOCK_SUIT_HOLDER decides (default: holder), so
- * the 0% router-fee state can be demoed.
+ * isSuitHolder = balanceOf(SuitsNFT, address) > 0. Until the contract address is
+ * configured, NEXT_PUBLIC_MOCK_SUIT_HOLDER decides and defaults to "not a holder": an
+ * unconfigured build must show the 0.5% router fee every user will actually pay, and the
+ * quote route is told the same answer, so the displayed fee and the executed fee come from
+ * one decision. Set the flag to exactly "true" to demo the 0% holder state.
+ *
+ * One caveat the mock flag buys: the chain charges what SVRouter's own feeFor() says, against
+ * the SuitsNFT it was deployed with. A build with the flag set to "true" against a router whose
+ * suitsNft is the zero address — which is exactly what scripts/fork/deploy-local.mts deploys —
+ * would quote 0 bps and be charged 50. Never a loss of funds (slippage covers it or the swap
+ * reverts), but it is why the fork e2e always runs with holder: false.
  */
 export function useIsSuitHolder(address?: Address): boolean {
   const { data } = useReadContract({
@@ -35,7 +43,7 @@ export function useIsSuitHolder(address?: Address): boolean {
   });
   if (!address) return false;
   if (!SUITS_NFT_ADDRESS) {
-    return process.env.NEXT_PUBLIC_MOCK_SUIT_HOLDER !== "false";
+    return process.env.NEXT_PUBLIC_MOCK_SUIT_HOLDER === "true";
   }
   return (data ?? BigInt(0)) > BigInt(0);
 }
