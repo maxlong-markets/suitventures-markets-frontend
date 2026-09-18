@@ -175,3 +175,25 @@ export interface MarketsDataSource {
    */
   votes(address: Address): Promise<Record<string, VoteDir>>;
 }
+
+/**
+ * One row of the top-traders board (M4 spec section 4): a wallet's last-24h volume in USD, its trade
+ * count and the number of distinct tokens it traded. It lives here rather than in
+ * `src/lib/social/store.ts`, which is `server-only`, because the `/traders` page renders these rows in
+ * a client component.
+ *
+ * This is the **only** declaration of the type in the plan (Ruling 5): Task 5 adds `TradersBy` beside
+ * it and the `traders` method to `MarketsDataSource`, and re-declares nothing.
+ */
+export interface TraderRow {
+  wallet: Address;
+  /**
+   * Display only: the 24-hour volume already converted through the pool's quote asset and its USD
+   * price. Never an execution amount, so a float is the right shape for it (Global Constraint 1
+   * governs amounts the chain will see; this one it never does).
+   */
+  volumeUsd: number;
+  trades: number;
+  /** Distinct tokens this wallet traded in the window. */
+  tokens: number;
+}
