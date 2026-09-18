@@ -28,20 +28,24 @@ export function cookieValue(header: string | null, name: string): string | null 
 }
 
 /**
- * The pre-auth rate-limit key: the first `x-forwarded-for` hop when it is an IP literal, else
- * `x-real-ip` when it is, else `"unknown"`. On Vercel the platform's own proxy overwrites
- * `x-forwarded-for` with the client IP it actually saw and never forwards a caller-supplied value,
- * so on that deployment this key is not attacker-chosen. Behind no reverse proxy at all (`next
- * start` run directly, and every test here) neither header can be trusted, so every caller shares
- * the `"unknown"` bucket — that caps sign-in at roughly ten completions a minute for the *entire
- * process* (one nonce GET plus one session POST per sign-in, both spending the same 20/min budget),
- * not per caller. A real NAT egress collapses the same way: one office's shared IP gets one budget
- * for everyone behind it.
+ * The pre-auth rate-limit key: the first `x-forwarded-for` hop when it is an IP literal carrying no
+ * zone id, else `x-real-ip` when it is, else `"unknown"`. On Vercel the platform's own proxy
+ * overwrites `x-forwarded-for` with the client IP it actually saw and never forwards a
+ * caller-supplied value, so on that deployment this key is not attacker-chosen. Behind no reverse
+ * proxy at all (`next start` run directly, and every test here) neither header can be trusted, so
+ * every caller shares the `"unknown"` bucket — that caps sign-in at roughly ten completions a
+ * minute for the *entire process* (one nonce GET plus one session POST per sign-in, both spending
+ * the same 20/min budget), not per caller. A real NAT egress collapses the same way: one office's
+ * shared IP gets one budget for everyone behind it. A `%` anywhere in the candidate is rejected
+ * outright rather than validated: `node:net`'s `isIP` accepts an IPv6 zone id (`::1%eth0`) and does
+ * not check what follows the `%`, so validating it would let a caller mint an unlimited number of
+ * distinct "valid" keys, each with its own fresh budget — the same amplification this key exists
+ * to close, just moved from "any string" to "any string after a `%`".
  */
 export function clientIp(req: Request): string {
   const candidate = (value: string | null): string | null => {
     const trimmed = value?.trim();
-    return trimmed && isIP(trimmed) !== 0 ? trimmed.toLowerCase() : null;
+    return trimmed && !trimmed.includes("%") && isIP(trimmed) !== 0 ? trimmed.toLowerCase() : null;
   };
   const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0] ?? null;
   return candidate(forwarded) ?? candidate(req.headers.get("x-real-ip")) ?? "unknown";

@@ -54,6 +54,16 @@ describe("clientIp", () => {
     expect(clientIp(withHeaders({ "x-forwarded-for": "2001:DB8::1" }))).toBe("2001:db8::1");
   });
 
+  it("rejects an IPv6 zone id rather than validating it: falls through to x-real-ip", () => {
+    // node:net's isIP accepts a zone id and ignores whatever follows the "%", so a caller could
+    // otherwise mint an unlimited number of distinct "valid" keys by varying the suffix alone.
+    expect(clientIp(withHeaders({ "x-forwarded-for": "::1%eth0", "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.9");
+  });
+
+  it("rejects an IPv6 zone id all the way to \"unknown\" when it is the only candidate", () => {
+    expect(clientIp(withHeaders({ "x-forwarded-for": "fe80::1%25anything" }))).toBe("unknown");
+  });
+
   it("falls through to x-real-ip when x-forwarded-for is not an IP literal, however long", () => {
     const garbage = "x".repeat(2048);
     expect(clientIp(withHeaders({ "x-forwarded-for": garbage, "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.9");
