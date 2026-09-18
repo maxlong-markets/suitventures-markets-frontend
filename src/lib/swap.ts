@@ -14,7 +14,7 @@ import type { SwapCall } from "@/lib/quote/price";
 import { PERMIT2_ADDRESS, SVROUTER_ADDRESS, robinhoodChain } from "./chain";
 import { erc20Abi, svRouterAbi } from "./swap/abi";
 import { permitTypedData, randomNonce } from "./swap/permit";
-import type { Address, Side } from "./types";
+import type { Address } from "./types";
 
 /**
  * SVRouter execution. The request carries the quote route's `call` block verbatim: the browser
@@ -30,16 +30,14 @@ const DEADLINE_SEC = 1200;
 /** `SwapParams.amountIn` and `amountOutMin` are uint128 on chain. */
 const UINT128_MAX = (1n << 128n) - 1n;
 
+/**
+ * `executeSwap` reads only `slippagePct` and `call` (Task 4 review, Important 3): the signer is
+ * `SwapDeps.account`, the single source of truth, and every display-only field (ticker, side,
+ * amounts, assets) stays panel-local rather than round-tripping through the execution struct —
+ * no `number` may hold a token amount on this path.
+ */
 export interface SwapRequest {
-  ticker: string;
-  side: Side;
-  payAmount: number;
-  payAsset: string;
-  receiveAmount: number;
-  receiveAsset: string;
   slippagePct: number;
-  account: Address;
-  isSuitHolder: boolean;
   /** The quote route's execution block. */
   call: SwapCall;
 }

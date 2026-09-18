@@ -9,7 +9,7 @@ import { useSwapQuote } from "@/hooks/useMarketsData";
 import { hasRouter, ORIGIN_URLS, robinhoodChain } from "@/lib/chain";
 import { fmtAmt, fmtQuote, fmtTradeAmt, fmtUsd } from "@/lib/format";
 import { toHuman } from "@/lib/quote/math";
-import { executeSwap, SwapFailedError, SwapRejectedError } from "@/lib/swap";
+import { executeSwap, SwapFailedError, SwapRejectedError, SwapUnconfirmedError } from "@/lib/swap";
 import type { Denom, Side, TokenPair } from "@/lib/types";
 import { GearIcon, Spinner } from "./ui";
 
@@ -210,11 +210,12 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   });
   const closeSlippage = useCallback(() => setSlipOpen(false), []);
 
-  // Every hook above runs unconditionally. Routability is the route's verdict, not the
-  // list's `tradeable` flag, so the "Not routed" card is decided here — and only on an
-  // explicit false, so it can never flash before anything has been priced.
+  // Every hook above runs unconditionally. `routable: false` is the Quoter's verdict on this
+  // one amount (Task 6 review, I2), not a property of the pool: the "Not routed" card stays
+  // reserved for the list-level `pair.tradeable` flag, decided once at the top of this file. A
+  // specific amount that can't be routed instead disables the button below with an inline
+  // reason, so the input that would let the user shrink the amount is never taken away.
   const quote = quoteQuery.data;
-  if (quote?.routable === false) return <UntradeableCard pair={pair} />;
 
   const call = quote?.call;
   const payAmount = amountNum ? (quote?.payAmount ?? 0) : 0;
@@ -258,15 +259,22 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   } else if (quoteQuery.isError) {
     state = "disabled";
     reason = "Quote unavailable. Try again.";
+  } else if (quote?.routable === false) {
+    // The Quoter's verdict on this one amount — typically too large for the pool to fill —
+    // not a property of the pool, so the form stays up and the user can type a smaller one.
+    state = "disabled";
+    reason = "This amount can't be routed through the pool. Try a smaller amount.";
   } else if (payAmount > payBalance) {
     state = "disabled";
     reason = `Insufficient ${payAsset} balance.`;
   } else if (!walletClient || !publicClient) {
     state = "disabled";
     reason = "Connecting to your wallet…";
-  } else if (!call) {
-    // No execution block: the first priced answer is still in flight, or this build's data
-    // source is the mock, which never asks the route.
+  } else if (!call || quoteQuery.isPlaceholderData || quoteQuery.isFetching) {
+    // No settled execution block yet: the first priced answer is still in flight, the amount
+    // just changed and `useSwapQuote`'s placeholder data is still showing the previous amount's
+    // answer (never submit that stale `call` — Task 6 review, I1), or this build's data source
+    // is the mock, which never asks the route.
     state = "disabled";
     reason = "Fetching a quote…";
   }
@@ -315,15 +323,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
     try {
       const handle = await executeSwap(
         {
-          ticker: pair.ticker,
-          side,
-          payAmount,
-          payAsset,
-          receiveAmount,
-          receiveAsset,
           slippagePct: slippage.value,
-          account: address,
-          isSuitHolder: isHolder,
           // Verbatim: the browser never recomputes an amount the route returned.
           call,
         },
@@ -338,15 +338,23 @@ function TradeForm({ pair }: { pair: TokenPair }) {
       setAmount("");
       void invalidatePairBalances(qc);
     } catch (err) {
-      updateToast(toastId, {
-        kind: "failed",
-        // src/lib/swap.ts owns the wording (spec section 4); duplicating it here would let
-        // the two drift.
-        message:
-          err instanceof SwapRejectedError || err instanceof SwapFailedError
-            ? err.message
-            : "Swap failed. Nothing was spent.",
-      });
+      if (err instanceof SwapUnconfirmedError) {
+        // Broadcast, but its outcome could not be read — never "failed" and never "nothing was
+        // spent" (that wording invites a duplicate swap). The hash patched onto the toast above
+        // survives this merge, so the explorer link stays; the amount is deliberately left as-is
+        // (see the absence of setAmount("") below and in this branch).
+        updateToast(toastId, { kind: "unconfirmed", message: err.message });
+      } else {
+        updateToast(toastId, {
+          kind: "failed",
+          // src/lib/swap.ts owns the wording (spec section 4); duplicating it here would let
+          // the two drift.
+          message:
+            err instanceof SwapRejectedError || err instanceof SwapFailedError
+              ? err.message
+              : "Swap failed. Nothing was spent.",
+        });
+      }
     } finally {
       setPending(false);
     }

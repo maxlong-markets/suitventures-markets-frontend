@@ -27,7 +27,12 @@ import { useIsSuitHolder } from "@/lib/suits";
 import { keys, useVotes, useWatchlist } from "@/hooks/useMarketsData";
 import { useDataSource } from "./DataSource";
 
-export type ToastKind = "pending" | "confirmed" | "failed";
+/**
+ * "unconfirmed": broadcast, but the receipt could not be read (`SwapUnconfirmedError`). It is
+ * deliberately not "failed" — the transaction may well have landed, and telling the user nothing
+ * was spent would invite a duplicate swap.
+ */
+export type ToastKind = "pending" | "confirmed" | "unconfirmed" | "failed";
 export interface Toast {
   id: number;
   kind: ToastKind;

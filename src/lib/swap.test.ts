@@ -53,16 +53,10 @@ const CALL: SwapCall = {
   tokenOutDecimals: 18,
 };
 
+// No dead fields (Task 4 review, Important 3): executeSwap reads only slippagePct and call, and
+// the signer is deps.account alone.
 const REQUEST: SwapRequest = {
-  ticker: "AI",
-  side: "buy",
-  payAmount: 100,
-  payAsset: "NVDA",
-  receiveAmount: 199,
-  receiveAsset: "AI",
   slippagePct: 1,
-  account: ACCOUNT,
-  isSuitHolder: false,
   call: CALL,
 };
 

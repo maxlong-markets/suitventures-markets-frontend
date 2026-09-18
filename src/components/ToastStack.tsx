@@ -6,7 +6,9 @@ import { short } from "@/lib/format";
 import { Spinner } from "./ui";
 
 function StatusDot({ kind }: { kind: Toast["kind"] }) {
-  if (kind === "pending") {
+  // "unconfirmed" is styled exactly like "pending": it is not a failure, and its own message
+  // (not this dot) carries the nuance.
+  if (kind === "pending" || kind === "unconfirmed") {
     return (
       <span className="mt-[3px] flex flex-none">
         <Spinner />
