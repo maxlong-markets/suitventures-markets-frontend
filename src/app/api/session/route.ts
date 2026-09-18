@@ -43,6 +43,9 @@ const expectedDomain = (req: Request) => process.env.SESSION_DOMAIN || hostOf(re
 /** Nonces already spent by a successful sign-in, keyed by the nonce, valued by when the entry can be forgotten. */
 const usedNonces = new Map<string, number>();
 
+/** Hard cap on tracked spent nonces; a nonce this old is long past its own ten minutes anyway. */
+const MAX_USED_NONCES = 10_000;
+
 /**
  * true for a nonce already spent by an earlier successful POST — even though the nonce cookie
  * itself, and the signature over it, would both still verify — so a captured request cannot be
@@ -56,16 +59,37 @@ function nonceUsed(nonce: string, now: number): boolean {
 /**
  * Records the nonce as spent and sweeps every expired entry while doing it. Called only on the
  * success path: a refused or thrown attempt leaves the nonce alone, so a client that mistypes a
- * signature can still retry with the same nonce before fetching a new one.
+ * signature can still retry with the same nonce before fetching a new one. A nonce is only ever
+ * inserted once (repeats are turned back by `nonceUsed` before this runs), so Map insertion order
+ * already is spend order — no delete-before-set dance is needed to keep the cap's eviction honest.
  */
 function spendNonce(nonce: string, now: number): void {
   for (const [n, exp] of usedNonces) {
     if (exp <= now) usedNonces.delete(n);
   }
+  if (usedNonces.size >= MAX_USED_NONCES) {
+    const oldest = usedNonces.keys().next().value;
+    if (oldest !== undefined) usedNonces.delete(oldest);
+  }
   usedNonces.set(nonce, now + NONCE_TTL_SEC);
 }
 
-/** Every terminal answer clears the nonce cookie: single-use holds whether the sign-in succeeded, was refused, or threw. */
+/** Tests only: forget every spent nonce. */
+export function clearUsedNonces(): void {
+  usedNonces.clear();
+}
+
+/** Tests only: how many spent nonces are currently tracked. */
+export function usedNonceCount(): number {
+  return usedNonces.size;
+}
+
+/**
+ * Every terminal answer clears the nonce cookie, *except* the pre-auth 429 below: that attempt was
+ * never judged (the budget ran out before the nonce was even read), so the nonce is still good and
+ * the client should retry the same signed message after `Retry-After` rather than spend a fresh
+ * nonce fetch it may have no budget left for.
+ */
 function terminal(res: NextResponse): NextResponse {
   clearCookie(res, NONCE_COOKIE);
   return res;

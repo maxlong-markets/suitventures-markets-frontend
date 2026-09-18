@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NONCE_COOKIE, SESSION_COOKIE, SESSION_TTL_SEC, newNonce, signNonce, signSession, verifySession } from "@/lib/session/cookie";
+import { NONCE_COOKIE, NONCE_TTL_SEC, SESSION_COOKIE, SESSION_TTL_SEC, newNonce, signNonce, signSession, verifySession } from "@/lib/session/cookie";
 import type { SiweVerifyInput } from "@/lib/session/siwe";
 import { CLIENT_LIMIT, resetRateLimit } from "@/lib/social/rateLimit";
 import { nowSec } from "@/lib/time";
 import type { Address } from "@/lib/types";
-import { DELETE, GET, POST } from "./route";
+import { DELETE, GET, POST, clearUsedNonces, usedNonceCount } from "./route";
 
 const { verifySiwe } = vi.hoisted(() => ({
   verifySiwe: vi.fn<(input: SiweVerifyInput, client: unknown) => Promise<{ address: Address } | { error: string }>>(),
@@ -46,6 +46,7 @@ const sessionCookie = (over: Partial<{ exp: number }> = {}) =>
 beforeEach(() => {
   vi.stubEnv("SESSION_SECRET", SECRET);
   resetRateLimit();
+  clearUsedNonces();
   verifySiwe.mockReset();
   verifySiwe.mockResolvedValue({ address: ADDR });
 });
@@ -166,6 +167,12 @@ describe("POST /api/session", () => {
     expect(verifySiwe.mock.calls[0][0].domain).toBe("longmarkets.xyz");
   });
 
+  it("falls back to the Host header when SESSION_DOMAIN is set to the empty string, as .env.example and Vercel both do", async () => {
+    vi.stubEnv("SESSION_DOMAIN", "");
+    await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()), "longmarkets.xyz");
+    expect(verifySiwe.mock.calls[0][0].domain).toBe("longmarkets.xyz");
+  });
+
   it("refuses a nonce already spent by an earlier successful sign-in, even though the cookie itself is still valid", async () => {
     const cookie = nonceCookie(newNonce());
     expect((await post({ message: MESSAGE, signature: SIG }, cookie)).status).toBe(200);
@@ -206,6 +213,27 @@ describe("POST /api/session", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("60");
     await expect(res.text()).resolves.toBe("too many requests");
+    // The attempt was never judged: the nonce (if any) is still good, so the 429 must not clear it —
+    // the client should retry the same signed message after Retry-After, not spend a fresh nonce GET.
+    expect(res.headers.getSetCookie().some((c) => c.startsWith("svm_nonce="))).toBe(false);
+  });
+
+  it("caps the used-nonce set at ten thousand, evicting the oldest to make room", async () => {
+    for (let i = 0; i < 10_001; i++) {
+      if (i % 15 === 0) resetRateLimit(); // keep the pre-auth budget from interfering with this test
+      await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
+    }
+    expect(usedNonceCount()).toBe(10_000);
+  }, 20_000);
+
+  it("sweeps a used nonce older than ten minutes on the next successful sign-in", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_789_000_000_000);
+    expect((await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()))).status).toBe(200);
+    expect(usedNonceCount()).toBe(1);
+    vi.setSystemTime(1_789_000_000_000 + (NONCE_TTL_SEC + 1) * 1000); // past the ten-minute mark
+    expect((await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()))).status).toBe(200);
+    expect(usedNonceCount()).toBe(1); // the first nonce's entry was swept away; only the second remains
   });
 });
 

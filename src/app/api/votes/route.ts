@@ -2,7 +2,7 @@ import { getDb, hasDb } from "@/lib/db/client";
 import { countsFor } from "@/lib/social/countsCache";
 import { MAX_VOTE_IDS, type VoteCount } from "@/lib/social/store";
 import { nowSec } from "@/lib/time";
-import { VOTES_TTL } from "../_lib/counts";
+import { VOTES_TTL, zeros } from "../_lib/counts";
 import { badRequest, cached, failure, isAddress } from "../_lib/respond";
 
 export const dynamic = "force-dynamic";
@@ -21,9 +21,7 @@ export async function GET(req: Request) {
   if (ids.length > MAX_VOTE_IDS) return badRequest("too many ids");
   if (!ids.every((id) => isAddress(id))) return badRequest("bad ids");
   try {
-    const counts: Record<string, VoteCount> = hasDb()
-      ? await countsFor(getDb(), ids, nowSec())
-      : Object.fromEntries(ids.map((id) => [id, { bull: 0, bear: 0 }]));
+    const counts: Record<string, VoteCount> = hasDb() ? await countsFor(getDb(), ids, nowSec()) : zeros(ids);
     return cached(counts, VOTES_TTL);
   } catch (err) {
     return failure(err);

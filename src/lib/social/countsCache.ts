@@ -17,19 +17,6 @@ type Entry = { value: VoteCount; at: number };
  */
 const cache = new Map<string, Entry>();
 
-/** Drops the single oldest entry by insertion time, making room for one more. */
-function evictOldest(): void {
-  let oldestId: string | undefined;
-  let oldestAt = Infinity;
-  for (const [id, entry] of cache) {
-    if (entry.at < oldestAt) {
-      oldestAt = entry.at;
-      oldestId = id;
-    }
-  }
-  if (oldestId !== undefined) cache.delete(oldestId);
-}
-
 /**
  * Bull/bear counts for `ids`, each served from its own thirty-second cache entry when fresh, and
  * batched into exactly one `voteCounts` query for whichever ids are missing or stale. `now` is a
@@ -48,7 +35,14 @@ export async function countsFor(db: Db, ids: readonly string[], now: number): Pr
   for (const id of misses) {
     const value = fresh[id] ?? { bull: 0, bear: 0 };
     out[id] = value;
-    if (!cache.has(id) && cache.size >= MAX_ENTRIES) evictOldest();
+    if (!cache.has(id) && cache.size >= MAX_ENTRIES) {
+      // Only a genuinely new id can grow the cache past its cap; refreshing one already present
+      // (stale or not) must evict nothing. `keys().next().value` is the oldest entry precisely
+      // because every set below is a delete-then-set, which keeps Map order equal to recency.
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.delete(id);
     cache.set(id, { value, at: now });
   }
   return out;

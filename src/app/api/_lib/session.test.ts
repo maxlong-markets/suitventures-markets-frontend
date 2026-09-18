@@ -39,11 +39,29 @@ describe("cookieValue", () => {
 describe("clientIp", () => {
   const withHeaders = (headers: Record<string, string>) => new Request("http://localhost:3000/api/session/nonce", { headers });
 
-  it("takes the first x-forwarded-for hop, then x-real-ip, then \"unknown\"", () => {
+  it("takes the first x-forwarded-for hop when it is an IP literal, then x-real-ip, then \"unknown\"", () => {
     expect(clientIp(withHeaders({ "x-forwarded-for": "203.0.113.5, 70.41.3.18, 150.172.238.178" }))).toBe("203.0.113.5");
     expect(clientIp(withHeaders({ "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.9");
     expect(clientIp(withHeaders({ "x-forwarded-for": "203.0.113.5", "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.5");
     expect(clientIp(withHeaders({}))).toBe("unknown");
+  });
+
+  it("trims whitespace before validating: the first hop of \"  1.2.3.4 , 5.6.7.8\" is \"1.2.3.4\"", () => {
+    expect(clientIp(withHeaders({ "x-forwarded-for": "  1.2.3.4 , 5.6.7.8" }))).toBe("1.2.3.4");
+  });
+
+  it("keeps a valid IPv6 literal, lowercased", () => {
+    expect(clientIp(withHeaders({ "x-forwarded-for": "2001:DB8::1" }))).toBe("2001:db8::1");
+  });
+
+  it("falls through to x-real-ip when x-forwarded-for is not an IP literal, however long", () => {
+    const garbage = "x".repeat(2048);
+    expect(clientIp(withHeaders({ "x-forwarded-for": garbage, "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.9");
+  });
+
+  it("falls all the way to \"unknown\" when neither header is an IP literal", () => {
+    const garbage = "x".repeat(2048);
+    expect(clientIp(withHeaders({ "x-forwarded-for": garbage, "x-real-ip": "also not an ip" }))).toBe("unknown");
   });
 });
 

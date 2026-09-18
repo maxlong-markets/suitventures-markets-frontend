@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionSecret, verifySession, type SessionPayload } from "@/lib/session/cookie";
 import { nowSec } from "@/lib/time";
@@ -27,15 +28,23 @@ export function cookieValue(header: string | null, name: string): string | null 
 }
 
 /**
- * The caller's address for the pre-auth rate limit: the first hop of `x-forwarded-for`, else
- * `x-real-ip`, else `"unknown"`. Both headers are client-suppliable on a direct request, which is
- * fine here — the budget this feeds is a cost bound, not an identity check.
+ * The pre-auth rate-limit key: the first `x-forwarded-for` hop when it is an IP literal, else
+ * `x-real-ip` when it is, else `"unknown"`. On Vercel the platform's own proxy overwrites
+ * `x-forwarded-for` with the client IP it actually saw and never forwards a caller-supplied value,
+ * so on that deployment this key is not attacker-chosen. Behind no reverse proxy at all (`next
+ * start` run directly, and every test here) neither header can be trusted, so every caller shares
+ * the `"unknown"` bucket — that caps sign-in at roughly ten completions a minute for the *entire
+ * process* (one nonce GET plus one session POST per sign-in, both spending the same 20/min budget),
+ * not per caller. A real NAT egress collapses the same way: one office's shared IP gets one budget
+ * for everyone behind it.
  */
 export function clientIp(req: Request): string {
-  const forwarded = req.headers.get("x-forwarded-for");
-  const first = forwarded?.split(",")[0]?.trim();
-  if (first) return first;
-  return req.headers.get("x-real-ip") ?? "unknown";
+  const candidate = (value: string | null): string | null => {
+    const trimmed = value?.trim();
+    return trimmed && isIP(trimmed) !== 0 ? trimmed.toLowerCase() : null;
+  };
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0] ?? null;
+  return candidate(forwarded) ?? candidate(req.headers.get("x-real-ip")) ?? "unknown";
 }
 
 /** The signed-in wallet, or null: no cookie, a bad signature, an expired token, or no key configured. */

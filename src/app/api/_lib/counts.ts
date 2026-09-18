@@ -6,7 +6,7 @@ import type { TokenPair } from "@/lib/types";
 /** Counts move fast and matter little; the client updates its own vote optimistically and the next fetch reconciles. */
 export const VOTES_TTL = 30;
 
-const zeros = (ids: readonly string[]): Record<string, VoteCount> =>
+export const zeros = (ids: readonly string[]): Record<string, VoteCount> =>
   Object.fromEntries(ids.map((id) => [id, { bull: 0, bear: 0 }]));
 
 /**
