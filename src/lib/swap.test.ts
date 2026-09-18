@@ -295,7 +295,11 @@ describe("a broadcast swap whose outcome cannot be read", () => {
     const handle = await executeSwap(REQUEST, h.deps);
     expect(handle.hash).toBe(SWAP_HASH);
     await expect(handle.confirmation).rejects.toBeInstanceOf(SwapUnconfirmedError);
-    const err = await handle.confirmation.catch((e: Error) => e);
+    // The promise rejects, so this resolves to the error; assert that rather than widening the type.
+    const err = await handle.confirmation.then(
+      () => { throw new Error("confirmation resolved, but it must reject"); },
+      (e: unknown) => e as Error,
+    );
     // The wording is the point: "nothing was spent" here would invite a duplicate swap.
     expect(err.message).not.toMatch(/nothing was spent/i);
     expect(err.message).toMatch(/could not confirm/i);
