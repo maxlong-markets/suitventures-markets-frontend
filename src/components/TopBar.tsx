@@ -10,6 +10,7 @@ import WalletButton from "./WalletButton";
 const NAV = [
   { href: "/", label: "Markets" },
   { href: "/watchlist", label: "Watchlist" },
+  { href: "/traders", label: "Traders" },
 ] as const;
 
 function navClass(active: boolean): string {

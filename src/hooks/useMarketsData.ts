@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useDataSource } from "@/context/DataSource";
-import type { Denom, Interval, Side, TokenPair } from "@/lib/types";
+import type { Denom, Interval, Side, TokenPair, TradersBy } from "@/lib/types";
 
 export const keys = {
   pairs: ["pairs"] as const,
@@ -17,6 +17,7 @@ export const keys = {
   // from seeing the first one's stars.
   watchlist: ["watchlist"] as const,
   votes: ["votes"] as const,
+  traders: (by: TradersBy) => ["traders", by] as const,
 };
 
 export function usePairs() {
@@ -104,4 +105,15 @@ export function useWatchlist(enabled: boolean) {
 export function useVotes(enabled: boolean) {
   const ds = useDataSource();
   return useQuery({ queryKey: keys.votes, queryFn: () => ds.votes(), enabled });
+}
+
+/** The public traders board. No session: the counts and the ranking are the same for everyone. */
+export function useTraders(by: TradersBy) {
+  const ds = useDataSource();
+  return useQuery({
+    queryKey: keys.traders(by),
+    queryFn: () => ds.traders(by),
+    // The route caches for 60 s; asking more often than that only moves bytes.
+    staleTime: 60_000,
+  });
 }

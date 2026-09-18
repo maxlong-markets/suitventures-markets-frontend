@@ -24,6 +24,9 @@ export type Hex = `0x${string}`;
  */
 export type SignMessage = (message: string) => Promise<Hex>;
 
+/** How the traders board is ranked. */
+export type TradersBy = "volume" | "trades";
+
 /**
  * The execution block the quote route returns. It lives in `src/lib/quote/price.ts` next to the
  * code that builds it; this is a type-only re-export, erased at build time, so nothing client-side
@@ -156,6 +159,10 @@ export interface MarketsDataSource {
     isSuitHolder: boolean,
     slippagePct: number,
   ): Promise<Quote>;
+
+  /** The top 50 wallets of the last 24 hours. Public: no session is involved. */
+  traders(by: TradersBy): Promise<TraderRow[]>;
+
   // --- The signed-in user's own data ------------------------------------
   // None of these takes an address: the `svm_session` cookie is the only identity the user
   // routes trust (spec section 2), and a client-supplied address would be a claim, not a fact.

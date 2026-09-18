@@ -1,5 +1,5 @@
 import { createSiweMessage } from "viem/siwe";
-import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, VoteDir } from "@/lib/types";
+import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, TraderRow, TradersBy, VoteDir } from "@/lib/types";
 import type { PriceResult } from "@/lib/quote/price";
 import { robinhoodChain } from "@/lib/chain";
 import { localQuote, poolFeePctFor } from "@/lib/quote";
@@ -35,6 +35,18 @@ function toRouteAmount(text: string): string {
  * because that module reads `SESSION_SECRET` and must never be resolvable from a client bundle.
  */
 const SIGN_IN_TTL_MS = 7 * 86_400 * 1000;
+
+/**
+ * The route answered 503 because no market store is configured. Its own class, not a message to
+ * match on: the board prints one sentence for this and a different one for a request that failed,
+ * and a string comparison is exactly the kind of thing that stops matching without anyone noticing.
+ */
+export class StoreUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StoreUnavailableError";
+  }
+}
 
 /** Live data through the app's own route handlers (the only Envio clients). */
 export class EnvioDataSource implements MarketsDataSource {
@@ -117,6 +129,13 @@ export class EnvioDataSource implements MarketsDataSource {
       routable: true,
       call: body.call,
     };
+  }
+
+  async traders(by: TradersBy): Promise<TraderRow[]> {
+    const res = await fetch(`/api/traders?by=${by}`, { cache: "no-store" });
+    if (res.status === 503) throw new StoreUnavailableError("traders board needs the market store");
+    if (!res.ok) throw new Error(`/api/traders: ${res.status}`);
+    return (await res.json()) as TraderRow[];
   }
 
   // --- The signed-in user's own data ------------------------------------

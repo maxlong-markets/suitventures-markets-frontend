@@ -11,6 +11,8 @@ import type {
   SignMessage,
   TokenPair,
   Trade,
+  TraderRow,
+  TradersBy,
   VoteDir,
 } from "@/lib/types";
 import { hash } from "@/lib/format";
@@ -148,6 +150,16 @@ function generateHolders(pair: TokenPair): Holder[] {
   return out;
 }
 
+/**
+ * A fixed board for the demo: three wallets whose two rankings disagree, so the toggle visibly
+ * does something. The demo has no store behind it, so this never fails the way the live route can.
+ */
+const MOCK_TRADERS: readonly TraderRow[] = [
+  { wallet: "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984", volumeUsd: 1_284_500, trades: 96, tokens: 7 },
+  { wallet: "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544", volumeUsd: 742_300, trades: 318, tokens: 12 },
+  { wallet: "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18", volumeUsd: 118_900, trades: 41, tokens: 3 },
+] as const;
+
 export interface MockOptions {
   /** Simulated network latency for list calls, so loading states are visible. */
   latencyMs?: number;
@@ -275,6 +287,13 @@ export class MockDataSource implements MarketsDataSource {
       denom,
       isSuitHolder,
       slippagePct,
+    );
+  }
+
+  async traders(by: TradersBy): Promise<TraderRow[]> {
+    await this.delay();
+    return [...MOCK_TRADERS].sort((a, b) =>
+      by === "trades" ? b.trades - a.trades : b.volumeUsd - a.volumeUsd,
     );
   }
 

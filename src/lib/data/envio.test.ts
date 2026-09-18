@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSiweMessage } from "viem/siwe";
 import type { Address, Hex, Quote, SwapCall, TokenPair } from "@/lib/types";
-import { EnvioDataSource } from "./envio";
+import { EnvioDataSource, StoreUnavailableError } from "./envio";
 
 const TOKEN = "0x000000000000000000000000000000000000000a";
 const QUOTE_ADDRESS = "0x000000000000000000000000000000000000000b";
@@ -359,5 +359,24 @@ describe("EnvioDataSource sessions and user data", () => {
     await run();
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.every((c) => c.init?.credentials === "same-origin")).toBe(true);
+  });
+
+  it("asks the traders route for the ordering it was given", async () => {
+    routes["GET /api/traders"] = { status: 200, body: [{ wallet: TOKEN, volumeUsd: 1, trades: 2, tokens: 3 }] };
+    await expect(source().traders("trades")).resolves.toEqual([
+      { wallet: TOKEN, volumeUsd: 1, trades: 2, tokens: 3 },
+    ]);
+    expect(calls.map((c) => c.url)).toEqual(["/api/traders?by=trades"]);
+  });
+
+  it("turns the route's 503 into StoreUnavailableError, which the board can tell apart", async () => {
+    routes["GET /api/traders"] = { status: 503, body: { error: "traders board needs the market store" } };
+    await expect(source().traders("volume")).rejects.toBeInstanceOf(StoreUnavailableError);
+  });
+
+  it("throws a plain error for any other traders failure", async () => {
+    routes["GET /api/traders"] = { status: 500, body: { error: "internal error" } };
+    await expect(source().traders("volume")).rejects.toThrow("500");
+    await expect(source().traders("volume")).rejects.not.toBeInstanceOf(StoreUnavailableError);
   });
 });
