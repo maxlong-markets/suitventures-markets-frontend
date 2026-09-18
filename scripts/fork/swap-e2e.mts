@@ -35,7 +35,7 @@ import { toHuman } from "@/lib/quote/math";
 import { priceSwap } from "@/lib/quote/price";
 import { createQuoter } from "@/lib/quote/quoter";
 import { executeSwap, SwapUnconfirmedError } from "@/lib/swap";
-import type { Denom, Side } from "@/lib/types";
+import type { Denom, Origin, Side } from "@/lib/types";
 
 // No Foundry CLI runs from this script — it talks to the fork over JSON-RPC only — but every
 // fork script sets this so a future subprocess call can never leak the nightly banner into
@@ -199,6 +199,7 @@ async function one(
   side: Side,
   amount: string,
   denom: Denom,
+  origin: Origin,
 ): Promise<bigint> {
   const priced = await priceSwap(quoter, {
     side,
@@ -207,6 +208,7 @@ async function one(
     slippageBps: SLIPPAGE_BPS,
     holder: false,
     pool,
+    origin,
   });
   assert.ok(priced.routable, `${label}: the quoter refused the pool (routable: false)`);
 
@@ -267,7 +269,11 @@ async function roundTrip(
   assert.ok(pair, `${tokenAddress} (${ticker}/${quoteSymbol}) is not in the market store`);
   assert.equal(pair.ticker, ticker, `${tokenAddress} is ticker ${pair.ticker}, not ${ticker}`);
   assert.equal(pair.quote, quoteSymbol, `${tokenAddress} quotes ${pair.quote}, not ${quoteSymbol}`);
-  const pool = await backend.poolKey(pair.id);
+  // poolKey() now takes the pair's own quote asset, lowercase (C2) — resolved the same way the
+  // quote route resolves it, through quotes(), rather than assumed from POOLS above.
+  const quoteAsset = (await backend.quotes()).find((q) => q.symbol === pair.quote);
+  assert.ok(quoteAsset, `${quoteSymbol} is not a known quote asset`);
+  const pool = await backend.poolKey(pair.id, quoteAsset.address.toLowerCase());
   assert.ok(pool, `${ticker}/${quoteSymbol} has no listed pool`);
   // A pool id is a 32-byte v4 PoolId (keccak256 of the pool key), not a 20-byte address, so this
   // is a plain lowercase compare — `isAddressEqual` rejects it outright (checksum validation on a
@@ -279,8 +285,8 @@ async function roundTrip(
   );
 
   // Buy one unit of the quote asset's worth, then sell half of what landed.
-  const bought = await one(`${ticker}/${quoteSymbol} buy`, pool, "buy", "1", "quote");
-  await one(`${ticker}/${quoteSymbol} sell`, pool, "sell", toHuman(bought / 2n, pool.tokenDecimals), "token");
+  const bought = await one(`${ticker}/${quoteSymbol} buy`, pool, "buy", "1", "quote", pair.origin);
+  await one(`${ticker}/${quoteSymbol} sell`, pool, "sell", toHuman(bought / 2n, pool.tokenDecimals), "token", pair.origin);
 }
 
 try {

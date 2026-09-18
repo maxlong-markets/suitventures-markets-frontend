@@ -231,6 +231,25 @@ describe("TradePanel", () => {
     expect(buyButton().hasAttribute("disabled")).toBe(true);
   });
 
+  it("refuses to arm the button when the settled quote's amountOutMin has floored to zero (I2)", () => {
+    // The honest-zero ruling: routable stays true, but a zero minimum is exactly what
+    // checkUint128 in swap.ts refuses at submit — receiveAmount itself can still read as a
+    // nonzero (sub-cent) number, so this must not depend on receiveAmount alone.
+    h.quote = { ...PRICED, call: { ...CALL, amountOutMin: "0" } };
+    show();
+    typeAmount("0.000001");
+    expect(screen.getByText("Too small to receive anything. Increase the amount.")).toBeTruthy();
+    expect(buyButton().hasAttribute("disabled")).toBe(true);
+  });
+
+  it("also refuses when the settled quote's receiveAmount itself is zero (I2)", () => {
+    h.quote = { ...PRICED, receiveAmount: 0 };
+    show();
+    typeAmount("0.000001");
+    expect(screen.getByText("Too small to receive anything. Increase the amount.")).toBeTruthy();
+    expect(buyButton().hasAttribute("disabled")).toBe(true);
+  });
+
   it("never submits a stale quote while the next one is still in flight", async () => {
     // `useSwapQuote`'s placeholderData keeps the previous amount's call block on screen while a
     // new one is in flight (Task 6 review, I1); editing the amount down must never let a click

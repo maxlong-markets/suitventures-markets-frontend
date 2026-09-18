@@ -8,7 +8,7 @@ import { replaceHolders } from "@/lib/sync/writers";
 import { nowSec } from "@/lib/time";
 import type { HealthReport, MarketBackend } from "./backend";
 import { PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
-import { poolKeyRow } from "./poolKey";
+import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
 /** A token's stored top holders are re-pulled from Envio when older than this (spec 5.4). */
 export const HOLDER_REFRESH_SEC = 300;
@@ -64,31 +64,55 @@ const HOLDERS_SQL = `select holder, balance::text as balance from market.token_b
   where token_id = $1 and balance > 0 order by balance desc limit ${HOLDERS_SHOWN}`;
 /**
  * The trading pool for `poolKey()` (MarketBackend.poolKey's own doc comment carries the full "two
- * meanings" story): the token's primary pool, `primary_pool_id`, when it prices sanely — no
- * dependency on `listed_pool_id` and no requirement that the pool has ever swapped, because a
- * freshly launched token can have liquidity and zero trades and still be perfectly tradeable.
- * `POOL_KEY_FALLBACK_SQL` below is reached only when this misses: `primary_pool_id` is null, or
- * that pool is parked at a tick boundary (`price_quote` outside the sane window). envioBackend's
- * `poolKey()` implements this same first step, unconditionally, over `primaryPool`.
+ * meanings" story): the token's primary pool, `primary_pool_id`, when it prices sanely and carries
+ * the requested quote asset — no dependency on `listed_pool_id` and no requirement that the pool
+ * has ever swapped, because a freshly launched token can have liquidity and zero trades and still
+ * be perfectly tradeable. `p.quote_id = $2` (C2) is restricted here, not only checked afterwards
+ * through `poolKeyRow`: a token can carry more than one pool in different quote assets, and this
+ * is what stops a sane primary in the *wrong* asset from ever being handed back as if it were the
+ * requested one. `POOL_KEY_FALLBACK_SQL` below is reached only when this misses: `primary_pool_id`
+ * is null, that pool is parked at a tick boundary (`price_quote` outside the sane window), or it
+ * simply is not quoted in the asset asked for. envioBackend's `poolKey()` implements this same
+ * first step, unconditionally, over `primaryPool` — except the quote_id restriction, which Hasura
+ * cannot express on an object relation, so it is checked there through `poolKeyRow` instead.
  */
 const POOL_KEY_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_spacing, p.token_is_currency0, p.price_quote,
   t.address as token_address, t.decimals as token_decimals, q.address as quote_address, q.decimals as quote_decimals
   from market.tokens t join market.pools p on p.id = t.primary_pool_id join market.quotes q on q.id = p.quote_id
-  where t.id = $1 and p.price_quote > 1e-24 and p.price_quote < 1e18`;
+  where t.id = $1 and p.quote_id = $2 and p.price_quote > 1e-24 and p.price_quote < 1e18`;
 /**
  * Step two of the same rule: the sane pool with the most swaps, ties broken by the lowest id —
  * deterministic, and independent of `listed_pool_id` / `LISTED_POOL` (`writers.ts`, spec section 6,
  * untouched), which lists the *market table's* pool and requires `swap_count > 0`. The two rules
  * agree whenever the primary pool has traded; they can differ only for a sane, untraded primary,
  * which this rule finds already in step one above while the market table does not list the token
- * at all.
+ * at all. `p.quote_id = $2` restricts the candidate set the same way as step one (C2): without it,
+ * a higher-swap-count pool in the wrong quote asset would win the ordering and crowd out a lower-
+ * swap-count pool that actually carries the one requested, even though the latter is the only
+ * correct answer.
  */
 const POOL_KEY_FALLBACK_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_spacing, p.token_is_currency0, p.price_quote,
   t.address as token_address, t.decimals as token_decimals, q.address as quote_address, q.decimals as quote_decimals
   from market.pools p join market.tokens t on t.id = p.token_id join market.quotes q on q.id = p.quote_id
-  where p.token_id = $1 and p.price_quote > 1e-24 and p.price_quote < 1e18
+  where p.token_id = $1 and p.quote_id = $2 and p.price_quote > 1e-24 and p.price_quote < 1e18
   order by p.swap_count desc, p.id limit 1`;
 const REFRESH_SQL = `select refreshed_at from market.holder_refresh where token_id = $1`;
+
+/** Either query's row, shaped for `poolKeyRow` — factored out so poolKey() can try it twice. */
+function poolKeyParts(row: PoolKeyCols): PoolKeyParts {
+  return {
+    poolId: row.pool_id,
+    hooks: row.hooks,
+    fee: row.fee,
+    tickSpacing: row.tick_spacing,
+    tokenIsCurrency0: row.token_is_currency0,
+    priceQuote: row.price_quote,
+    tokenAddress: row.token_address,
+    tokenDecimals: row.token_decimals,
+    quoteAddress: row.quote_address,
+    quoteDecimals: row.quote_decimals,
+  };
+}
 const QUOTES_SQL = `select id, address, symbol, name, decimals, usd_price, usd_updated_at, aggregator from market.quotes order by id`;
 const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('market', 'nightly')`;
 const QUOTE_AGES_SQL = `select id, usd_updated_at, aggregator from market.quotes where usd_updated_at is not null order by id`;
@@ -149,24 +173,17 @@ export function createDbBackend(db: Db, source: EnvioSource, now: () => number =
       const rows = await db.query<BalanceRow>(HOLDERS_SQL, [id]);
       return { holders: shapeHolders(rows, token.decimals, BigInt(token.total_supply)), count: token.holders_count };
     },
-    async poolKey(tokenId) {
-      // The primary pool first, when it prices sanely (POOL_KEY_SQL); the wider fallback only when
-      // it does not. One rule, no dependency on listed_pool_id — see the comments on both queries.
-      const row = (await db.query<PoolKeyCols>(POOL_KEY_SQL, [tokenId]))[0]
-        ?? (await db.query<PoolKeyCols>(POOL_KEY_FALLBACK_SQL, [tokenId]))[0];
-      if (!row) return null; // no such token, or no sane pool at all
-      return poolKeyRow({
-        poolId: row.pool_id,
-        hooks: row.hooks,
-        fee: row.fee,
-        tickSpacing: row.tick_spacing,
-        tokenIsCurrency0: row.token_is_currency0,
-        priceQuote: row.price_quote,
-        tokenAddress: row.token_address,
-        tokenDecimals: row.token_decimals,
-        quoteAddress: row.quote_address,
-        quoteDecimals: row.quote_decimals,
-      });
+    async poolKey(tokenId, quoteId) {
+      // The primary pool first, when it prices sanely and carries quoteId (POOL_KEY_SQL); the
+      // wider fallback only when it does not. Both queries restrict on p.quote_id = $2 (C2), so a
+      // sane primary or fallback candidate in a different quote asset is never returned in the
+      // first place — poolKeyRow's own check is still run below, the one place both backends
+      // share it, but is never expected to reject anything these queries already filtered out.
+      const primaryRow = (await db.query<PoolKeyCols>(POOL_KEY_SQL, [tokenId, quoteId]))[0];
+      const primary = primaryRow && poolKeyRow(poolKeyParts(primaryRow), quoteId);
+      if (primary) return primary;
+      const fallbackRow = (await db.query<PoolKeyCols>(POOL_KEY_FALLBACK_SQL, [tokenId, quoteId]))[0];
+      return (fallbackRow && poolKeyRow(poolKeyParts(fallbackRow), quoteId)) || null;
     },
     async health(): Promise<HealthReport> {
       const at = now();

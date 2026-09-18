@@ -1,5 +1,5 @@
 import type { PoolKeyRow } from "@/lib/market/poolKey";
-import type { Address, Denom, Side } from "@/lib/types";
+import type { Address, Denom, Origin, Side } from "@/lib/types";
 import {
   HOLDER_FEE_BPS,
   ROUTER_FEE_BPS,
@@ -12,6 +12,9 @@ import {
 } from "./math";
 import { NotRoutableError, type Quoter } from "./quoter";
 
+/** v4's dynamic-fee sentinel (shape.ts's feeTierLabel renders this exact value "Dynamic"). */
+const DYNAMIC_FEE_FLAG = 0x800000;
+
 export type PriceRequest = {
   side: Side;
   amount: string;
@@ -19,6 +22,12 @@ export type PriceRequest = {
   slippageBps: number;
   holder: boolean;
   pool: PoolKeyRow;
+  /**
+   * The listed pair's origin (I1): `PoolKeyRow` carries no origin of its own, and the only use
+   * for one here is the display-only dynamic-fee estimate below, so the route passes it through
+   * rather than widening the pool row every backend and fixture builds.
+   */
+  origin: Origin;
 };
 
 export type SwapCall = {
@@ -114,7 +123,7 @@ async function quote(q: Quoter, req: PriceRequest, d: Direction): Promise<Priced
  * against a fake in tests and against `simulateContract` in the route.
  */
 export async function priceSwap(q: Quoter, req: PriceRequest): Promise<PriceResult> {
-  const { pool, holder, slippageBps } = req;
+  const { pool, holder, slippageBps, origin } = req;
   const d = direction(req);
   const priced = await quote(q, req, d).catch((err: unknown) => {
     // Contract rule 5: only the quoter's own verdict means "not routable". Anything else is a
@@ -132,8 +141,12 @@ export async function priceSwap(q: Quoter, req: PriceRequest): Promise<PriceResu
     minReceived: toHuman(amountOutMin, d.tokenOutDecimals),
     routerFeePct: holder ? 0 : 0.5,
     routerFeeAmount: toHuman(priced.fee, d.tokenInDecimals),
-    // A v4 fee is hundredths of a basis point: 3000 is 0.30 %.
-    poolFeePct: pool.fee / 10_000,
+    // A v4 fee is hundredths of a basis point: 3000 is 0.30 % — except the dynamic-fee sentinel,
+    // which is not a fee at all and reads as "838.86 %" if divided like one (I1). The Quoter's
+    // amounts above already include whatever the hook actually charged, so this figure is
+    // display only, never a value anything computes with: for a dynamic pool it is the same M1
+    // estimate by origin that src/lib/quote.ts's poolFeePctFor renders elsewhere in the app.
+    poolFeePct: (pool.fee & DYNAMIC_FEE_FLAG) !== 0 ? (origin === "Pons" ? 1.0 : 0.3) : pool.fee / 10_000,
     // Measured on `net`: the pool never saw the router's fee, so the fee is not price impact.
     priceImpactPct: priceImpactPct(
       priced.net,

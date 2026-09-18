@@ -277,6 +277,13 @@ function TradeForm({ pair }: { pair: TokenPair }) {
     // is the mock, which never asks the route.
     state = "disabled";
     reason = "Fetching a quote…";
+  } else if (receiveAmount === 0 || call.amountOutMin === "0") {
+    // The honest-zero ruling (route review I2): routable stays true with amountOutMin floored to
+    // "0", and checkUint128 in swap.ts rightly refuses to submit a zero minimum — so this button
+    // must not promise a trade that can never succeed. `call` is settled here (the branch above
+    // already ruled out "still fetching"), so this is the quote's real verdict, not a loading zero.
+    state = "disabled";
+    reason = "Too small to receive anything. Increase the amount.";
   }
   if (pending) state = "pending";
 

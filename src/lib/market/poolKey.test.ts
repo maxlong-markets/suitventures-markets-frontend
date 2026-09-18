@@ -37,7 +37,7 @@ const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 
 describe("poolKeyRow", () => {
   it("lowercases every address, so a row from the store equals a row from the indexer", () => {
-    expect(poolKeyRow(parts)).toEqual({
+    expect(poolKeyRow(parts, NVDA)).toEqual({
       poolId: "0xcbdfea90430a30ee4469c9902e120a77e7c7e4711d5643671c1d1957f2f1ce27",
       currency0: AI,
       currency1: NVDA,
@@ -54,7 +54,7 @@ describe("poolKeyRow", () => {
   });
 
   it("orders the currencies by the flag the pool was created with, never by a string comparison", () => {
-    expect(poolKeyRow({ ...parts, tokenIsCurrency0: false })).toMatchObject({
+    expect(poolKeyRow({ ...parts, tokenIsCurrency0: false }, NVDA)).toMatchObject({
       currency0: NVDA,
       currency1: AI,
       tokenIsCurrency0: false,
@@ -64,8 +64,16 @@ describe("poolKeyRow", () => {
   });
 
   it("carries the fields the chain never sees: the stored price and both decimals", () => {
-    const row = poolKeyRow({ ...parts, priceQuote: 0.5, tokenDecimals: 8, quoteDecimals: 6 });
+    const row = poolKeyRow({ ...parts, priceQuote: 0.5, tokenDecimals: 8, quoteDecimals: 6 }, NVDA);
     expect(row).toMatchObject({ priceQuote: 0.5, tokenDecimals: 8, quoteDecimals: 6 });
+  });
+
+  it("is null when the row's quote does not match the requested quoteId (C2), case-insensitively on the row's own casing", () => {
+    expect(poolKeyRow(parts, "0x9999999999999999999999999999999999999999")).toBeNull();
+    // parts.quoteAddress is checksummed ("0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC"); the
+    // caller's quoteId is always lowercase, and comparison must not silently pass a mismatch.
+    expect(poolKeyRow(parts, NVDA.toUpperCase())).toBeNull();
+    expect(poolKeyRow(parts, NVDA)).not.toBeNull();
   });
 });
 
@@ -180,8 +188,8 @@ describe("poolKey parity: db and envio agree on the trading pool for the same da
         }
         throw new Error(`unexpected query ${query.slice(0, 30)}`);
       });
-      const fromDb = await db_.poolKey(s.token);
-      const fromEnvio = await envio.poolKey(s.token);
+      const fromDb = await db_.poolKey(s.token, QUOTE);
+      const fromEnvio = await envio.poolKey(s.token, QUOTE);
       expect(fromDb?.poolId, s.name).toBe(s.winner);
       expect(fromEnvio?.poolId, s.name).toBe(s.winner);
       expect(fromDb, s.name).toEqual(fromEnvio);

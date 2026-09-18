@@ -34,12 +34,18 @@ export interface MarketBackend {
    *   `swap_count > 0`. A product decision this method does not own or change.
    * - **Routable, for trading** — a looser bar: any pool with a sane price, swapped or not,
    *   because a freshly launched token can have liquidity and zero trades and still be perfectly
-   *   tradeable. This method prefers the listed pool when one exists (so a quote routes through
-   *   the same pool the rest of the app shows), and falls back to the token's best sane pool —
-   *   highest swap count, ties broken deterministically — only when nothing is listed.
-   * Null only when the token has no sane pool at all.
+   *   tradeable. This method prefers the primary pool when it is sane, and falls back to the
+   *   token's best sane pool — highest swap count, ties broken deterministically — only when the
+   *   primary is not.
+   * `quoteId` (C2) is the pair's quote asset, lowercase — the same one `TokenPair.quote` names for
+   * the pool this token is presented in. A token can carry more than one pool in different quote
+   * assets, and only a candidate whose own quote matches this one is a trading pool for this
+   * request: the caller would otherwise label, balance-check and gate on one asset while signing a
+   * Permit2 for another. Both rule steps above are restricted to candidates whose quote matches,
+   * enforced in the one shared place a candidate becomes a `PoolKeyRow` (`poolKeyRow`).
+   * Null when the token has no sane pool at all, or none of its sane pools carry this quote asset.
    */
-  poolKey(tokenId: string): Promise<PoolKeyRow | null>;
+  poolKey(tokenId: string, quoteId: string): Promise<PoolKeyRow | null>;
   health(): Promise<HealthReport>;
 }
 

@@ -66,6 +66,7 @@ const req = (over: Partial<PriceRequest> = {}): PriceRequest => ({
   slippageBps: 100,
   holder: false,
   pool: POOL,
+  origin: "LONG",
   ...over,
 });
 
@@ -212,6 +213,25 @@ describe("priceSwap", () => {
     expect(res.minReceived).toBe("0");
     expect(res.call.amountOutMin).toBe("0");
     expect(res.priceImpactPct).toBe(0);
+  });
+
+  it("reports the M1 estimate by origin for a pool carrying v4's dynamic-fee sentinel: 1.0 for Pons (I1)", async () => {
+    // 8388608 / 10_000 would read "838.86 %" — not a fee at all, the dynamic-fee flag itself.
+    const { quoter } = fakeQuoter([199n * 10n ** 18n]);
+    const res = routable(await priceSwap(quoter, req({ pool: { ...POOL, fee: 8_388_608 }, origin: "Pons" })));
+    expect(res.poolFeePct).toBe(1.0);
+  });
+
+  it("reports the M1 estimate by origin for a pool carrying v4's dynamic-fee sentinel: 0.3 for everyone else (I1)", async () => {
+    const { quoter } = fakeQuoter([199n * 10n ** 18n]);
+    const res = routable(await priceSwap(quoter, req({ pool: { ...POOL, fee: 8_388_608 }, origin: "LONG" })));
+    expect(res.poolFeePct).toBe(0.3);
+  });
+
+  it("keeps dividing a static fee by 10_000 regardless of origin (I1)", async () => {
+    const { quoter } = fakeQuoter([199n * 10n ** 18n]);
+    const res = routable(await priceSwap(quoter, req({ pool: { ...POOL, fee: 12_345 }, origin: "Pons" })));
+    expect(res.poolFeePct).toBeCloseTo(1.2345, 10);
   });
 
   it("lets a failure that is not a routability verdict through", async () => {

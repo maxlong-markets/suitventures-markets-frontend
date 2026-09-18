@@ -279,8 +279,15 @@ describe("executeSwap", () => {
     await expect((await executeSwap(REQUEST, h.deps)).confirmation).rejects.toThrow(
       "Swap failed. Nothing was spent.",
     );
+    // A mined revert carries no revert data to decode (I3): the message is the honest generic
+    // cause, and — unlike every other failure message in this file — says gas was spent, because
+    // for a mined transaction it was.
     h.waitForTransactionReceipt.mockResolvedValueOnce({ status: "reverted", logs: [] });
-    await expect((await executeSwap(REQUEST, h.deps)).confirmation).rejects.toBeInstanceOf(SwapFailedError);
+    const handle = await executeSwap(REQUEST, h.deps);
+    await expect(handle.confirmation).rejects.toBeInstanceOf(SwapFailedError);
+    await expect(handle.confirmation).rejects.toThrow(
+      "The swap reverted on-chain: the price moved past your slippage or the quote expired. Nothing was spent except gas.",
+    );
   });
 });
 

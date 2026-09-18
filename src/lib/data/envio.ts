@@ -60,7 +60,10 @@ export class EnvioDataSource implements MarketsDataSource {
 
   async quoteSwap(id: string, side: Side, amount: string, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {
     const fresh = this.pairsCache && Date.now() - this.pairsCache.at < 30_000 ? this.pairsCache.list : await this.pairs();
-    const pair = fresh.find((p) => p.id === id.toLowerCase());
+    // The cached list is capped at 500 rows (PAIRS_LIMIT): a token outside that window still has
+    // a page (usePair falls back to pair(id) the same way), so a miss here must not be fatal —
+    // only the route's own "no such token" verdict is.
+    const pair = fresh.find((p) => p.id === id.toLowerCase()) ?? (await this.pair(id));
     if (!pair) throw new Error(`Unknown token ${id}`);
 
     // The panel asks at amount 0 so the rate and the fee rows render before any input; the

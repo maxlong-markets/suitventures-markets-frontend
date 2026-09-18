@@ -35,13 +35,24 @@ const PRICED = {
 
 /** What the route answers next, and what every fetch was asked for. */
 let answer: { status: number; body: unknown } = { status: 200, body: PRICED };
+/** The capped /api/pairs list (C1): defaults to carrying the token, like every test before C1. */
+let pairsList: TokenPair[] = [pair];
+/** What GET /api/tokens/{address} answers — the fallback quoteSwap now takes when pairsList misses. */
+let pairAnswer: { status: number; body: unknown } = { status: 200, body: pair };
 const fetchMock = vi.fn(async (input: string) => {
   const url = String(input);
-  const res =
-    url.startsWith("/api/pairs")
-      ? { ok: true, status: 200, json: async () => [pair] }
-      : { ok: answer.status < 400, status: answer.status, json: async () => answer.body };
-  return res as unknown as Response;
+  if (url.startsWith("/api/pairs")) {
+    return { ok: true, status: 200, json: async () => pairsList } as unknown as Response;
+  }
+  if (url.includes("/quote?")) {
+    return { ok: answer.status < 400, status: answer.status, json: async () => answer.body } as unknown as Response;
+  }
+  // GET /api/tokens/{address} — EnvioDataSource.pair()'s own route.
+  return {
+    ok: pairAnswer.status >= 200 && pairAnswer.status < 300,
+    status: pairAnswer.status,
+    json: async () => pairAnswer.body,
+  } as unknown as Response;
 });
 
 /** The one request that went to the quote route, parsed. Throws if there was none. */
@@ -58,6 +69,8 @@ function source(): EnvioDataSource {
 describe("EnvioDataSource.quoteSwap", () => {
   beforeEach(() => {
     answer = { status: 200, body: PRICED };
+    pairsList = [pair];
+    pairAnswer = { status: 200, body: pair };
     fetchMock.mockClear();
     vi.stubGlobal("fetch", fetchMock);
   });
@@ -143,5 +156,48 @@ describe("EnvioDataSource.quoteSwap", () => {
   it("throws when the chain is unreachable, so the panel can say the quote failed", async () => {
     answer = { status: 503, body: { error: "rpc unavailable" } };
     await expect(source().quoteSwap(TOKEN, "buy", "100", "quote", false, 1)).rejects.toThrow("503");
+  });
+
+  // C1: a token outside the capped /api/pairs list still has a page (usePair falls back to
+  // pair(id) the same way), so quoteSwap must not give up just because the list misses it.
+  describe("a token absent from the capped pairs list (C1)", () => {
+    beforeEach(() => {
+      pairsList = []; // the 500-row window misses this token, exactly like AI/NVDA in production
+    });
+
+    it("quotes normally at amount 0, from the local path", async () => {
+      const quote = await source().quoteSwap(TOKEN, "buy", "0", "quote", false, 1);
+      expect(quote.call).toBeUndefined();
+      expect(quote.routable).toBeUndefined();
+      expect(quote.poolFeePct).toBe(0.3); // localQuote's poolFeePctFor(pair), from the fallback pair
+      const urls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(urls).toContain("/api/pairs");
+      expect(urls).toContain(`/api/tokens/${TOKEN}`);
+      expect(urls.some((u) => u.includes("/quote?"))).toBe(false);
+    });
+
+    it("quotes normally at a real amount, from the route path", async () => {
+      const quote = await source().quoteSwap(TOKEN, "buy", "100", "quote", false, 1);
+      expect(quote).toEqual({
+        payAmount: 100,
+        receiveAmount: 1000,
+        priceImpactPct: 0.004,
+        routerFeePct: 0.5,
+        poolFeePct: 0.3,
+        minReceived: 990,
+        routable: true,
+        call: PRICED.call,
+      } satisfies Quote);
+      const urls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(urls).toContain(`/api/tokens/${TOKEN}`);
+      expect(urls.some((u) => u.includes("/quote?"))).toBe(true);
+    });
+
+    it("still throws Unknown token when the token route does not know it either", async () => {
+      pairAnswer = { status: 404, body: { error: "not found" } };
+      await expect(source().quoteSwap(TOKEN, "buy", "0", "quote", false, 1)).rejects.toThrow(
+        `Unknown token ${TOKEN}`,
+      );
+    });
   });
 });

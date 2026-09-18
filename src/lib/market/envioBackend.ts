@@ -2,12 +2,12 @@ import { gql } from "@/lib/envio/client";
 import { loadPairs } from "@/lib/envio/pairs";
 import {
   CANDLES_QUERY, HEALTH_QUERY, HOLDERS_QUERY, POOL_KEY_QUERY, QUOTES_QUERY, TOKEN_QUERY, TRADES_QUERY, windowQuery,
-  type BalanceRow, type CandleRow, type PoolKeyTokenRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow,
+  type BalanceRow, type CandleRow, type PoolKeyPoolRow, type PoolKeyTokenRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow,
 } from "@/lib/envio/queries";
-import { isStale, num, resolvePool, shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
+import { isSanePool, isStale, num, resolvePool, shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
 import { nowSec } from "@/lib/time";
 import type { HealthReport, MarketBackend } from "./backend";
-import { poolKeyRow } from "./poolKey";
+import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
 const CHAIN_ID = 4663;
 const MAX_LAG = 500;
@@ -18,6 +18,23 @@ type HealthRows = {
 };
 /** The same window as `loadWindowRows` in pairs.ts: h1 candles from a day before the 24h bucket. */
 const windowSince = (now: number) => Math.floor((now - 86400) / 3600) * 3600 - 86400;
+
+/** Either candidate pool, shaped for `poolKeyRow` — factored out so poolKey() can try it twice. */
+function poolKeyParts(token: PoolKeyTokenRow, pool: PoolKeyPoolRow): PoolKeyParts {
+  return {
+    poolId: pool.id,
+    hooks: pool.hooks,
+    fee: pool.fee,
+    tickSpacing: pool.tickSpacing,
+    tokenIsCurrency0: pool.tokenIsCurrency0,
+    // Hasura sends every numeric as a string; `+` on one of these would concatenate.
+    priceQuote: num(pool.priceQuote),
+    tokenAddress: token.address,
+    tokenDecimals: token.decimals,
+    quoteAddress: pool.quote.address,
+    quoteDecimals: pool.quote.decimals,
+  };
+}
 
 /** The M1 route bodies, unchanged, behind the interface. `pairs` keeps its memo inside `loadPairs`. */
 export function createEnvioBackend(): MarketBackend {
@@ -71,24 +88,23 @@ export function createEnvioBackend(): MarketBackend {
     // different meanings of "the token's pool" meet here: the market table lists through
     // LISTED_POOL (writers.ts, spec section 6, untouched, a product decision); this rule decides
     // trading instead, and the two coincide whenever the primary pool has traded.
-    async poolKey(tokenId) {
-      const t = await gql<{ Token: PoolKeyTokenRow[] }>(POOL_KEY_QUERY, { id: tokenId });
+    //
+    // fallbackPool is already restricted to quote_id: quoteId in the document (POOL_KEY_QUERY), so
+    // a higher-swap-count pool in a different quote asset can never crowd out the one actually
+    // asked for (C2). primaryPool carries no such restriction — Hasura does not accept a `where`
+    // on an object relation — so a sane primary in a different quote asset is caught here by hand,
+    // through poolKeyRow, the one place both backends share that check, and falls through to the
+    // (already-restricted) fallback exactly as an insane primary does.
+    async poolKey(tokenId, quoteId) {
+      const t = await gql<{ Token: PoolKeyTokenRow[] }>(POOL_KEY_QUERY, { id: tokenId, quoteId });
       const token = t.Token[0];
-      const pool = token ? resolvePool(token) : null;
-      if (!token || !pool) return null;
-      return poolKeyRow({
-        poolId: pool.id,
-        hooks: pool.hooks,
-        fee: pool.fee,
-        tickSpacing: pool.tickSpacing,
-        tokenIsCurrency0: pool.tokenIsCurrency0,
-        // Hasura sends every numeric as a string; `+` on one of these would concatenate.
-        priceQuote: num(pool.priceQuote),
-        tokenAddress: token.address,
-        tokenDecimals: token.decimals,
-        quoteAddress: pool.quote.address,
-        quoteDecimals: pool.quote.decimals,
-      });
+      if (!token) return null;
+      const primary = token.primaryPool && isSanePool(token.primaryPool)
+        ? poolKeyRow(poolKeyParts(token, token.primaryPool), quoteId)
+        : null;
+      if (primary) return primary;
+      const fallback = token.fallbackPool?.[0];
+      return fallback && isSanePool(fallback) ? poolKeyRow(poolKeyParts(token, fallback), quoteId) : null;
     },
     async health(): Promise<HealthReport> {
       try {

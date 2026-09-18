@@ -133,13 +133,18 @@ const POOL_KEY_FIELDS = "id quote_id tokenIsCurrency0 hooks fee tickSpacing pric
  * Carries the quote's own address — the field QUOTES_QUERY already selects on the same entity —
  * because a PoolKey needs both currencies and `quote_id` is an id, not an address the swap can
  * sign over.
+ * `fallbackPool` also restricts on `quote_id: { _eq: $quoteId }` (C2): a token can carry more
+ * than one pool in different quote assets, and without this, a higher-swap-count pool in the
+ * wrong one would win the ordering and crowd out a lower-swap-count pool in the asset actually
+ * asked for. `primaryPool` cannot carry the same restriction — Hasura does not accept a `where`
+ * on an object relation — so envioBackend's `poolKey()` checks it by hand, through `poolKeyRow`.
  */
 export const POOL_KEY_QUERY = `
-query PoolKey($id: String!) {
+query PoolKey($id: String!, $quoteId: String!) {
   Token(where: { id: { _eq: $id } }, limit: 1) {
     id address decimals
     primaryPool { ${POOL_KEY_FIELDS} }
-    fallbackPool: pools(where: { ${SANE_PRICE} }, order_by: [{ swapCount: desc }, { id: asc }], limit: 1) { ${POOL_KEY_FIELDS} }
+    fallbackPool: pools(where: { ${SANE_PRICE}, quote_id: { _eq: $quoteId } }, order_by: [{ swapCount: desc }, { id: asc }], limit: 1) { ${POOL_KEY_FIELDS} }
   }
 }`;
 

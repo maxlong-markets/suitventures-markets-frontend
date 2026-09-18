@@ -6,15 +6,17 @@ import type { PoolKeyRow } from "@/lib/market/poolKey";
 // The mock below spreads the real module, so these are the very classes priceSwap and the route
 // check against.
 import { NotRoutableError, QuoterUnavailableError, type QuoterCall } from "@/lib/quote/quoter";
-import type { Address } from "@/lib/types";
+import type { Address, QuoteAsset, TokenPair } from "@/lib/types";
 import { GET } from "./route";
 
-const { poolKey, exactIn, exactOut } = vi.hoisted(() => ({
-  poolKey: vi.fn<(id: string) => Promise<PoolKeyRow | null>>(),
+const { poolKey, pair, quotes, exactIn, exactOut } = vi.hoisted(() => ({
+  poolKey: vi.fn<(id: string, quoteId: string) => Promise<PoolKeyRow | null>>(),
+  pair: vi.fn<(id: string) => Promise<TokenPair | null>>(),
+  quotes: vi.fn<() => Promise<QuoteAsset[]>>(),
   exactIn: vi.fn<(call: QuoterCall) => Promise<bigint>>(),
   exactOut: vi.fn<(call: QuoterCall) => Promise<bigint>>(),
 }));
-vi.mock("@/lib/market/backend", () => ({ getBackend: () => ({ kind: "db", poolKey }) }));
+vi.mock("@/lib/market/backend", () => ({ getBackend: () => ({ kind: "db", poolKey, pair, quotes }) }));
 // Only the factory is replaced: importOriginal keeps NotRoutableError the very class priceSwap
 // checks with `instanceof`, so the not-routable path is the real one.
 vi.mock("@/lib/quote/quoter", async (importOriginal) => ({
@@ -40,6 +42,16 @@ const POOL: PoolKeyRow = {
   quoteAddress: QUOTE,
   quoteDecimals: 6,
 };
+// The pair this token is presented in (C2): pair.quote is a SYMBOL, resolved to QUOTE_ASSET's
+// address the same way the route does, through quotes(). Every field beyond quote/origin is
+// unread by the route and filled only because TokenPair requires it.
+const PAIR = {
+  id: ADDR, ticker: "TOK", name: "Token", address: TOKEN, quote: "QT", origin: "LONG",
+  tradeable: true, priceUsd: 1, priceQuote: 1, change1h: 0, change24h: 0, vol24h: 0,
+  mcap: 0, fdv: 0, liquidity: 0, holders: 0, createdAt: 0, bull: 0, bear: 0,
+  poolId: POOL.poolId, hook: "", feeTier: "0.30%",
+} as TokenPair;
+const QUOTE_ASSET: QuoteAsset = { symbol: "QT", name: "Quote asset", address: QUOTE, decimals: 6, usdPrice: 1, pairs: 1, vol24h: 0 };
 
 const OK = "side=buy&amount=100&denom=quote&slippageBps=100";
 const call = (address: string, query: string) =>
@@ -51,9 +63,13 @@ describe("GET /api/tokens/[address]/quote", () => {
   beforeEach(() => {
     clearTtlCache();
     poolKey.mockReset();
+    pair.mockReset();
+    quotes.mockReset();
     exactIn.mockReset();
     exactOut.mockReset();
     poolKey.mockResolvedValue(POOL);
+    pair.mockResolvedValue(PAIR);
+    quotes.mockResolvedValue([QUOTE_ASSET]);
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => vi.restoreAllMocks());
@@ -63,6 +79,7 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect(res.status).toBe(400);
     await expect(res.json()).resolves.toEqual({ error: "bad address" });
     expect(poolKey).not.toHaveBeenCalled();
+    expect(pair).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -85,6 +102,7 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect(res.status).toBe(400);
     await expect(res.json()).resolves.toEqual({ error });
     expect(poolKey).not.toHaveBeenCalled();
+    expect(pair).not.toHaveBeenCalled();
   });
 
   it("answers 404 when the token has no listed pool", async () => {
@@ -93,7 +111,26 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect(res.status).toBe(404);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     await expect(res.json()).resolves.toEqual({ error: "no listed pool" });
-    expect(poolKey).toHaveBeenCalledWith(ADDR);
+    expect(poolKey).toHaveBeenCalledWith(ADDR, QUOTE);
+  });
+
+  // C2: the trading pool must carry the pair's own quote asset. Resolving that quote asset is a
+  // new step before poolKey() is even called, and either half of it missing reads exactly like
+  // "no listed pool" — poolKey() itself answering null is covered by the test above.
+  it("answers 404 when the pair itself is unknown", async () => {
+    pair.mockResolvedValue(null);
+    const res = await call(ADDR, OK);
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ error: "no listed pool" });
+    expect(poolKey).not.toHaveBeenCalled();
+  });
+
+  it("answers 404 when the pair's quote symbol names no known quote asset", async () => {
+    quotes.mockResolvedValue([{ ...QUOTE_ASSET, symbol: "SOMETHING_ELSE" }]);
+    const res = await call(ADDR, OK);
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ error: "no listed pool" });
+    expect(poolKey).not.toHaveBeenCalled();
   });
 
   it("answers 200 with the whole priced shape and never lets it be cached", async () => {
@@ -133,8 +170,23 @@ describe("GET /api/tokens/[address]/quote", () => {
       tokenOutDecimals: 18,
     });
     // The path segment is lowercased before the lookup, and the fee came off the input.
-    expect(poolKey).toHaveBeenCalledWith(ADDR);
+    expect(pair).toHaveBeenCalledWith(ADDR);
+    // QUOTE is QUOTE_ASSET.address already lowercase: poolKey() is asked for the pair's own
+    // quote asset (C2), resolved from pair.quote ("QT") through quotes().
+    expect(poolKey).toHaveBeenCalledWith(ADDR, QUOTE);
     expect(exactIn).toHaveBeenCalledWith({ poolKey: POOL, zeroForOne: false, exactAmount: 99_500_000n });
+  });
+
+  it("prices a pool whose quote matches the pair's quote asset, so call.tokenIn (buy) / call.tokenOut (sell) is that same address (C2)", async () => {
+    exactIn.mockResolvedValue(199n * 10n ** 18n);
+    const buyRes = await call(ADDR, "side=buy&amount=100&denom=quote&slippageBps=100");
+    const buyBody = (await buyRes.json()) as { call: { tokenIn: Address } };
+    expect(buyBody.call.tokenIn).toBe(QUOTE_ASSET.address.toLowerCase());
+
+    exactIn.mockResolvedValue(49_750_000n);
+    const sellRes = await call(ADDR, "side=sell&amount=100&denom=token&slippageBps=100");
+    const sellBody = (await sellRes.json()) as { call: { tokenOut: Address } };
+    expect(sellBody.call.tokenOut).toBe(QUOTE_ASSET.address.toLowerCase());
   });
 
   it("passes holder=1 through to the fee, and inverts when the amount names the receive side", async () => {

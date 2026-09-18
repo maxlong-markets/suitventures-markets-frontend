@@ -323,6 +323,13 @@ describe("createDbBackend poolKey", () => {
   const K = addr("k");
   const PK_PRIMARY = poolId("k");
   const PK_TRADED = poolId("7");
+  // M (C2): the sane primary is quoted NVDA; its only other pool, also sane, is quoted USDG. A
+  // quote-blind rule (or one that only checks the row it already picked, rather than restricting
+  // the candidate set itself) would hand back the NVDA primary — or null — no matter which quote
+  // asset the caller actually asked for.
+  const M = addr("m");
+  const PM_PRIMARY = poolId("m");
+  const PM_OTHER = poolId("n");
 
   beforeAll(async () => {
     db = await testDb();
@@ -336,6 +343,7 @@ describe("createDbBackend poolKey", () => {
         tokenRec(H, "HHH", "LONG", PH0),
         tokenRec(J, "JJJ", "LONG", PJ0),
         tokenRec(K, "KKK", "LONG", PK_PRIMARY),
+        tokenRec(M, "MMM", "LONG", PM_PRIMARY),
       ],
       NOW,
     );
@@ -353,6 +361,8 @@ describe("createDbBackend poolKey", () => {
         poolRec(PJ_HIGH_ID, J, NVDA, { swapCount: 6 }),
         poolRec(PK_PRIMARY, K, NVDA, { swapCount: 0, lastSwapAt: null }),
         poolRec(PK_TRADED, K, NVDA, { swapCount: 50 }),
+        poolRec(PM_PRIMARY, M, NVDA, { swapCount: 20 }),
+        poolRec(PM_OTHER, M, USDG, { swapCount: 3 }),
       ],
       NOW,
     );
@@ -361,7 +371,7 @@ describe("createDbBackend poolKey", () => {
   afterAll(() => db.end());
 
   it("builds the listed pool's key, with the token as currency0", async () => {
-    expect(await backend().poolKey(A)).toEqual({
+    expect(await backend().poolKey(A, NVDA)).toEqual({
       poolId: PA,
       currency0: A,
       currency1: NVDA,
@@ -378,7 +388,7 @@ describe("createDbBackend poolKey", () => {
   });
 
   it("puts the quote first when the pool was created that way", async () => {
-    expect(await backend().poolKey(F)).toMatchObject({
+    expect(await backend().poolKey(F, USDG)).toMatchObject({
       poolId: PF,
       currency0: USDG,
       currency1: F,
@@ -392,18 +402,18 @@ describe("createDbBackend poolKey", () => {
   });
 
   it("reads the recovered pool, not the broken primary, exactly as the listing does", async () => {
-    expect(await backend().poolKey(B)).toMatchObject({ poolId: PB, currency1: USDG, priceQuote: 0.5, quoteDecimals: 6 });
+    expect(await backend().poolKey(B, USDG)).toMatchObject({ poolId: PB, currency1: USDG, priceQuote: 0.5, quoteDecimals: 6 });
   });
 
   it("is null for a token that does not exist", async () => {
-    expect(await backend().poolKey(addr("0"))).toBeNull();
+    expect(await backend().poolKey(addr("0"), NVDA)).toBeNull();
   });
 
   it("falls back to the token's best sane pool when nothing is listed for market data: a fresh launch with liquidity but no trades yet is still routable", async () => {
     // D's only pool never swapped (poolRec above: swapCount: 0), so LISTED_POOL leaves
     // listed_pool_id null and D is absent from pairs('all') — but trading does not depend on a
     // pool having already traded (Fix D).
-    expect(await backend().poolKey(D)).toEqual({
+    expect(await backend().poolKey(D, NVDA)).toEqual({
       poolId: PD,
       currency0: D,
       currency1: NVDA,
@@ -420,18 +430,24 @@ describe("createDbBackend poolKey", () => {
   });
 
   it("still answers null when the token's only pool prices insanely, fallback included", async () => {
-    expect(await backend().poolKey(G)).toBeNull();
+    expect(await backend().poolKey(G, NVDA)).toBeNull();
   });
 
   it("falls back to the sane candidate pool with the highest swap count when the primary is not sane", async () => {
-    expect(await backend().poolKey(H)).toMatchObject({ poolId: PH_HIGH });
+    expect(await backend().poolKey(H, NVDA)).toMatchObject({ poolId: PH_HIGH });
   });
 
   it("breaks a swap-count tie in the fallback by the lowest pool id", async () => {
-    expect(await backend().poolKey(J)).toMatchObject({ poolId: PJ_LOW_ID });
+    expect(await backend().poolKey(J, NVDA)).toMatchObject({ poolId: PJ_LOW_ID });
   });
 
   it("prefers a sane, never-swapped primary over a different pool that has traded heavily (rule 1 beats rule 2)", async () => {
-    expect(await backend().poolKey(K)).toMatchObject({ poolId: PK_PRIMARY });
+    expect(await backend().poolKey(K, NVDA)).toMatchObject({ poolId: PK_PRIMARY });
+  });
+
+  it("returns the pool quoted in the requested asset when the sane primary is quoted in a different one, and null for a third asset (C2)", async () => {
+    expect(await backend().poolKey(M, USDG)).toMatchObject({ poolId: PM_OTHER, quoteAddress: USDG });
+    expect(await backend().poolKey(M, NVDA)).toMatchObject({ poolId: PM_PRIMARY, quoteAddress: NVDA });
+    expect(await backend().poolKey(M, DEAD)).toBeNull();
   });
 });

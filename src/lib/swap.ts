@@ -22,7 +22,8 @@ import type { Address } from "./types";
  *
  * Order on submit (spec section 4): allowance, then a Permit2 signature, then one `swapExactIn`,
  * then the receipt's `Trade` event for the amount actually received. Every failure message ends in
- * "Nothing was spent." because the router pulls funds only after its checks pass.
+ * "Nothing was spent." because the router pulls funds only after its checks pass — except a
+ * transaction that reached the chain and reverted, which still burned gas, and says so (I3).
  */
 
 /** How long the signature and the trade stay valid, in seconds. */
@@ -138,7 +139,7 @@ export function mapSwapError(err: unknown, slippagePct: number): Error {
   return new SwapFailedError("Swap failed. Nothing was spent.");
 }
 
-async function confirm(deps: SwapDeps, router: Address, hash: Address, slippagePct: number): Promise<SwapReceipt> {
+async function confirm(deps: SwapDeps, router: Address, hash: Address): Promise<SwapReceipt> {
   let receipt;
   try {
     receipt = await deps.publicClient.waitForTransactionReceipt({ hash });
@@ -150,7 +151,15 @@ async function confirm(deps: SwapDeps, router: Address, hash: Address, slippageP
       "Sent, but we could not confirm it. Check the transaction before trying again.",
     );
   }
-  if (receipt.status === "reverted") throw new SwapFailedError("Swap failed. Nothing was spent.");
+  if (receipt.status === "reverted") {
+    // A mined revert carries no revert data in the receipt — unlike a synchronous simulation
+    // failure at `writeContract` time, mapped by `mapSwapError` in executeSwap's catch below —
+    // so the specific "Price moved past N%" text (spec section 4) can never be produced here.
+    // This is the honest generic cause instead, and it is the one failure that did spend gas.
+    throw new SwapFailedError(
+      "The swap reverted on-chain: the price moved past your slippage or the quote expired. Nothing was spent except gas.",
+    );
+  }
   // Filtered by address as well as by event: topic0 is not proof of provenance, and any other
   // contract in this transaction could emit a log shaped like ours. The toast reports these
   // numbers as the truth, so they must come from our router or from nowhere.
@@ -240,7 +249,7 @@ export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<Swa
     // 4. The caller awaits this; it carries the event's numbers, not the quote's. The no-op catch
     //    keeps a caller that never awaits it from raising an unhandled rejection: the rejection
     //    the caller does await is the same promise, and still rejects.
-    const confirmation = confirm(deps, router, hash, req.slippagePct);
+    const confirmation = confirm(deps, router, hash);
     void confirmation.catch(() => {});
     return { hash, confirmation };
   } catch (err) {

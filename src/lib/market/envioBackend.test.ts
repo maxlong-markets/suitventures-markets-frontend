@@ -47,18 +47,20 @@ describe("createEnvioBackend", () => {
     expect(gqlMock).toHaveBeenCalledTimes(1);
   });
 
-  it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, ordered by swap count then id then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {
+  it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, restricted to the requested quote, ordered by swap count then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {
     // TOKEN_QUERY's fallbackPool (what pairs/candles/trades list) filters on swapCount > 0 — the
     // store's listed_pool_id has the same rule (LISTED_POOL, spec section 6). Trading is a looser
     // bar: a fresh launch with liquidity and zero trades is still perfectly routable, so
     // POOL_KEY_QUERY's own fallback must never filter on swaps (Fix D; MarketBackend.poolKey).
+    // quote_id: { _eq: $quoteId } (C2) keeps a wrong-quote pool with a higher swap count from
+    // crowding out the right-quote pool the caller actually asked for.
     // The where/order_by/limit clause is asserted whole, not as two fragments: a mocked gql()
     // returns whatever a test hands it, so this can only pin the query text sent to the indexer —
     // it cannot exercise Hasura's own ordering (see the parity test in poolKey.test.ts for the part
     // of the rule this file *can* pin: the client-side choice between primary and fallback).
     const fallback = POOL_KEY_QUERY.slice(POOL_KEY_QUERY.indexOf("fallbackPool"));
     expect(fallback).toContain(
-      'pools(where: { priceQuote: { _gt: "1e-24", _lt: "1e18" } }, order_by: [{ swapCount: desc }, { id: asc }], limit: 1)',
+      'pools(where: { priceQuote: { _gt: "1e-24", _lt: "1e18" }, quote_id: { _eq: $quoteId } }, order_by: [{ swapCount: desc }, { id: asc }], limit: 1)',
     );
   });
 
@@ -73,7 +75,7 @@ describe("createEnvioBackend", () => {
       if (query === POOL_KEY_QUERY) return { Token: [{ ...aiPoolKey, primaryPool: primary, fallbackPool: [otherSanePool] }] } as never;
       throw new Error(`unexpected query ${query.slice(0, 30)}`);
     });
-    expect(await backend.poolKey(AI)).toMatchObject({ poolId: POOL });
+    expect(await backend.poolKey(AI, NVDA)).toMatchObject({ poolId: POOL });
   });
 
   it("poolKey() resolves the same listed pool as pair() and lowercases every address", async () => {
@@ -82,7 +84,7 @@ describe("createEnvioBackend", () => {
       if (query === POOL_KEY_QUERY) return { Token: [aiPoolKey] } as never;
       throw new Error(`unexpected query ${query.slice(0, 30)}`);
     });
-    expect(await backend.poolKey(AI)).toEqual({
+    expect(await backend.poolKey(AI, NVDA)).toEqual({
       poolId: POOL,
       currency0: AI,
       currency1: NVDA,
@@ -98,16 +100,31 @@ describe("createEnvioBackend", () => {
     });
     // One document, one round trip: the quote route calls this on every keystroke's quote.
     expect(gqlMock).toHaveBeenCalledTimes(1);
-    expect(gqlMock).toHaveBeenCalledWith(POOL_KEY_QUERY, { id: AI });
+    expect(gqlMock).toHaveBeenCalledWith(POOL_KEY_QUERY, { id: AI, quoteId: NVDA });
   });
 
   it("poolKey() is null for an unknown token and for one whose every pool is parked at a boundary", async () => {
     gqlMock.mockResolvedValue({ Token: [] });
-    expect(await backend.poolKey(AI)).toBeNull();
+    expect(await backend.poolKey(AI, NVDA)).toBeNull();
     // AI's only sane pool is gone (fallbackPool: []) and the primary is the insane 3.4e50 one: the
     // widened fallback must not paper over a genuinely insane price (Fix D).
     gqlMock.mockResolvedValue({ Token: [{ ...aiPoolKey, fallbackPool: [] }] });
-    expect(await backend.poolKey(AI)).toBeNull();
+    expect(await backend.poolKey(AI, NVDA)).toBeNull();
+  });
+
+  it("returns the fallback pool quoted in the requested asset when the sane primary is quoted in a different one, and null for a third asset (C2)", async () => {
+    // aiPoolKey's own primary (brokenPool) is insane, which cannot pin this: C2 needs a primary
+    // that is perfectly sane, just in the wrong quote asset, and a fallback in the right one.
+    const primaryQuotedY = aiPoolKey.fallbackPool![0]!; // sane, quoted NVDA
+    const OTHER_QUOTE = "0x9999999999999999999999999999999999999999";
+    const fallbackQuotedX = { ...primaryQuotedY, id: `0x${"7".repeat(64)}`, quote_id: OTHER_QUOTE, quote: { address: OTHER_QUOTE, decimals: 6 } };
+    gqlMock.mockImplementation(async (query) => {
+      if (query === POOL_KEY_QUERY) return { Token: [{ ...aiPoolKey, primaryPool: primaryQuotedY, fallbackPool: [fallbackQuotedX] }] } as never;
+      throw new Error(`unexpected query ${query.slice(0, 30)}`);
+    });
+    expect(await backend.poolKey(AI, OTHER_QUOTE)).toMatchObject({ poolId: fallbackQuotedX.id, quoteAddress: OTHER_QUOTE });
+    expect(await backend.poolKey(AI, NVDA)).toMatchObject({ poolId: POOL, quoteAddress: NVDA });
+    expect(await backend.poolKey(AI, "0x0000000000000000000000000000000000000000")).toBeNull();
   });
 
   it("health() reports the lag and quote ages, and not ok when the chain lags", async () => {

@@ -39,10 +39,22 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
   if (holder !== "0" && holder !== "1") return badRequest("bad holder");
 
   try {
-    const pool = await getBackend().poolKey(id);
+    const backend = getBackend();
+    // The trading pool must carry the same quote asset as the pair this token is presented in
+    // (C2), or the panel would label, balance-check and gate on one asset while the wallet signed
+    // a Permit2 for another. pair() gives the quote SYMBOL (TokenPair.quote); quotes() — already
+    // cached by the quotes route — maps it to the address poolKey() takes. Neither resolving is
+    // any different from "no listed pool": both read as 404, same as poolKey() itself answering
+    // null.
+    const [pair, quoteAssets] = await Promise.all([backend.pair(id), backend.quotes()]);
+    if (!pair) return answer({ error: "no listed pool" }, 404);
+    const quoteAsset = quoteAssets.find((q) => q.symbol === pair.quote);
+    if (!quoteAsset) return answer({ error: "no listed pool" }, 404);
+
+    const pool = await backend.poolKey(id, quoteAsset.address.toLowerCase());
     if (!pool) return answer({ error: "no listed pool" }, 404);
 
-    const request = { side, amount, denom, slippageBps, holder: holder === "1", pool };
+    const request = { side, amount, denom, slippageBps, holder: holder === "1", pool, origin: pair.origin };
     const quoter = createQuoter();
     // Pricing runs per request, with nothing memoised across requests: two concurrent requests for
     // the same pool — the normal case in a debounced typing UI, not an edge case — must never share

@@ -42,10 +42,18 @@ const lower = (a: string): Address => a.toLowerCase() as Address;
  * lowercased because the indexer returns ids lowercase but `Token.address` and `Quote.address`
  * checksummed; viem accepts a lowercase address, and `tokenIsCurrency0` — the flag the pool was
  * created with — decides the currency order, so nothing here depends on string comparison.
+ *
+ * `quoteId` (C2) is the trading pool's required quote asset, lowercase, exactly as
+ * `MarketBackend.poolKey`'s own second parameter: a candidate whose quote does not match is not a
+ * trading pool for this request at all — the panel would label, balance-check and gate on the
+ * pair's quote asset while the wallet signed a Permit2 for a different one — so this, the one
+ * place every candidate becomes a `PoolKeyRow`, is where both backends enforce it, primary and
+ * fallback candidates alike.
  */
-export function poolKeyRow(p: PoolKeyParts): PoolKeyRow {
+export function poolKeyRow(p: PoolKeyParts, quoteId: string): PoolKeyRow | null {
   const tokenAddress = lower(p.tokenAddress);
   const quoteAddress = lower(p.quoteAddress);
+  if (quoteAddress !== quoteId) return null;
   return {
     poolId: lower(p.poolId),
     currency0: p.tokenIsCurrency0 ? tokenAddress : quoteAddress,
