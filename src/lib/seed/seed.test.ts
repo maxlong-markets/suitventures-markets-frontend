@@ -112,6 +112,59 @@ describe("runSeed", () => {
     await fresh.end();
   });
 
+  it("a full page of only-old swaps still advances the cursor, and the range ends only when a page comes back short — the phase then completes", async () => {
+    const fresh = await testDb();
+    const cutoff = retentionCutoff(NOW);
+    // All three land in idRanges(3)'s r1 (0x5-0xa); page limit 2 makes [old1, old2] a full, entirely-stale first
+    // page. A mutant that filters before pagination sees that page come back empty (0 < 2) and ends the range
+    // right there, never reaching the second page `recent` is actually on — asserted directly below via the
+    // saved checkpoints, and via the final table, which would then be empty instead of holding `recent`.
+    const old1 = hex("6", 64), old2 = hex("7", 64), recent = hex("8", 64);
+    const source = new FakeSource({ ...data, swaps: [swap(old1, cutoff - 20), swap(old2, cutoff - 10), swap(recent, cutoff + 10)] });
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "swaps", ranges: {}, done: ["quotes", "tokens", "pools"] };
+    const saves: Checkpoint[] = [];
+    const cp = await runSeed(fresh, source, seedOpts(checkpoint, saves));
+    const swapSaves = saves.filter((c) => c.phase === "swaps");
+    // The all-old first page still moved r1's cursor to its own (unfiltered) last id, though it wrote 0 rows.
+    expect(swapSaves.some((c) => c.ranges.r1 === `${old2}-0`)).toBe(true);
+    // Only the shorter second page ended the range, and the phase — and the whole seed — completed.
+    expect(swapSaves.some((c) => c.ranges.r1 === "done")).toBe(true);
+    expect(cp.done).toEqual([...SEED_PHASES]);
+    expect(await fresh.query("select tx_hash from market.swaps")).toEqual([{ tx_hash: recent }]);
+    await fresh.end();
+  });
+
+  it("on a checkpoint before the swaps phase has begun, the COPY path's first page writes only the in-window swap of an old-and-in-window mix", async () => {
+    const fresh = await testDb();
+    const cutoff = retentionCutoff(NOW);
+    const oldTx = hex("6", 64), recentTx = hex("7", 64); // both land in idRanges(3)'s r1 (0x5-0xa), same page (limit 2)
+    const source = new FakeSource({ ...data, swaps: [swap(oldTx, cutoff - 10), swap(recentTx, cutoff + 10)] });
+    // walkRange's `idempotent` on a range's first page is `start !== undefined || opts.checkpoint.phase === phase`,
+    // reading the checkpoint runSeed was called with — never reassigned as the run's own `cp.phase` advances. Phase
+    // "pools" here (not "swaps", and no stored range cursor) keeps that false, so swaps' first page takes the
+    // non-idempotent COPY branch, unlike the retention test above, whose checkpoint is already stamped phase
+    // "swaps" and so takes the upsert branch instead (I2's second gap: the COPY path's filter was guarded only by
+    // accident).
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "pools", ranges: {}, done: ["quotes", "tokens"] };
+    let swapCopyCalls = 0;
+    const spied: Db = {
+      ...fresh,
+      copy: async (table, columns, rows) => {
+        if (table === "market.swaps") swapCopyCalls += 1;
+        return fresh.copy(table, columns, rows);
+      },
+    };
+    const cp = await runSeed(spied, source, seedOpts(checkpoint, []));
+    expect(cp.done).toEqual([...SEED_PHASES]);
+    // Confirms the COPY branch actually ran for swaps: ranged()'s write callback is a strict copy-xor-upsert
+    // ternary on `idempotent`, so a copy call against market.swaps rules out insertSwaps having run this page.
+    expect(swapCopyCalls).toBeGreaterThan(0);
+    const rows = await fresh.query<{ tx_hash: string }>("select tx_hash from market.swaps");
+    expect(rows).toHaveLength(1);
+    expect(rows).toEqual([{ tx_hash: recentTx }]);
+    await fresh.end();
+  });
+
   it("resumes a phase whose ranges have no stored cursor without copying a landed page twice", async () => {
     const fresh = await testDb();
     // The crash: r1's only page and r2's first page were COPYed, then the process died before either range saved

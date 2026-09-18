@@ -1,11 +1,15 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createDb } from "@/lib/db/client";
 import { newCheckpoint, runSeed, type Checkpoint } from "@/lib/seed/seed";
 import { createEnvioSource } from "@/lib/sync/envioSource";
 import { createLimiter } from "@/lib/sync/limiter";
 
-const CHECKPOINT = ".seed/checkpoint.json"; // git-ignored; starting over: see scripts/README.md
+const SEED_DIR = ".seed"; // git-ignored; starting over: see scripts/README.md
+const CHECKPOINT = `${SEED_DIR}/checkpoint.json`;
 const CHECKPOINT_TMP = `${CHECKPOINT}.tmp`;
+// This process's pid, so db:reset-swaps (assertNoLiveSeed, src/lib/seed/reset.ts) can refuse to truncate
+// market.swaps out from under a seed that is still writing to it.
+const LOCK = `${SEED_DIR}/seed.lock`;
 const url = process.env.DATABASE_URL_DIRECT;
 if (!url) {
   console.error("DATABASE_URL_DIRECT is not set in .env.local");
@@ -14,6 +18,26 @@ if (!url) {
 
 /** Only the message travels to the log, never the error object. */
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/** Idempotent and safe to call more than once (a signal during the normal-exit release races nothing harmful). */
+let releasingLock: Promise<void> | null = null;
+function releaseLock(): Promise<void> {
+  return (releasingLock ??= rm(LOCK, { force: true }));
+}
+
+// Signal 0 in reset.ts's assertNoLiveSeed only ever finds this pid alive while the process is actually running, so
+// every way out — including a kill — must clear the lock. Node does not run pending try/finally blocks for an
+// unhandled SIGTERM/SIGINT, hence the explicit handlers; a normal return or thrown error is covered by the
+// try/finally around the run below.
+const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143 } as const;
+for (const signal of Object.keys(SIGNAL_EXIT_CODE) as (keyof typeof SIGNAL_EXIT_CODE)[]) {
+  process.on(signal, () => {
+    void releaseLock().finally(() => process.exit(SIGNAL_EXIT_CODE[signal]));
+  });
+}
+
+await mkdir(SEED_DIR, { recursive: true });
+await writeFile(LOCK, String(process.pid));
 
 async function loadCheckpoint(): Promise<Checkpoint> {
   let text: string;
@@ -41,7 +65,7 @@ try {
   const cp = await runSeed(db, source, {
     checkpoint: await loadCheckpoint(),
     save: async (c) => {
-      await mkdir(".seed", { recursive: true });
+      await mkdir(SEED_DIR, { recursive: true });
       // Written next to the file and renamed over it, so a kill mid-write can never leave a truncated checkpoint.
       await writeFile(CHECKPOINT_TMP, JSON.stringify(c, null, 2));
       await rename(CHECKPOINT_TMP, CHECKPOINT);
@@ -60,4 +84,5 @@ try {
   }
 } finally {
   await db.end();
+  await releaseLock();
 }
