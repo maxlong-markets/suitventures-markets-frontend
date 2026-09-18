@@ -184,3 +184,19 @@ describe("priceImpactPct", () => {
     expect(priceImpactPct(ONE, ONE, 18, 18, Number.NaN, false)).toBe(0);
   });
 });
+
+describe("priceImpactPct never reports a non-finite percentage", () => {
+  it("returns 0 for an infinite or denormal pool price, not Infinity", () => {
+    // A corrupt or absurd priceQuote must not reach the response as `null` via JSON.stringify.
+    // Each of these produced a wrong answer before the sane-price window replaced `> 0`:
+    // Infinity gave -100 paying the quote and Infinity paying the token; 1e-320 the mirror image.
+    for (const payingQuote of [true, false]) {
+      for (const price of [Infinity, NaN, 1e-320, 1e-25, 1e18, 1e300, 0, -1]) {
+        expect(priceImpactPct(10n ** 18n, 10n ** 18n, 18, 18, price, payingQuote)).toBe(0);
+      }
+    }
+    // A price inside the window still reports a real number.
+    expect(priceImpactPct(10n ** 18n, 10n ** 18n, 18, 18, 1, true)).toBe(0);
+    expect(priceImpactPct(10n ** 18n, 2n * 10n ** 18n, 18, 18, 1, true)).toBeCloseTo(-50, 6);
+  });
+});

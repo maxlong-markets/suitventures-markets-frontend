@@ -70,13 +70,19 @@ export function priceImpactPct(
 ): number {
   checkDecimals(inDecimals);
   checkDecimals(outDecimals);
-  if (netIn <= 0n || amountOut <= 0n || !(poolPriceQuote > 0)) return 0;
+  // The same window the rest of the app calls a sane pool price (isSanePool, LISTED_POOL). It rules
+  // out 0, NaN, Infinity and denormals in one test: outside it there is no price to compare against,
+  // so the honest impact is 0 rather than a number computed from nonsense.
+  if (netIn <= 0n || amountOut <= 0n || !(poolPriceQuote > 1e-24 && poolPriceQuote < 1e18)) return 0;
   const inHuman = Number(netIn) / 10 ** inDecimals;
   const outHuman = Number(amountOut) / 10 ** outDecimals;
   const realised = payingQuote ? inHuman / outHuman : outHuman / inHuman;
   if (!Number.isFinite(realised) || realised <= 0) return 0;
   // Paying the quote, a higher realised price is worse; paying the token, a lower one is.
-  return payingQuote ? (realised / poolPriceQuote - 1) * 100 : (poolPriceQuote / realised - 1) * 100;
+  const pct = payingQuote ? (realised / poolPriceQuote - 1) * 100 : (poolPriceQuote / realised - 1) * 100;
+  // Belt and braces: a finite ratio of two in-window numbers cannot overflow, but the response must
+  // never carry Infinity or NaN, which JSON.stringify would send as `null`.
+  return Number.isFinite(pct) ? pct : 0;
 }
 
 /**
