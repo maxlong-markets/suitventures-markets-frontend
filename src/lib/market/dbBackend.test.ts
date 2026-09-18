@@ -306,17 +306,53 @@ describe("createDbBackend poolKey", () => {
   // A token whose only pool prices insanely: the fallback must not treat it as routable either.
   const G = addr("g");
   const PG = poolId("g");
+  // H: primary parked at a tick boundary (not sane) and two sane candidate pools with different
+  // swap counts — the fallback's ordering, the part Fix D depends on most, decides between them.
+  const H = addr("h");
+  const PH0 = poolId("h");
+  const PH_LOW = poolId("3");
+  const PH_HIGH = poolId("4");
+  // J: the same shape as H, but the two sane candidates tie on swap count — only the id tie-break
+  // (lowest wins) can decide.
+  const J = addr("j");
+  const PJ0 = poolId("j");
+  const PJ_LOW_ID = poolId("5");
+  const PJ_HIGH_ID = poolId("6");
+  // K: the primary is sane but has never swapped, and a different pool has traded heavily. Rule 1
+  // (the primary, if sane) must still win over rule 2's more-traded candidate.
+  const K = addr("k");
+  const PK_PRIMARY = poolId("k");
+  const PK_TRADED = poolId("7");
 
   beforeAll(async () => {
     db = await testDb();
     await upsertQuotes(db, quotes, prices);
-    await upsertTokens(db, [...tokens, tokenRec(F, "FFF", "LONG", PF), tokenRec(G, "GGG", "LONG", PG)], NOW);
+    await upsertTokens(
+      db,
+      [
+        ...tokens,
+        tokenRec(F, "FFF", "LONG", PF),
+        tokenRec(G, "GGG", "LONG", PG),
+        tokenRec(H, "HHH", "LONG", PH0),
+        tokenRec(J, "JJJ", "LONG", PJ0),
+        tokenRec(K, "KKK", "LONG", PK_PRIMARY),
+      ],
+      NOW,
+    );
     await upsertPools(
       db,
       [
         ...pools,
         poolRec(PF, F, USDG, { tokenIsCurrency0: false, fee: 500, tickSpacing: 10, lastSwapAt: NOW - 3000 }),
         poolRec(PG, G, NVDA, { priceQuote: "3.4e50" }), // parked at a tick boundary, like PB_BROKEN
+        poolRec(PH0, H, NVDA, { priceQuote: "3.4e50" }),
+        poolRec(PH_LOW, H, NVDA, { swapCount: 4 }),
+        poolRec(PH_HIGH, H, NVDA, { swapCount: 9 }),
+        poolRec(PJ0, J, NVDA, { priceQuote: "3.4e50" }),
+        poolRec(PJ_LOW_ID, J, NVDA, { swapCount: 6 }),
+        poolRec(PJ_HIGH_ID, J, NVDA, { swapCount: 6 }),
+        poolRec(PK_PRIMARY, K, NVDA, { swapCount: 0, lastSwapAt: null }),
+        poolRec(PK_TRADED, K, NVDA, { swapCount: 50 }),
       ],
       NOW,
     );
@@ -385,5 +421,17 @@ describe("createDbBackend poolKey", () => {
 
   it("still answers null when the token's only pool prices insanely, fallback included", async () => {
     expect(await backend().poolKey(G)).toBeNull();
+  });
+
+  it("falls back to the sane candidate pool with the highest swap count when the primary is not sane", async () => {
+    expect(await backend().poolKey(H)).toMatchObject({ poolId: PH_HIGH });
+  });
+
+  it("breaks a swap-count tie in the fallback by the lowest pool id", async () => {
+    expect(await backend().poolKey(J)).toMatchObject({ poolId: PJ_LOW_ID });
+  });
+
+  it("prefers a sane, never-swapped primary over a different pool that has traded heavily (rule 1 beats rule 2)", async () => {
+    expect(await backend().poolKey(K)).toMatchObject({ poolId: PK_PRIMARY });
   });
 });

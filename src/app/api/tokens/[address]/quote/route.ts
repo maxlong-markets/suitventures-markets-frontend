@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { ttlCache } from "@/lib/envio/cache";
 import { getBackend } from "@/lib/market/backend";
 import { priceSwap } from "@/lib/quote/price";
 import { QuoterUnavailableError, createQuoter } from "@/lib/quote/quoter";
@@ -11,8 +10,6 @@ export const dynamic = "force-dynamic";
 /** Two quoter simulations plus one store read, comfortably inside the platform's limit. */
 export const maxDuration = 15;
 
-/** D28: how long one pool's *positive* routability verdict stands, in this process only. */
-const ROUTABLE_TTL_MS = 300_000;
 const AMOUNT = /^\d+(\.\d+)?$/;
 const INTEGER = /^\d+$/;
 const NO_STORE = { "Cache-Control": "no-store" };
@@ -47,20 +44,13 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
 
     const request = { side, amount, denom, slippageBps, holder: holder === "1", pool };
     const quoter = createQuoter();
-    // Pricing runs per request, never inside `ttlCache`: two concurrent requests for the same pool
-    // — the normal case in a debounced typing UI, not an edge case — must never share one outcome
-    // (ruling 6). Sharing an in-flight *pricing* promise let a huge refused amount hand
+    // Pricing runs per request, with nothing memoised across requests: two concurrent requests for
+    // the same pool — the normal case in a debounced typing UI, not an edge case — must never share
+    // one outcome (ruling 6). Sharing an in-flight *pricing* promise let a huge refused amount hand
     // `routable: false` to a concurrent request for a perfectly servable amount, with the quoter
-    // called only once. A refusal must leave no trace any other request can observe, so it is
-    // never written to the cache below.
+    // called only once. Routability is decided by this same simulation on every quote (spec section
+    // 3); nothing about it is cached at this layer.
     const priced = await priceSwap(quoter, request);
-    if (priced.routable) {
-      // Populate-if-absent, D28: the loader here is a bare `true`, independent of this request's
-      // own numbers, so two concurrent callers sharing its in-flight promise is harmless — unlike
-      // pricing, whose outcome depends on the caller's own amount. This is write-only from the
-      // route's point of view: nothing here ever reads the cache to decide a response.
-      await ttlCache(`routable:${pool.poolId}`, ROUTABLE_TTL_MS, async () => true);
-    }
     return answer(priced);
   } catch (err) {
     // toBase() rejects anything the query validation let through; the user sees one message.

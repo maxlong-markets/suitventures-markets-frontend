@@ -151,23 +151,6 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect((body.call as { amountIn: string }).amountIn).toBe("100000000");
   });
 
-  it("answers 200 routable:false and never remembers it: one dust-sized amount must not kill a live pool", async () => {
-    exactIn.mockRejectedValue(new NotRoutableError("pool cannot be routed"));
-    const first = await call(ADDR, OK);
-    expect(first.status).toBe(200);
-    expect(first.headers.get("Cache-Control")).toBe("no-store");
-    await expect(first.json()).resolves.toEqual({ routable: false });
-
-    // The quoter also refuses an amount this pool's liquidity cannot serve, and the cache is
-    // keyed on the pool alone — so a smaller amount must be priced again, not served as dead.
-    exactIn.mockReset();
-    exactIn.mockResolvedValue(199n * 10n ** 18n);
-    const second = await call(ADDR, "side=buy&amount=1&denom=quote&slippageBps=100");
-    expect(second.status).toBe(200);
-    expect(((await second.json()) as { routable: boolean }).routable).toBe(true);
-    expect(exactIn).toHaveBeenCalledTimes(1);
-  });
-
   it("prices two concurrent requests for the same pool independently: a refusal is never shared", async () => {
     // The bug this pins: pricing used to run inside `ttlCache`'s loader, so a concurrent request
     // for the same pool key could inherit whichever outcome the in-flight call happened to produce.
@@ -189,14 +172,6 @@ describe("GET /api/tokens/[address]/quote", () => {
     const body = (await servable.json()) as { routable: boolean; receiveAmount: string };
     expect(body.routable).toBe(true);
     expect(body.receiveAmount).toBe("199");
-    expect(exactIn).toHaveBeenCalledTimes(2);
-  });
-
-  it("caches the routable verdict but never the price: every request is quoted afresh", async () => {
-    exactIn.mockResolvedValue(199n * 10n ** 18n);
-    await call(ADDR, OK);
-    const second = await call(ADDR, OK);
-    expect(((await second.json()) as { payAmount: string }).payAmount).toBeDefined();
     expect(exactIn).toHaveBeenCalledTimes(2);
   });
 

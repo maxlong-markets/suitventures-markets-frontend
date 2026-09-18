@@ -132,11 +132,10 @@ means the pool cannot be routed: the route answers 200 with
 `{ routable: false }` and no `call`, and the panel shows the existing
 "Not routed" card.
 
-**Tradeability cache (D28).** The first quote for a pool also records
-routability in an in-process TTL cache keyed `routable:{poolId}` for 300 s,
-so a token page that reloads does not re-probe. `/api/pairs` keeps
-`tradeable: true`; only the token page's panel consults the probe. A batch
-prober for the table is M3.
+**Tradeability cache (D28).** Routability is decided per quote by the same
+simulation above; nothing is cached at this layer. `/api/pairs` keeps
+`tradeable: true`. The per-pool cache D28 named belongs to the M3 batch
+prober for the table, not to this route.
 
 **Price impact** compares the realised rate against `pools.price_quote`
 already stored, so no second RPC call.

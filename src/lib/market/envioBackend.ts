@@ -64,8 +64,13 @@ export function createEnvioBackend(): MarketBackend {
       const rows = await gql<{ TokenBalance: BalanceRow[] }>(HOLDERS_QUERY, { token: id });
       return { holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)), count: token.holdersCount };
     },
-    // POOL_KEY_QUERY's own fallbackPool is wider than TOKEN_QUERY's (no swap-count floor): trading
-    // is routable, not listed — see MarketBackend.poolKey and the query's own doc comment.
+    // One trading-pool rule, identical to dbBackend's (MarketBackend.poolKey): the token's primary
+    // pool when it prices sanely, no swap-count floor — a freshly launched token can have liquidity
+    // and zero trades and still be perfectly tradeable — else the sane pool with the most swaps
+    // (POOL_KEY_QUERY's own fallbackPool, wider than TOKEN_QUERY's, which requires a trade). Two
+    // different meanings of "the token's pool" meet here: the market table lists through
+    // LISTED_POOL (writers.ts, spec section 6, untouched, a product decision); this rule decides
+    // trading instead, and the two coincide whenever the primary pool has traded.
     async poolKey(tokenId) {
       const t = await gql<{ Token: PoolKeyTokenRow[] }>(POOL_KEY_QUERY, { id: tokenId });
       const token = t.Token[0];

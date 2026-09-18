@@ -47,15 +47,33 @@ describe("createEnvioBackend", () => {
     expect(gqlMock).toHaveBeenCalledTimes(1);
   });
 
-  it("poolKey()'s fallback does not require a swap count, unlike the market-listing query", () => {
+  it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, ordered by swap count then recency then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {
     // TOKEN_QUERY's fallbackPool (what pairs/candles/trades list) filters on swapCount > 0 — the
     // store's listed_pool_id has the same rule (LISTED_POOL, spec section 6). Trading is a looser
     // bar: a fresh launch with liquidity and zero trades is still perfectly routable, so
-    // POOL_KEY_QUERY's own fallback must never filter on swaps (Fix D; MarketBackend.poolKey) —
-    // though it may still *prefer* the most-traded sane pool as a tie-break.
+    // POOL_KEY_QUERY's own fallback must never filter on swaps (Fix D; MarketBackend.poolKey).
+    // The where/order_by/limit clause is asserted whole, not as two fragments: a mocked gql()
+    // returns whatever a test hands it, so this can only pin the query text sent to the indexer —
+    // it cannot exercise Hasura's own ordering (see the parity test in poolKey.test.ts for the part
+    // of the rule this file *can* pin: the client-side choice between primary and fallback).
     const fallback = POOL_KEY_QUERY.slice(POOL_KEY_QUERY.indexOf("fallbackPool"));
-    expect(fallback).not.toContain("swapCount: { _gt: 0 }");
-    expect(fallback).toContain("swapCount: desc");
+    expect(fallback).toContain(
+      'pools(where: { priceQuote: { _gt: "1e-24", _lt: "1e18" } }, order_by: [{ swapCount: desc }, { lastSwapAt: desc_nulls_last }, { id: asc }], limit: 1)',
+    );
+  });
+
+  it("poolKey() prefers a sane primary over the fallback slot even when the fallback is also sane: rule 1 beats rule 2", async () => {
+    // POOL_KEY_FIELDS carries no swap count at all — the primary/fallback choice can never be
+    // swayed by how well the fallback pool trades, only by whether the primary itself prices
+    // sanely. A fallback stocked with a second, independently sane pool proves resolvePool never
+    // even reaches it once the primary passes.
+    const primary = aiPoolKey.fallbackPool![0]!; // the real AI/NVDA pool: sane
+    const otherSanePool = { ...primary, id: `0x${"9".repeat(64)}` };
+    gqlMock.mockImplementation(async (query) => {
+      if (query === POOL_KEY_QUERY) return { Token: [{ ...aiPoolKey, primaryPool: primary, fallbackPool: [otherSanePool] }] } as never;
+      throw new Error(`unexpected query ${query.slice(0, 30)}`);
+    });
+    expect(await backend.poolKey(AI)).toMatchObject({ poolId: POOL });
   });
 
   it("poolKey() resolves the same listed pool as pair() and lowercases every address", async () => {
