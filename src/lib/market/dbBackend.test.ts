@@ -1,14 +1,23 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { clearTtlCache } from "@/lib/envio/cache";
-import type { CandleRow, PoolRow, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "@/lib/envio/queries";
+import { gql } from "@/lib/envio/client";
+import { AI, NOW as ENVIO_NOW, NVDA as ENVIO_NVDA, POOL as ENVIO_POOL, aiToken } from "@/lib/envio/fixtures";
+import { TOKEN_QUERY, type CandleRow, type PoolRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow } from "@/lib/envio/queries";
 import { shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
+import { NotRoutableError, type Quoter } from "@/lib/quote/quoter";
 import { FakeSource } from "@/lib/sync/fakeSource";
 import type { BalanceRec, CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { finishRun, readState, saveCursors } from "@/lib/sync/state";
 import { insertSwaps, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
 import { testDb } from "@/test/db";
 import { createDbBackend } from "./dbBackend";
+import { createEnvioBackend } from "./envioBackend";
+
+// Only this file's new tradeability-parity test needs the indexer side; every other test here is
+// pure PGlite and never touches this mock.
+vi.mock("@/lib/envio/client", () => ({ gql: vi.fn() }));
+const gqlMock = vi.mocked(gql);
 
 const NOW = 1_789_547_000; // not on an hour boundary, like real life
 const H = (t: number) => Math.floor(t / 3600) * 3600;
@@ -275,6 +284,11 @@ describe("createDbBackend health", () => {
   it("surfaces the nightly's phase, so a budget-stopped re-pull does not read as finished", async () => {
     await saveCursors(db, "nightly", { phase: "pools", cursorText: PA });
     expect((await backend().health()).nightly).toMatchObject({ lastOkAgeSec: 3600, phase: "pools" });
+    // "probe" (spec section 2 / 6 task 2) is a phase name like any other here: health() only ever
+    // echoes whatever sync_state.phase carries, so /api/health shows "probe" while that phase runs
+    // with no code of its own — this is what closes that requirement's coverage.
+    await saveCursors(db, "nightly", { phase: "probe", cursorText: PA });
+    expect((await backend().health()).nightly).toMatchObject({ lastOkAgeSec: 3600, phase: "probe" });
     await saveCursors(db, "nightly", { phase: "", cursorText: "" });
     expect((await backend().health()).nightly).toMatchObject({ phase: "" });
   });
@@ -449,5 +463,49 @@ describe("createDbBackend poolKey", () => {
     expect(await backend().poolKey(M, USDG)).toMatchObject({ poolId: PM_OTHER, quoteAddress: USDG });
     expect(await backend().poolKey(M, NVDA)).toMatchObject({ poolId: PM_PRIMARY, quoteAddress: NVDA });
     expect(await backend().poolKey(M, DEAD)).toBeNull();
+  });
+});
+
+describe("tradeability parity: db reads the column, envio probes the quoter", () => {
+  beforeEach(() => {
+    clearTtlCache();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("the same pool, unroutable on both, reads tradeable: false from both backends", async () => {
+    // DB side: envio/fixtures.ts's AI/NVDA/POOL identity, seeded fresh and marked unroutable.
+    const db = await testDb();
+    await upsertQuotes(db, [{ id: ENVIO_NVDA, address: ENVIO_NVDA, symbol: "NVDA", name: "NVIDIA", decimals: 18, enabled: true }], []);
+    await upsertTokens(db, [tokenRec(AI, "AI", "LONG", ENVIO_POOL)], ENVIO_NOW);
+    await upsertPools(
+      db,
+      [poolRec(ENVIO_POOL, AI, ENVIO_NVDA, {
+        hooks: aiToken.primaryPool!.hooks, fee: aiToken.primaryPool!.fee, tickSpacing: aiToken.primaryPool!.tickSpacing,
+        priceQuote: String(aiToken.primaryPool!.priceQuote),
+      })],
+      ENVIO_NOW,
+    );
+    await recomputeListedPools(db, "all");
+    await db.query("update market.pools set routable = false where id = $1", [ENVIO_POOL]);
+    const dbPair = await createDbBackend(db, new FakeSource({}), () => ENVIO_NOW).pair(AI);
+    expect(dbPair?.tradeable).toBe(false);
+    await db.end();
+
+    // Envio side: the same pool through TOKEN_QUERY, unroutable through a quoter that refuses it.
+    gqlMock.mockImplementation(async (query) => {
+      if (query === TOKEN_QUERY) return { Token: [aiToken], QuotePrice: [] } as never;
+      if (query.startsWith("query Window")) return {} as never;
+      throw new Error("unexpected query");
+    });
+    const refusingQuoter: Quoter = {
+      exactIn: async () => { throw new NotRoutableError("the pool cannot be routed"); },
+      exactOut: async () => { throw new Error("exactOut is not used by pair()"); },
+    };
+    const envioPair = await createEnvioBackend({ quoter: refusingQuoter }).pair(AI);
+    expect(envioPair?.tradeable).toBe(false);
+
+    // The point of this test: both backends reach the same verdict for the same pool.
+    expect(envioPair?.tradeable).toBe(dbPair?.tradeable);
   });
 });

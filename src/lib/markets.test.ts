@@ -6,7 +6,7 @@ function pair(over: Partial<TokenPair>): TokenPair {
   return {
     id: "0xa", ticker: "A", name: "A", address: "0xa", quote: "NVDA", origin: "LONG", tradeable: true,
     priceUsd: 1, priceQuote: 0.01, change1h: 1, change24h: 5, vol24h: 100, mcap: 10, fdv: 10, liquidity: 20000,
-    holders: 1, createdAt: 0, bull: 0, bear: 0, poolId: "0x1", hook: "None", feeTier: "0.30%", ...over,
+    holders: 1, createdAt: 0, bull: 0, bear: 0, poolId: "0x1", hook: "None", hookAddress: "0x0", feeTier: "0.30%", ...over,
   };
 }
 

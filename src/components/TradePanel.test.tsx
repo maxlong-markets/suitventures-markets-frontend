@@ -58,6 +58,7 @@ const pair = {
   bear: 0,
   poolId: "0x000000000000000000000000000000000000000c",
   hook: "",
+  hookAddress: "0x0000000000000000000000000000000000000000",
   feeTier: "0.30%",
 } as TokenPair;
 
@@ -184,7 +185,9 @@ describe("TradePanel", () => {
     const { wrapper } = queryHarness();
     render(<TradePanel pair={{ ...pair, tradeable: false }} />, { wrapper });
     expect(screen.getByText("Not routed")).toBeTruthy();
-    expect(screen.queryByRole("link")).toBeNull();
+    // Not queryByRole("link"): an <a> without an href has no link role, so that query is null
+    // whether or not a dead "Trade on ..." button renders. Text is the assertion that can fail.
+    expect(screen.queryByText(/Trade on/)).toBeNull();
   });
 
   it("renders a trade link to the launchpad when launchpadUrl resolves one", () => {

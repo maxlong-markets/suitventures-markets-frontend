@@ -9,7 +9,7 @@ const pair = {
   id: TOKEN, ticker: "AI", name: "Artificial Inu", address: TOKEN, quote: "NVDA", origin: "LONG",
   tradeable: true, priceUsd: 0.1943, priceQuote: 0.000866, change1h: 0, change24h: 0, vol24h: 0,
   mcap: 0, fdv: 0, liquidity: 1_000_000, holders: 0, createdAt: 0, bull: 0, bear: 0,
-  poolId: "0x000000000000000000000000000000000000000c", hook: "", feeTier: "0.30%",
+  poolId: "0x000000000000000000000000000000000000000c", hook: "", hookAddress: "0x0000000000000000000000000000000000000000", feeTier: "0.30%",
 } as TokenPair;
 
 const PRICED = {

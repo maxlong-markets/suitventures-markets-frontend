@@ -1,16 +1,21 @@
+import { ttlCache } from "@/lib/envio/cache";
 import { gql } from "@/lib/envio/client";
 import { loadPairs } from "@/lib/envio/pairs";
 import {
   CANDLES_QUERY, HEALTH_QUERY, HOLDERS_QUERY, POOL_KEY_QUERY, QUOTES_QUERY, TOKEN_QUERY, TRADES_QUERY, windowQuery,
-  type BalanceRow, type CandleRow, type PoolKeyPoolRow, type PoolKeyTokenRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow,
+  type BalanceRow, type CandleRow, type PoolKeyPoolRow, type PoolKeyTokenRow, type PoolRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow,
 } from "@/lib/envio/queries";
 import { isSanePool, isStale, num, resolvePool, shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
+import { createQuoter, NotRoutableError, type Quoter } from "@/lib/quote/quoter";
+import { probeCall } from "@/lib/sync/probe";
 import { nowSec } from "@/lib/time";
 import type { HealthReport, MarketBackend } from "./backend";
 import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
 const CHAIN_ID = 4663;
 const MAX_LAG = 500;
+/** Same window as the nightly probe's own memo would need on the token page (spec section 2): "5 minutes". */
+const PROBE_TTL_MS = 300_000;
 type TokenRows = { Token: TokenRow[]; QuotePrice: QuotePriceRow[] };
 type HealthRows = {
   chain_metadata: { chain_id: number; latest_processed_block: number; block_height: number }[];
@@ -36,8 +41,56 @@ function poolKeyParts(token: PoolKeyTokenRow, pool: PoolKeyPoolRow): PoolKeyPart
   };
 }
 
+/**
+ * The listed pool, shaped for `poolKeyRow`/`probeCall` — pair()'s own probe, not poolKey()'s (hence
+ * a second helper: the `PoolRow` this method reads carries no `quote.address` field, only
+ * `quote_id`). The indexer always mints a Quote's id as its own address, lowercased — asserted by
+ * the indexer's own Initialize-discovery tests — so `quote_id` doubles as the address here. A
+ * read-only simulate call is the reason this stands on that identity rather than widening every
+ * pairs/candles/trades query for an address field only this probe would use; `poolKey()`, which
+ * hands a real signature its currencies, does not take the same shortcut (POOL_KEY_QUERY fetches
+ * `quote.address` explicitly) and neither does the nightly probe (probe.ts's own CANDIDATES_SQL).
+ */
+function poolKeyPartsFromPair(token: TokenRow, pool: PoolRow): PoolKeyParts {
+  return {
+    poolId: pool.id,
+    hooks: pool.hooks,
+    fee: pool.fee,
+    tickSpacing: pool.tickSpacing,
+    tokenIsCurrency0: pool.tokenIsCurrency0,
+    priceQuote: num(pool.priceQuote),
+    tokenAddress: token.address,
+    tokenDecimals: token.decimals,
+    quoteAddress: pool.quote_id,
+    quoteDecimals: pool.quote.decimals,
+  };
+}
+
+/**
+ * The token page's lazy probe (spec section 2 / 6 task 2): the same Quoter, the same call
+ * (`probeCall`, shared with the nightly's sweep so the two can never disagree), memoised 300 s per
+ * pool. `NotRoutableError` is an answer — false, and cached like any other outcome. Anything else
+ * (`QuoterUnavailableError`, a bad poolKey) is not an answer: it rejects out of `ttlCache`, whose
+ * own contract (a failed load caches nothing) is exactly "do not cache this verdict" — the caller
+ * below turns that rejection into the optimistic default instead of a broken page.
+ */
+function probeTradeable(quoter: Quoter, token: TokenRow, pool: PoolRow): Promise<boolean> {
+  return ttlCache(`routable:${pool.id}`, PROBE_TTL_MS, async () => {
+    const call = probeCall(poolKeyPartsFromPair(token, pool), pool.quote_id);
+    if (!call) return true; // cannot even build the call: nothing was answered, same as unavailable
+    try {
+      await quoter.exactIn(call);
+      return true; // any answer, 0n included, is the honest-zero ruling (spec section 2)
+    } catch (err) {
+      if (err instanceof NotRoutableError) return false;
+      throw err; // QuoterUnavailableError or anything else: propagates, so ttlCache does not cache it
+    }
+  });
+}
+
 /** The M1 route bodies, unchanged, behind the interface. `pairs` keeps its memo inside `loadPairs`. */
-export function createEnvioBackend(): MarketBackend {
+export function createEnvioBackend(opts: { quoter?: Quoter } = {}): MarketBackend {
+  const quoter = opts.quoter ?? createQuoter();
   return {
     kind: "envio",
     pairs: (scope) => loadPairs(scope),
@@ -48,7 +101,17 @@ export function createEnvioBackend(): MarketBackend {
       const pool = token ? resolvePool(token) : null;
       if (!token || !pool) return null;
       const w = await gql<Record<string, WindowRow[]>>(windowQuery([pool.id], windowSince(now)));
-      return shapePairs([token], usdMap(t.QuotePrice, now), windowStats(Object.values(w).flat(), now))[0] ?? null;
+      const base = shapePairs([token], usdMap(t.QuotePrice, now), windowStats(Object.values(w).flat(), now))[0];
+      if (!base) return null;
+      // Only the token page's single pair() probes (spec section 2): pairs() cannot afford one
+      // eth_call per row. A probe that could not answer at all leaves the optimistic default alone.
+      let tradeable = true;
+      try {
+        tradeable = await probeTradeable(quoter, token, pool);
+      } catch {
+        tradeable = true;
+      }
+      return { ...base, tradeable };
     },
     async quotes() {
       const now = nowSec();

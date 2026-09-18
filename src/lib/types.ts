@@ -70,6 +70,8 @@ export interface TokenPair {
   bear: number;
   poolId: Address;
   hook: string;
+  /** The listed pool's `hooks` field, lowercase; the zero address when the pool has no hook. */
+  hookAddress: Address;
   feeTier: string;
 }
 

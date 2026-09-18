@@ -47,6 +47,9 @@ export function launchpadUrl(pair: Pick<TokenPair, "origin" | "address">): strin
   return pattern.replaceAll("{address}", pair.address.toLowerCase());
 }
 
+/** Uniswap v4's convention for "this pool has no hook contract" (TokenPair.hookAddress). */
+export const ZERO_ADDRESS: Address = "0x0000000000000000000000000000000000000000";
+
 /** Permit2, the same canonical address on every chain it is deployed to. */
 export const PERMIT2_ADDRESS: Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 

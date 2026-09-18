@@ -1,3 +1,4 @@
+import { ZERO_ADDRESS } from "@/lib/chain";
 import type { Address, Origin, QuoteAsset, TokenPair } from "@/lib/types";
 import { hash } from "@/lib/format";
 import { hexAddr, hexBytes32, rng } from "./random";
@@ -155,6 +156,9 @@ export function buildPairs(now: number): TokenPair[] {
       bear: s.bear,
       poolId: hexBytes32(r),
       hook: HOOK_BY_ORIGIN[s.pad],
+      // Design-handoff seed data predates a real hook contract field; every seed pair renders
+      // its hook label unlinked rather than pointing a real explorer link at a fabricated address.
+      hookAddress: ZERO_ADDRESS,
       feeTier: FEE_TIER_BY_ORIGIN[s.pad],
     };
   });

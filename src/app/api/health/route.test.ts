@@ -47,6 +47,14 @@ describe("GET /api/health", () => {
     await expect(res.json()).resolves.toEqual(healthy);
   });
 
+  it("shows the nightly's probe phase while it runs (spec section 6 task 2)", async () => {
+    const probing: HealthReport = { ...healthy, nightly: { lastOkAgeSec: 3600, lastError: null, phase: "probe" } };
+    health.mockResolvedValue(probing);
+    const res = await GET();
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ nightly: { phase: "probe" } });
+  });
+
   it("re-asks once the window expires and reports the new outcome", async () => {
     health.mockResolvedValue(healthy);
     expect((await GET()).status).toBe(200);

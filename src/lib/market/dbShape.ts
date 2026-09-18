@@ -1,10 +1,10 @@
 import { feeTierLabel, hookLabel, isStale, toOrigin, units, type WindowStats } from "@/lib/envio/shape";
-import type { TokenPair } from "@/lib/types";
+import type { Address, TokenPair } from "@/lib/types";
 
 export type PairRow = {
   id: string; symbol: string; name: string; address: string; decimals: number; total_supply: string; holders_count: number;
   pool_id: string; quote_id: string; pool_origin: string; hooks: string; fee: number; pool_created_at: number;
-  price_quote: number; tvl_token: string | null; tvl_quote: string | null;
+  price_quote: number; tvl_token: string | null; tvl_quote: string | null; routable: boolean | null;
   quote_symbol: string; quote_decimals: number; usd_price: number | null; usd_updated_at: number | null; aggregator: string | null;
 };
 
@@ -12,7 +12,7 @@ export type PairRow = {
 export const PAIR_SELECT = `
 select t.id, t.symbol, t.name, t.address, t.decimals, t.total_supply::text as total_supply, t.holders_count,
   p.id as pool_id, p.quote_id, p.origin as pool_origin, p.hooks, p.fee, p.created_at as pool_created_at,
-  p.price_quote, p.tvl_token::text as tvl_token, p.tvl_quote::text as tvl_quote,
+  p.price_quote, p.tvl_token::text as tvl_token, p.tvl_quote::text as tvl_quote, p.routable,
   q.symbol as quote_symbol, q.decimals as quote_decimals, q.usd_price, q.usd_updated_at, q.aggregator
 from market.tokens t
 join market.pools p on p.id = t.listed_pool_id
@@ -42,7 +42,11 @@ export function pairFromRow(row: PairRow, stats: WindowStats | undefined, nowSec
     logoUrl: `/api/tokens/${row.id}/logo`,
     quote: row.quote_symbol,
     origin,
-    tradeable: true, // Quoter simulation lands in M2
+    // routable is null until the nightly probe (spec section 2) has attempted this pool at least
+    // once. Null is optimistic, not unknown-so-hide-it: the table must not hide a freshly listed
+    // pool for lack of a probe yet, and the quote route tells the truth about any one amount on
+    // the page itself. Only an explicit false — the probe's own verdict — hides the Buy/Sell form.
+    tradeable: row.routable !== false,
     priceUsd,
     priceQuote,
     change1h: ref1 !== undefined && ref1 > 0 ? (priceQuote / ref1 - 1) * 100 : null,
@@ -58,6 +62,7 @@ export function pairFromRow(row: PairRow, stats: WindowStats | undefined, nowSec
     bear: 0,
     poolId: row.pool_id as `0x${string}`,
     hook: hookLabel(origin),
+    hookAddress: row.hooks.toLowerCase() as Address,
     feeTier: feeTierLabel(row.fee),
   };
 }

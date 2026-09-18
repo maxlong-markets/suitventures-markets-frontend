@@ -5,7 +5,7 @@ import type { TokenPair } from "./types";
 const pair = {
   id: "0xa", ticker: "AI", name: "AI", address: "0xa", quote: "NVDA", origin: "LONG", tradeable: true,
   priceUsd: 0.1943, priceQuote: 0.000866, change1h: 0, change24h: 0, vol24h: 0, mcap: 0, fdv: 0, liquidity: 5_141_337,
-  holders: 0, createdAt: 0, bull: 0, bear: 0, poolId: "0x1", hook: "", feeTier: "",
+  holders: 0, createdAt: 0, bull: 0, bear: 0, poolId: "0x1", hook: "", hookAddress: "0x0", feeTier: "",
 } as TokenPair;
 
 describe("localQuote", () => {

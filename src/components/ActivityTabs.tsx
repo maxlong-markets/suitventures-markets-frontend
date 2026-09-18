@@ -2,7 +2,7 @@
 
 import { useHolders, useTrades } from "@/hooks/useMarketsData";
 import type { TokenPair } from "@/lib/types";
-import { addressUrl, txUrl } from "@/lib/chain";
+import { addressUrl, txUrl, ZERO_ADDRESS } from "@/lib/chain";
 import {
   ageHours,
   fmtAge,
@@ -152,7 +152,9 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
     // A v4 pool id is a bytes32, not an address (spec section 4) — plain text, unlike the
     // three rows below.
     { label: "Pool", value: short(pair.poolId) },
-    { label: "Hook", value: pair.hook, href: pair.hook ? addressUrl(pair.hook) : undefined },
+    // The label stays pair.hook's descriptive text; the link now goes to the pool's real hook
+    // contract, and a hookless pool (the zero address) renders the label unlinked.
+    { label: "Hook", value: pair.hook, href: pair.hookAddress !== ZERO_ADDRESS ? addressUrl(pair.hookAddress) : undefined },
     { label: "Token", value: short(pair.address), href: addressUrl(pair.address) },
     { label: "Fee tier", value: pair.feeTier },
     {

@@ -4,6 +4,7 @@ import { gql } from "@/lib/envio/client";
 import { AI, NOW, NVDA, POOL, aiPoolKey, aiTokenBroken, prices, windowRows } from "@/lib/envio/fixtures";
 import { POOL_KEY_QUERY, TOKEN_QUERY } from "@/lib/envio/queries";
 import { shapePairs, usdMap, windowStats } from "@/lib/envio/shape";
+import { NotRoutableError, QuoterUnavailableError, type Quoter } from "@/lib/quote/quoter";
 import { createEnvioBackend } from "./envioBackend";
 
 // EnvioUnavailableError is re-exported because _lib/respond imports it from the same module.
@@ -13,9 +14,23 @@ const healthy = {
   chain_metadata: [{ chain_id: 4663, latest_processed_block: 1_000, block_height: 1_000 }],
   QuotePrice: [{ id: "0xquote", updatedAt: NOW - 60, aggregator: "0xfeed" }],
 };
+/** A Quoter whose exactIn is the given fake (default: answers routable); exactOut is never used by envioBackend. */
+function fakeQuoter(exactIn: Quoter["exactIn"] = async () => 1n): Quoter {
+  return { exactIn, exactOut: async () => { throw new Error("exactOut is not used by envioBackend"); } };
+}
+/** TOKEN_QUERY plus its resolved pool's h1 window, exactly as the "pair() shapes one token" test mocks it. */
+function mockToken() {
+  gqlMock.mockImplementation(async (query) => {
+    if (query === TOKEN_QUERY) return { Token: [aiTokenBroken], QuotePrice: prices } as never;
+    if (query.startsWith("query Window")) return { w0: windowRows } as never;
+    throw new Error(`unexpected query ${query.slice(0, 30)}`);
+  });
+}
 
 describe("createEnvioBackend", () => {
-  const backend = createEnvioBackend();
+  // A quoter that always answers routable, so tests unrelated to the probe never touch the network
+  // and read exactly as they did before pair() started probing.
+  const backend = createEnvioBackend({ quoter: fakeQuoter() });
   beforeEach(() => {
     clearTtlCache();
     gqlMock.mockReset();
@@ -45,6 +60,50 @@ describe("createEnvioBackend", () => {
     gqlMock.mockResolvedValue({ Token: [], QuotePrice: [] });
     expect(await backend.pair(AI)).toBeNull();
     expect(gqlMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe("pair() tradeability probe (spec section 2 / 6 task 2)", () => {
+    it("a pool the quoter reverts on reads tradeable: false", async () => {
+      mockToken();
+      const exactIn = vi.fn(async () => { throw new NotRoutableError("the pool cannot be routed"); });
+      const probing = createEnvioBackend({ quoter: fakeQuoter(exactIn) });
+      expect((await probing.pair(AI))?.tradeable).toBe(false);
+      expect(exactIn).toHaveBeenCalledTimes(1);
+    });
+
+    it("any answer, 0n included, reads tradeable: true — the honest-zero ruling", async () => {
+      mockToken();
+      const exactIn = vi.fn(async () => 0n);
+      const probing = createEnvioBackend({ quoter: fakeQuoter(exactIn) });
+      expect((await probing.pair(AI))?.tradeable).toBe(true);
+      expect(exactIn).toHaveBeenCalledTimes(1);
+    });
+
+    it("a quoter that cannot be reached leaves tradeable: true and is not cached — the next call probes again", async () => {
+      mockToken();
+      const exactIn = vi.fn(async () => { throw new QuoterUnavailableError(new Error("down")); });
+      const probing = createEnvioBackend({ quoter: fakeQuoter(exactIn) });
+      expect((await probing.pair(AI))?.tradeable).toBe(true);
+      expect((await probing.pair(AI))?.tradeable).toBe(true);
+      expect(exactIn).toHaveBeenCalledTimes(2); // not memoised: a failure to answer is not a verdict
+    });
+
+    it("a verdict is memoised for 300 s: a second pair() call within the window does not probe again", async () => {
+      mockToken();
+      const exactIn = vi.fn(async () => 1n);
+      const probing = createEnvioBackend({ quoter: fakeQuoter(exactIn) });
+      await probing.pair(AI);
+      await probing.pair(AI);
+      expect(exactIn).toHaveBeenCalledTimes(1);
+    });
+
+    it("pairs() never calls the quoter — 500 probes a request is not acceptable", async () => {
+      gqlMock.mockResolvedValue({ Token: [], QuotePrice: [] });
+      const exactIn = vi.fn(async () => 1n);
+      const probing = createEnvioBackend({ quoter: fakeQuoter(exactIn) });
+      await probing.pairs("all");
+      expect(exactIn).not.toHaveBeenCalled();
+    });
   });
 
   it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, restricted to the requested quote, ordered by swap count then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {

@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db/client";
 import { poolKeyRow, type PoolKeyParts } from "@/lib/market/poolKey";
-import { NotRoutableError, type Quoter } from "@/lib/quote/quoter";
+import { NotRoutableError, type Quoter, type QuoterCall } from "@/lib/quote/quoter";
 import { PAGE_LIMIT } from "./market";
 
 /** eth_calls in flight at once (spec section 2): a small worker pool, not a dependency's. */
@@ -40,6 +40,19 @@ function probeAmount(quoteDecimals: number): bigint {
   return quoteDecimals < 3 ? 1n : 10n ** BigInt(quoteDecimals - 3);
 }
 
+/**
+ * The one call every probe makes for a pool — the nightly's own sweep and the token page's lazy
+ * probe (envioBackend.pair()) alike — so the two can never disagree about what "probing this pool"
+ * means: the same PoolKey, the same buy direction, the same amount. Null when `parts`/`quoteId`
+ * cannot become a PoolKeyRow (poolKeyRow's own check; see probeOne's comment on when that happens).
+ */
+export function probeCall(parts: PoolKeyParts, quoteId: string): QuoterCall | null {
+  const key = poolKeyRow(parts, quoteId);
+  if (!key) return null;
+  // Buying: the quote asset is paid, so the swap is not "token is currency0"'s own direction.
+  return { poolKey: key, zeroForOne: !parts.tokenIsCurrency0, exactAmount: probeAmount(parts.quoteDecimals) };
+}
+
 type Outcome = "routable" | "unroutable" | "skipped";
 
 /**
@@ -55,12 +68,11 @@ async function probeOne(db: Db, quoter: Quoter, row: CandidateRow, now: number):
   };
   // The join already restricts on q.id = p.quote_id, so this can only fail on a data race with a row deleted
   // between the select and here; treated the same as a transport failure, no write, nothing to route through.
-  const key = poolKeyRow(parts, row.quote_id);
-  if (!key) return "skipped";
+  const call = probeCall(parts, row.quote_id);
+  if (!call) return "skipped";
   let routable: boolean;
   try {
-    // Buying: the quote asset is paid, so the swap is not "token is currency0"'s own direction.
-    await quoter.exactIn({ poolKey: key, zeroForOne: !row.token_is_currency0, exactAmount: probeAmount(row.quote_decimals) });
+    await quoter.exactIn(call);
     routable = true; // any answer, 0n included, is the honest-zero ruling (spec section 2)
   } catch (err) {
     if (err instanceof NotRoutableError) routable = false;

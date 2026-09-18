@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { addressUrl } from "@/lib/chain";
+import { addressUrl, ZERO_ADDRESS } from "@/lib/chain";
 import { fmtAmt, short } from "@/lib/format";
 import type { Address, Holder, TokenPair, Trade } from "@/lib/types";
 import { render, screen, within } from "@/test/dom";
@@ -32,6 +32,7 @@ const pair: TokenPair = {
   bear: 0,
   poolId: POOL,
   hook: "Doppler shared v4 hook",
+  hookAddress: "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544" as Address,
   feeTier: "0.30%",
 };
 
@@ -87,7 +88,7 @@ describe("ActivityTabs", () => {
     show("info");
 
     const hookLink = screen.getByRole("link", { name: pair.hook });
-    expect(hookLink.getAttribute("href")).toBe(addressUrl(pair.hook));
+    expect(hookLink.getAttribute("href")).toBe(addressUrl(pair.hookAddress));
     expect(hookLink.getAttribute("target")).toBe("_blank");
     expect(hookLink.getAttribute("rel")).toBe("noreferrer");
 
@@ -98,5 +99,17 @@ describe("ActivityTabs", () => {
 
     // A v4 pool id is a bytes32, not an address — it must stay plain text.
     expect(screen.getByText(short(pair.poolId)).closest("a")).toBeNull();
+  });
+
+  it("renders the hook label unlinked when the pool has no hook (the zero address)", () => {
+    render(
+      <ActivityTabs
+        pair={{ ...pair, hookAddress: ZERO_ADDRESS }}
+        now={2_000_000_000_000}
+        tab="info"
+        onTabChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(pair.hook).closest("a")).toBeNull();
   });
 });

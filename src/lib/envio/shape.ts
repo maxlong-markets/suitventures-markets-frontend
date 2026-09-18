@@ -1,4 +1,4 @@
-import type { Candle, Holder, Origin, QuoteAsset, TokenPair, Trade } from "@/lib/types";
+import type { Address, Candle, Holder, Origin, QuoteAsset, TokenPair, Trade } from "@/lib/types";
 import type { BalanceRow, CandleRow, Numeric, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "./queries";
 
 export const STALE_AFTER_SEC = 259_200; // 3 days: distinguishes a dead aggregator from an off-hours hold
@@ -126,7 +126,10 @@ export function shapePairs(
       logoUrl: `/api/tokens/${t.id}/logo`,
       quote: p.quote.symbol,
       origin,
-      tradeable: true, // Quoter simulation lands in M2
+      // A per-pool probe on every row of a 500-pair list is not acceptable (spec section 2), so
+      // this default stays true for both pairs() and the un-probed base pair() builds; pair()
+      // (envioBackend.ts) probes the one listed pool itself and overrides this afterwards.
+      tradeable: true,
       priceUsd,
       priceQuote,
       change1h: ref1 !== undefined && ref1 > 0 ? (priceQuote / ref1 - 1) * 100 : null,
@@ -142,6 +145,7 @@ export function shapePairs(
       bear: 0,
       poolId: p.id as `0x${string}`,
       hook: hookLabel(origin),
+      hookAddress: p.hooks.toLowerCase() as Address,
       feeTier: feeTierLabel(p.fee),
     });
   }

@@ -49,7 +49,7 @@ const PAIR = {
   id: ADDR, ticker: "TOK", name: "Token", address: TOKEN, quote: "QT", origin: "LONG",
   tradeable: true, priceUsd: 1, priceQuote: 1, change1h: 0, change24h: 0, vol24h: 0,
   mcap: 0, fdv: 0, liquidity: 0, holders: 0, createdAt: 0, bull: 0, bear: 0,
-  poolId: POOL.poolId, hook: "", feeTier: "0.30%",
+  poolId: POOL.poolId, hook: "", hookAddress: ZERO, feeTier: "0.30%",
 } as TokenPair;
 const QUOTE_ASSET: QuoteAsset = { symbol: "QT", name: "Quote asset", address: QUOTE, decimals: 6, usdPrice: 1, pairs: 1, vol24h: 0 };
 
