@@ -283,3 +283,15 @@ Migrations live in `supabase/migrations/<timestamp>_<name>.sql` and are applied 
 - The smallest Supabase compute has 1 GB of memory; the pairs query and the sync's upserts are indexed and small, but the seed's COPY and index maintenance will run slower there. Upgrading compute is a dashboard change.
 - The nightly job and the market cycle never run together: the market invocation yields while the nightly's lease is held, so a nightly delays the market cycle by at most its own duration (about three minutes at 120 requests a minute).
 - D35's wording to the client changes. Kobe tells MAXLONG.
+
+## Amendment, 18 Sep 2026: trade retention
+
+The store keeps the last 10 days of trades, not the full history. Measured
+on the first copy: about one million trades a day since 11 Jun 2026, ~470
+bytes a row with the primary key, so the full table would be ~24 GB plus an
+8 GB index and grow ~15 GB a month. The seed filters each page to
+`timestamp >= startedAt − 10 days`; the nightly job gains a `prune` phase
+that deletes older rows in batches behind a BRIN index on `ts`; the sync is
+unchanged (it only ever inserts recent swaps). Candles keep all history at a
+fraction of the size, holders are unaffected, and the trades tab shows a
+token's last 50 trades within the window.
