@@ -110,7 +110,10 @@ export function usePairBalances(pair: TokenPair): PairBalances {
 
   const { data: blockNumber } = useBlockNumber({
     chainId: robinhoodChain.id,
-    watch: { poll: true, pollingInterval: BLOCK_POLL_MS },
+    // `enabled` is required inside `watch`: wagmi computes the watcher's enabled as
+    // `(query.enabled ?? true) && watch.enabled`, so an object without it is always false and the
+    // poll silently never starts. Proven by counting eth_blockNumber calls against a real provider.
+    watch: { enabled: ready, poll: true, pollingInterval: BLOCK_POLL_MS },
     query: { enabled: ready },
   });
 
