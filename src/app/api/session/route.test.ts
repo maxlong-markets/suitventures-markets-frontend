@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NONCE_COOKIE, SESSION_COOKIE, SESSION_TTL_SEC, newNonce, signNonce, signSession, verifySession } from "@/lib/session/cookie";
 import type { SiweVerifyInput } from "@/lib/session/siwe";
+import { CLIENT_LIMIT, resetRateLimit } from "@/lib/social/rateLimit";
 import { nowSec } from "@/lib/time";
 import type { Address } from "@/lib/types";
 import { DELETE, GET, POST } from "./route";
@@ -44,6 +45,7 @@ const sessionCookie = (over: Partial<{ exp: number }> = {}) =>
 
 beforeEach(() => {
   vi.stubEnv("SESSION_SECRET", SECRET);
+  resetRateLimit();
   verifySiwe.mockReset();
   verifySiwe.mockResolvedValue({ address: ADDR });
 });
@@ -86,7 +88,7 @@ describe("POST /api/session", () => {
     expect(verifySiwe).toHaveBeenCalledTimes(1);
   });
 
-  it("spends the nonce even when verification fails, and reports the verifier's reason", async () => {
+  it("clears the nonce cookie even when verification fails, and reports the verifier's reason", async () => {
     verifySiwe.mockResolvedValue({ error: "wrong domain" });
     const res = await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
     expect(res.status).toBe(401);
@@ -95,7 +97,7 @@ describe("POST /api/session", () => {
     expect(res.headers.getSetCookie().some((c) => c.startsWith("svm_session="))).toBe(false);
   });
 
-  it("spends the nonce, says nothing about the error and logs nothing from it when verification throws", async () => {
+  it("clears the nonce cookie, says nothing about the error and logs nothing from it when verification throws", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     // The shape of a real viem failure: the message carries the signed data and the RPC URL.
     verifySiwe.mockRejectedValue(
@@ -104,7 +106,7 @@ describe("POST /api/session", () => {
     const res = await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
     expect(res.status).toBe(500);
     await expect(res.json()).resolves.toEqual({ error: "internal error" });
-    // Single use on this path too: a nonce a thrown verification has spoken for is spent.
+    // Every terminal answer clears the nonce cookie, this thrown path included.
     expect(res.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
     expect(res.headers.getSetCookie().some((c) => c.startsWith("svm_session="))).toBe(false);
     // Global Constraint 4: neither the address, the signature nor the RPC URL reaches the log.
@@ -144,6 +146,66 @@ describe("POST /api/session", () => {
     vi.stubEnv("NODE_ENV", "production");
     const res = await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
     expect(res.headers.getSetCookie().find((c) => c.startsWith("svm_session="))).toMatch(/;\s*Secure/i);
+  });
+
+  it("creates the verification client with a five-second timeout and a single retry", async () => {
+    await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
+    const usedClient = verifySiwe.mock.calls[0][1] as { transport: { timeout: number; retryCount: number } };
+    expect(usedClient.transport.timeout).toBe(5_000);
+    expect(usedClient.transport.retryCount).toBe(1);
+  });
+
+  it("uses SESSION_DOMAIN over the Host header when it is set", async () => {
+    vi.stubEnv("SESSION_DOMAIN", "suitventures-markets-frontend.vercel.app");
+    await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()), "attacker-controlled.example");
+    expect(verifySiwe.mock.calls[0][0].domain).toBe("suitventures-markets-frontend.vercel.app");
+  });
+
+  it("falls back to the Host header when SESSION_DOMAIN is unset", async () => {
+    await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()), "longmarkets.xyz");
+    expect(verifySiwe.mock.calls[0][0].domain).toBe("longmarkets.xyz");
+  });
+
+  it("refuses a nonce already spent by an earlier successful sign-in, even though the cookie itself is still valid", async () => {
+    const cookie = nonceCookie(newNonce());
+    expect((await post({ message: MESSAGE, signature: SIG }, cookie)).status).toBe(200);
+    const replay = await post({ message: MESSAGE, signature: SIG }, cookie); // the same cookie, resent
+    expect(replay.status).toBe(401);
+    await expect(replay.json()).resolves.toEqual({ error: "nonce already used" });
+    expect(replay.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
+    expect(verifySiwe).toHaveBeenCalledTimes(1); // the replay never reaches the verifier
+  });
+
+  it("does not spend the nonce on a refusal, so a corrected retry against the same nonce still works", async () => {
+    verifySiwe.mockResolvedValueOnce({ error: "bad signature" });
+    const cookie = nonceCookie(newNonce());
+    expect((await post({ message: MESSAGE, signature: SIG }, cookie)).status).toBe(401);
+    const retry = await post({ message: MESSAGE, signature: SIG }, cookie);
+    expect(retry.status).toBe(200);
+  });
+
+  it("clears the nonce cookie on every terminal answer, including 400, 401 and 503", async () => {
+    vi.stubEnv("SESSION_SECRET", undefined);
+    const unconfigured = await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
+    expect(unconfigured.status).toBe(503);
+    expect(unconfigured.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
+    vi.stubEnv("SESSION_SECRET", SECRET);
+    const badBody = await post({}, nonceCookie(newNonce()));
+    expect(badBody.status).toBe(400);
+    expect(badBody.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
+    const noNonce = await post({ message: MESSAGE, signature: SIG });
+    expect(noNonce.status).toBe(401);
+    expect(noNonce.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
+  });
+
+  it("answers 429 once the client IP's pre-auth budget is spent, before touching the body or the nonce", async () => {
+    for (let i = 0; i < CLIENT_LIMIT; i++) {
+      expect((await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()))).status).toBe(200);
+    }
+    const res = await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    await expect(res.text()).resolves.toBe("too many requests");
   });
 });
 

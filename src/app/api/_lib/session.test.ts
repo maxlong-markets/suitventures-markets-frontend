@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SESSION_COOKIE, SESSION_TTL_SEC, signSession } from "@/lib/session/cookie";
 import { nowSec } from "@/lib/time";
 import type { Address } from "@/lib/types";
-import { cookieValue, readSession, requireSession } from "./session";
+import { clientIp, cookieValue, readSession, requireSession } from "./session";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
 const ADDR = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" as Address;
@@ -33,6 +33,17 @@ describe("cookieValue", () => {
     expect(cookieValue("svm_session=%E0%A4%A", SESSION_COOKIE)).toBeNull();
     // Valid escapes still decode.
     expect(cookieValue("svm_session=a%2Eb", SESSION_COOKIE)).toBe("a.b");
+  });
+});
+
+describe("clientIp", () => {
+  const withHeaders = (headers: Record<string, string>) => new Request("http://localhost:3000/api/session/nonce", { headers });
+
+  it("takes the first x-forwarded-for hop, then x-real-ip, then \"unknown\"", () => {
+    expect(clientIp(withHeaders({ "x-forwarded-for": "203.0.113.5, 70.41.3.18, 150.172.238.178" }))).toBe("203.0.113.5");
+    expect(clientIp(withHeaders({ "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.9");
+    expect(clientIp(withHeaders({ "x-forwarded-for": "203.0.113.5", "x-real-ip": "203.0.113.9" }))).toBe("203.0.113.5");
+    expect(clientIp(withHeaders({}))).toBe("unknown");
   });
 });
 

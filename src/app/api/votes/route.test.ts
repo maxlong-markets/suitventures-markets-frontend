@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
-import { clearTtlCache } from "@/lib/envio/cache";
+import { clearCountsCache } from "@/lib/social/countsCache";
 import { MAX_VOTE_IDS, toggleVote } from "@/lib/social/store";
 import type { Address } from "@/lib/types";
 import { testDb } from "@/test/db";
@@ -27,7 +27,7 @@ afterAll(async () => {
   await db.end();
 });
 beforeEach(async () => {
-  clearTtlCache();
+  clearCountsCache();
   holder.db = db;
   await db.exec("truncate market.votes");
 });
@@ -59,6 +59,14 @@ describe("GET /api/votes", () => {
     await expect((await call(` ${T1} , ${T1} ,,`)).json()).resolves.toEqual({ [T1]: { bull: 0, bear: 0 } });
   });
 
+  it("collapses many repeats of one id below the cap that would otherwise refuse the request", async () => {
+    // Without the dedup this is MAX_VOTE_IDS + 1 ids and would be refused as "too many ids".
+    const many = Array.from({ length: MAX_VOTE_IDS + 1 }, () => T1).join(",");
+    const res = await call(many);
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ [T1]: { bull: 0, bear: 0 } });
+  });
+
   it("answers an empty map when no ids are asked for", async () => {
     await expect((await call()).json()).resolves.toEqual({});
     await expect((await call("")).json()).resolves.toEqual({});
@@ -88,7 +96,7 @@ describe("GET /api/votes", () => {
     await expect((await call(T1)).json()).resolves.toEqual({ [T1]: { bull: 1, bear: 0 } });
     await toggleVote(db, W2, T1, "bull", NOW);
     await expect((await call(T1)).json()).resolves.toEqual({ [T1]: { bull: 1, bear: 0 } }); // still the memo
-    clearTtlCache();
+    clearCountsCache();
     await expect((await call(T1)).json()).resolves.toEqual({ [T1]: { bull: 2, bear: 0 } });
   });
 

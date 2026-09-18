@@ -14,6 +14,7 @@ vi.mock("@/lib/db/client", async (importOriginal) => {
 });
 
 const WALLET = `0x${"a".repeat(40)}` as Address;
+const OTHER = `0x${"b".repeat(40)}` as Address;
 const T1 = `0x${"1".repeat(40)}`;
 const MIXED = `0x${"A".repeat(40)}`;
 
@@ -39,6 +40,12 @@ const req = (address: string, cookie?: string) =>
   ] as const;
 const put = (address: string, cookie?: string) => PUT(...req(address, cookie));
 const del = (address: string, cookie?: string) => DELETE(...req(address, cookie));
+
+const reqWithWalletOverride = (address: string, wallet: string, cookie?: string) =>
+  [
+    new Request(`http://localhost:3000/api/me/watchlist/${address}?wallet=${wallet}`, { method: "PUT", headers: cookie ? { cookie } : {} }),
+    { params: Promise.resolve({ address }) },
+  ] as const;
 
 describe("PUT|DELETE /api/me/watchlist/[address]", () => {
   it("answers 401 without a session and spends no budget", async () => {
@@ -86,5 +93,21 @@ describe("PUT|DELETE /api/me/watchlist/[address]", () => {
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     await expect(res.text()).resolves.toBe("too many requests");
     expect((await put("not-an-address", sessionHeader(WALLET))).status).toBe(429); // the budget is checked first
+  });
+
+  it("answers 429 on the sixty-first delete of a minute too", async () => {
+    for (let i = 0; i < WRITE_LIMIT; i++) expect((await del(T1, sessionHeader(WALLET))).status).toBe(204);
+    const res = await del(T1, sessionHeader(WALLET));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.text()).resolves.toBe("too many requests");
+  });
+
+  it("ignores a wallet query parameter: the write still lands under the cookie's wallet", async () => {
+    const [request, ctx] = reqWithWalletOverride(T1, OTHER, sessionHeader(WALLET));
+    expect((await PUT(request, ctx)).status).toBe(204);
+    expect(await watchlist(db, WALLET)).toEqual([T1]);
+    expect(await watchlist(db, OTHER)).toEqual([]);
   });
 });

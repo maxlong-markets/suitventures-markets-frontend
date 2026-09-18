@@ -58,4 +58,14 @@ describe("GET /api/me/votes", () => {
   it("answers an empty map for a wallet that has never voted", async () => {
     await expect((await call(sessionHeader(WALLET))).json()).resolves.toEqual({});
   });
+
+  it("ignores a wallet query parameter: the cookie's wallet answers, never the override", async () => {
+    await toggleVote(db, WALLET, T1, "bull", NOW);
+    await toggleVote(db, OTHER, T1, "bear", NOW);
+    const res = await GET(
+      new Request(`http://localhost:3000/api/me/votes?wallet=${OTHER}`, { headers: { cookie: sessionHeader(WALLET) } }),
+    );
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ [T1]: "bull" });
+  });
 });

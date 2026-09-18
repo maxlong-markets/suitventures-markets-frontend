@@ -15,6 +15,7 @@ vi.mock("@/lib/db/client", async (importOriginal) => {
 });
 
 const WALLET = `0x${"a".repeat(40)}` as Address;
+const OTHER = `0x${"b".repeat(40)}` as Address;
 const T1 = `0x${"1".repeat(40)}`;
 const MIXED = `0x${"A".repeat(40)}`;
 
@@ -86,5 +87,20 @@ describe("POST /api/me/votes/[address]", () => {
     expect(res.status).toBe(429);
     await expect(res.text()).resolves.toBe("too many requests");
     expect(await votes(db, WALLET)).toEqual({});
+  });
+
+  it("ignores a wallet query parameter and a body wallet field: the vote still lands under the cookie's wallet", async () => {
+    const res = await POST(
+      new Request(`http://localhost:3000/api/me/votes/${T1}?wallet=${OTHER}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie: sessionHeader(WALLET) },
+        body: JSON.stringify({ dir: "bull", wallet: OTHER }),
+      }),
+      { params: Promise.resolve({ address: T1 }) },
+    );
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ dir: "bull" });
+    expect(await votes(db, WALLET)).toEqual({ [T1]: "bull" });
+    expect(await votes(db, OTHER)).toEqual({});
   });
 });

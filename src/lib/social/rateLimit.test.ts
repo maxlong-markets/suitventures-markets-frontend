@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { WINDOW_SEC, WRITE_LIMIT, allowWrite, pruneRateLimit, rateLimitSize, resetRateLimit } from "./rateLimit";
+import { CLIENT_LIMIT, WINDOW_SEC, WRITE_LIMIT, allowClient, allowWrite, pruneRateLimit, rateLimitSize, resetRateLimit } from "./rateLimit";
 
 const NOW = 1_789_000_000;
 const W1 = `0x${"a".repeat(40)}`;
@@ -34,6 +34,34 @@ describe("allowWrite", () => {
     for (let i = 0; i < WRITE_LIMIT; i++) allowWrite(W1, NOW);
     expect(allowWrite(W1, NOW)).toBe(false);
     expect(allowWrite(W2, NOW)).toBe(true);
+  });
+});
+
+describe("allowClient", () => {
+  it("allows twenty requests a minute per IP and refuses the twenty-first", () => {
+    expect(CLIENT_LIMIT).toBe(20);
+    for (let i = 0; i < CLIENT_LIMIT; i++) expect(allowClient(W1, NOW)).toBe(true);
+    expect(allowClient(W1, NOW)).toBe(false);
+  });
+
+  it("tracks each IP on its own budget, independent of allowWrite's wallet budget", () => {
+    for (let i = 0; i < CLIENT_LIMIT; i++) allowClient(W1, NOW);
+    expect(allowClient(W1, NOW)).toBe(false);
+    expect(allowClient(W2, NOW)).toBe(true); // a different client is unaffected
+    expect(allowWrite(W1, NOW)).toBe(true); // the wallet budget is untouched by the client budget
+  });
+
+  it("slides: the window rolling past the earlier hits frees the budget again", () => {
+    for (let i = 0; i < CLIENT_LIMIT; i++) allowClient(W1, NOW);
+    expect(allowClient(W1, NOW + WINDOW_SEC - 1)).toBe(false);
+    expect(allowClient(W1, NOW + WINDOW_SEC)).toBe(true);
+  });
+
+  it("resetRateLimit clears the client budget too", () => {
+    for (let i = 0; i < CLIENT_LIMIT; i++) allowClient(W1, NOW);
+    expect(allowClient(W1, NOW)).toBe(false);
+    resetRateLimit();
+    expect(allowClient(W1, NOW)).toBe(true);
   });
 });
 

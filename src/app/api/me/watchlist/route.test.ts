@@ -64,4 +64,14 @@ describe("GET /api/me/watchlist", () => {
   it("answers an empty list for a wallet that has starred nothing", async () => {
     await expect((await call(sessionHeader(WALLET))).json()).resolves.toEqual([]);
   });
+
+  it("ignores a wallet query parameter: the cookie's wallet answers, never the override", async () => {
+    await setWatch(db, WALLET, T1, true, NOW);
+    await setWatch(db, OTHER, T2, true, NOW);
+    const res = await GET(
+      new Request(`http://localhost:3000/api/me/watchlist?wallet=${OTHER}`, { headers: { cookie: sessionHeader(WALLET) } }),
+    );
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual([T1]);
+  });
 });

@@ -26,6 +26,18 @@ export function cookieValue(header: string | null, name: string): string | null 
   return null;
 }
 
+/**
+ * The caller's address for the pre-auth rate limit: the first hop of `x-forwarded-for`, else
+ * `x-real-ip`, else `"unknown"`. Both headers are client-suppliable on a direct request, which is
+ * fine here — the budget this feeds is a cost bound, not an identity check.
+ */
+export function clientIp(req: Request): string {
+  const forwarded = req.headers.get("x-forwarded-for");
+  const first = forwarded?.split(",")[0]?.trim();
+  if (first) return first;
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
 /** The signed-in wallet, or null: no cookie, a bad signature, an expired token, or no key configured. */
 export function readSession(req: Request): SessionPayload | null {
   const secret = sessionSecret();
