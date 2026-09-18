@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ttlCache } from "@/lib/envio/cache";
 import { getBackend } from "@/lib/market/backend";
 import { priceSwap } from "@/lib/quote/price";
 import { QuoterUnavailableError, createQuoter } from "@/lib/quote/quoter";
@@ -9,6 +10,8 @@ import { badRequest, failure, isAddress } from "../../../_lib/respond";
 export const dynamic = "force-dynamic";
 /** Two quoter simulations plus one store read, comfortably inside the platform's limit. */
 export const maxDuration = 15;
+/** Pair, quote-asset and pool-key lookups are memoised this long; pricing never is. */
+const LOOKUP_TTL_MS = 30_000;
 
 const AMOUNT = /^\d+(\.\d+)?$/;
 const INTEGER = /^\d+$/;
@@ -42,16 +45,24 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
     const backend = getBackend();
     // The trading pool must carry the same quote asset as the pair this token is presented in
     // (C2), or the panel would label, balance-check and gate on one asset while the wallet signed
-    // a Permit2 for another. pair() gives the quote SYMBOL (TokenPair.quote); quotes() — already
-    // cached by the quotes route — maps it to the address poolKey() takes. Neither resolving is
-    // any different from "no listed pool": both read as 404, same as poolKey() itself answering
-    // null.
-    const [pair, quoteAssets] = await Promise.all([backend.pair(id), backend.quotes()]);
+    // a Permit2 for another. pair() gives the quote SYMBOL (TokenPair.quote); quotes() maps it to
+    // the address poolKey() takes. Neither resolving is any different from "no listed pool": both
+    // read as 404, same as poolKey() itself answering null.
+    //
+    // These three lookups are memoised under the same keys the pair and quotes routes use, so a
+    // keystroke costs at most one indexer round trip in a 30 s window, not three: this route is
+    // public, and the indexer's request budget is shared with the sync. Pricing itself, below, is
+    // never memoised.
+    const [pair, quoteAssets] = await Promise.all([
+      ttlCache(`pair:${id}`, LOOKUP_TTL_MS, () => backend.pair(id)),
+      ttlCache("quotes", LOOKUP_TTL_MS, () => backend.quotes()),
+    ]);
     if (!pair) return answer({ error: "no listed pool" }, 404);
     const quoteAsset = quoteAssets.find((q) => q.symbol === pair.quote);
     if (!quoteAsset) return answer({ error: "no listed pool" }, 404);
 
-    const pool = await backend.poolKey(id, quoteAsset.address.toLowerCase());
+    const quoteId = quoteAsset.address.toLowerCase();
+    const pool = await ttlCache(`poolKey:${id}:${quoteId}`, LOOKUP_TTL_MS, () => backend.poolKey(id, quoteId));
     if (!pool) return answer({ error: "no listed pool" }, 404);
 
     const request = { side, amount, denom, slippageBps, holder: holder === "1", pool, origin: pair.origin };

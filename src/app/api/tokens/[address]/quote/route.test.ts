@@ -105,6 +105,21 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect(pair).not.toHaveBeenCalled();
   });
 
+  it("memoises the pair, quote-asset and pool-key lookups across keystrokes, never the price", async () => {
+    exactIn.mockResolvedValue(1_000_000_000_000_000_000n);
+    const first = await call(ADDR, "side=buy&amount=100&denom=quote&slippageBps=100");
+    const second = await call(ADDR, "side=buy&amount=250&denom=quote&slippageBps=100");
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    // Three lookups, one round trip each within the window: this route is public and the
+    // indexer's request budget is shared with the sync.
+    expect(pair).toHaveBeenCalledTimes(1);
+    expect(quotes).toHaveBeenCalledTimes(1);
+    expect(poolKey).toHaveBeenCalledTimes(1);
+    // Pricing is per request: a different amount is a different quote.
+    expect(exactIn).toHaveBeenCalledTimes(2);
+  });
+
   it("answers 404 when the token has no listed pool", async () => {
     poolKey.mockResolvedValue(null);
     const res = await call(ADDR, OK);
