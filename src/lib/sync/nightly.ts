@@ -88,6 +88,9 @@ export async function runNightly(db: Db, source: EnvioSource, opts: CycleOpts & 
     r.routable = probe.routable;
     r.unroutable = probe.unroutable;
     r.skipped = probe.skipped;
+    // A partial outage (some pools answered, some could not be reached) is not an error for the run and
+    // must not read as one in health, but it should not be silent either: counts only, never an address.
+    if (probe.skipped > 0) console.warn(`nightly probe: ${probe.skipped} of ${probe.probed} candidates skipped (quoter unreachable)`);
     afterId = probe.lastId;
     if (!probe.done) return finish(false, "probe");
   }

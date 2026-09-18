@@ -57,6 +57,7 @@ describe("runNightly", () => {
     expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "" });
   });
   it("counts every skipped candidate when the quoter cannot answer, and still finishes the phase (I2b, I4)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await upsertQuotes(db, [quoteRec()], [priceRec()]);
     const src = source();
     const quoter: Quoter = {
@@ -65,6 +66,11 @@ describe("runNightly", () => {
     };
     const result = await runNightly(db, src, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
     expect(result).toEqual({ done: true, phase: "", tokens: 2, pools: 2, listed: 2, probed: 2, routable: 0, unroutable: 0, skipped: 2, queries: 2 });
+    // The partial-outage band is observable in the log too (I4): counts only, no address, no URL.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/2 of 2 candidates skipped/);
+    expect(String(warn.mock.calls[0]?.[0])).not.toMatch(/0x[0-9a-f]{40}|https?:/i);
+    warn.mockRestore();
     expect(await db.query("select routable, probed_at from market.pools order by id")).toEqual([
       { routable: null, probed_at: null },
       { routable: null, probed_at: null },
