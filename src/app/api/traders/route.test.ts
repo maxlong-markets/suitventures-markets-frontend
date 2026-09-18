@@ -50,6 +50,20 @@ describe("GET /api/traders", () => {
     expect(h.topTraders).not.toHaveBeenCalled();
   });
 
+  it("stays behind the no-store answer while TRADERS_BOARD=off, even with a store", async () => {
+    h.hasDb.mockReturnValue(true);
+    vi.stubEnv("TRADERS_BOARD", "off");
+    try {
+      const res = await call();
+      expect(res.status).toBe(503);
+      await expect(res.json()).resolves.toEqual({ error: "traders board needs the market store", code: "no-store" });
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      expect(h.topTraders).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each(["?by=hype", "?by=", "?by=VOLUME"])("rejects %s before touching the store", async (query) => {
     const res = await call(query);
     expect(res.status).toBe(400);

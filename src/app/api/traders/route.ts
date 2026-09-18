@@ -7,7 +7,13 @@ import type { TradersBy } from "@/lib/types";
 import { badRequest, cached, failure } from "../_lib/respond";
 
 export const dynamic = "force-dynamic";
-/** Like every other route here that touches the store; the aggregation's real cost is measured against the seeded store in the R4/R6 runbook steps (review I3). */
+/**
+ * Like every other route here that touches the store. Measured 19 Sep 2026 against the seeded
+ * table (16.6 M rows): about 40 s per ordering, cold or warm — the seed wrote rows in id order, so
+ * the BRIN on `ts` prunes nothing and the 24-hour slice is a full scan. Until the table is
+ * reordered by time or the board reads a rollup, `TRADERS_BOARD=off` keeps the page behind the
+ * honest "needs the market store" answer (see `boardOff`) instead of a 30-second failure.
+ */
 export const maxDuration = 30;
 
 const TTL = 60;
@@ -26,11 +32,16 @@ const LIMIT = 50;
  * unreachable also answers 503, from `failure()` below — but without that code, which is how the
  * data source tells the two apart without matching on either sentence (review I1).
  */
+/** The operator's switch: "off" while the store cannot rank inside the route's duration (see `maxDuration`). */
+function boardOff(): boolean {
+  return process.env.TRADERS_BOARD === "off";
+}
+
 export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get("by") ?? "volume";
   if (raw !== "volume" && raw !== "trades") return badRequest("bad by");
   const by: TradersBy = raw;
-  if (!hasDb()) {
+  if (!hasDb() || boardOff()) {
     return NextResponse.json(
       { error: "traders board needs the market store", code: "no-store" },
       { status: 503, headers: { "Cache-Control": "no-store" } },
