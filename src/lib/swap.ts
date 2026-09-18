@@ -64,6 +64,18 @@ export class SwapFailedError extends Error {
 }
 
 /** The user dismissed the wallet. Nothing was signed and nothing was sent. */
+/**
+ * The transaction reached the chain but its outcome could not be read (an RPC timeout or hiccup
+ * while waiting for the receipt). It may well have succeeded, so this must never tell the user that
+ * nothing was spent: that wording invites a second, duplicate swap.
+ */
+export class SwapUnconfirmedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SwapUnconfirmedError";
+  }
+}
+
 export class SwapRejectedError extends Error {
   constructor(message: string) {
     super(message);
@@ -131,8 +143,13 @@ async function confirm(deps: SwapDeps, router: Address, hash: Address, slippageP
   let receipt;
   try {
     receipt = await deps.publicClient.waitForTransactionReceipt({ hash });
-  } catch (err) {
-    throw mapSwapError(err, slippagePct);
+  } catch {
+    // The transaction is already broadcast. Failing to READ its outcome says nothing about whether
+    // it landed, so this must not be mapped to "nothing was spent": a user told that would
+    // reasonably swap again and pay twice. The hash travels so the toast can link the explorer.
+    throw new SwapUnconfirmedError(
+      "Sent, but we could not confirm it. Check the transaction before trying again.",
+    );
   }
   if (receipt.status === "reverted") throw new SwapFailedError("Swap failed. Nothing was spent.");
   // Filtered by address as well as by event: topic0 is not proof of provenance, and any other
@@ -145,14 +162,18 @@ async function confirm(deps: SwapDeps, router: Address, hash: Address, slippageP
   // therefore done by hand, before anything is decoded, with `isAddressEqual` rather than `===`
   // because a log's address arrives however the RPC cased it.
   const routerLogs = receipt.logs.filter((log) => isAddressEqual(log.address, router));
-  const [trade] = parseEventLogs({
+  const trades = parseEventLogs({
     abi: svRouterAbi,
     eventName: "Trade",
     logs: routerLogs,
   });
   // Without the event there is no honest number to report, so this is a failure, not a zero.
-  if (!trade) throw new SwapFailedError("Swap failed. Nothing was spent.");
-  return { amountOut: trade.args.amountOut, fee: trade.args.fee, holderRate: trade.args.holderRate };
+  // `user` is checked, not just decoded: one transaction can carry several of our router's Trade
+  // logs (a batch or an aggregator), and reporting someone else's amount as this user's would be a
+  // lie in the one place the user trusts a number.
+  const ours = trades.find((t) => isAddressEqual(t.args.user, deps.account));
+  if (!ours) throw new SwapFailedError("Swap failed. Nothing was spent.");
+  return { amountOut: ours.args.amountOut, fee: ours.args.fee, holderRate: ours.args.holderRate };
 }
 
 export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<SwapHandle> {
@@ -181,7 +202,12 @@ export async function executeSwap(req: SwapRequest, deps: SwapDeps): Promise<Swa
         account: deps.account,
         chain: robinhoodChain,
       });
-      await deps.publicClient.waitForTransactionReceipt({ hash: approval });
+      const approvalReceipt = await deps.publicClient.waitForTransactionReceipt({ hash: approval });
+      // A reverted approve leaves the allowance short, so the swap would revert too — but as a
+      // "swap failed", hiding the real cause. Nothing has been spent at this point beyond gas.
+      if (approvalReceipt.status === "reverted") {
+        throw new SwapFailedError("Could not approve the token for trading. Nothing was spent.");
+      }
     }
 
     // 2. One signature, one nonce: Permit2 nonces are unordered bits, so a random one needs no read.

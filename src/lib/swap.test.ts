@@ -17,7 +17,7 @@ import { PERMIT2_ADDRESS } from "@/lib/chain";
 import type { SwapCall } from "@/lib/quote/price";
 import type { Address } from "@/lib/types";
 import { svRouterAbi } from "./swap/abi";
-import { SwapFailedError, SwapRejectedError, executeSwap, type SwapDeps, type SwapRequest } from "./swap";
+import { SwapFailedError, SwapRejectedError, executeSwap, type SwapDeps, type SwapRequest, SwapUnconfirmedError } from "./swap";
 
 // vi.mock's factory is hoisted above every top-level `const`, so the address it returns must be
 // declared through vi.hoisted rather than closed over directly (the same pattern as
@@ -285,5 +285,61 @@ describe("executeSwap", () => {
     );
     h.waitForTransactionReceipt.mockResolvedValueOnce({ status: "reverted", logs: [] });
     await expect((await executeSwap(REQUEST, h.deps)).confirmation).rejects.toBeInstanceOf(SwapFailedError);
+  });
+});
+
+describe("a broadcast swap whose outcome cannot be read", () => {
+  it("never tells the user nothing was spent, and keeps the hash", async () => {
+    const h = harness(maxUint256);
+    h.waitForTransactionReceipt.mockRejectedValue(new Error("timed out while waiting for receipt"));
+    const handle = await executeSwap(REQUEST, h.deps);
+    expect(handle.hash).toBe(SWAP_HASH);
+    await expect(handle.confirmation).rejects.toBeInstanceOf(SwapUnconfirmedError);
+    const err = await handle.confirmation.catch((e: Error) => e);
+    // The wording is the point: "nothing was spent" here would invite a duplicate swap.
+    expect(err.message).not.toMatch(/nothing was spent/i);
+    expect(err.message).toMatch(/could not confirm/i);
+  });
+});
+
+describe("a reverted approval", () => {
+  it("is reported as an approval failure, and the swap is never broadcast", async () => {
+    const h = harness(0n);
+    h.waitForTransactionReceipt.mockResolvedValue({ status: "reverted", logs: [] });
+    await expect(executeSwap(REQUEST, h.deps)).rejects.toThrow(/approve the token/i);
+    const sent = h.writeContract.mock.calls.map((c) => (c[0] as { functionName: string }).functionName);
+    expect(sent).toEqual(["approve"]);
+  });
+});
+
+describe("a Trade event naming another account", () => {
+  it("is not reported as this user's result", async () => {
+    const h = harness(maxUint256);
+    const foreign = tradeLog({ amountOut: 1n, fee: 0n, holderRate: false });
+    // Same router, same event, different user: re-topic it to someone else.
+    const otherUser = `0x${"99".repeat(20)}` as Address;
+    foreign.topics = encodeEventTopics({
+      abi: svRouterAbi,
+      eventName: "Trade",
+      args: { user: otherUser, poolId: POOL_ID, tokenIn: TOKEN_IN },
+    }) as [Hex, ...Hex[]];
+    h.waitForTransactionReceipt.mockResolvedValue({ status: "success", logs: [foreign] });
+    const handle = await executeSwap(REQUEST, h.deps);
+    await expect(handle.confirmation).rejects.toBeInstanceOf(SwapFailedError);
+  });
+
+  it("picks this user's Trade when the transaction carries several", async () => {
+    const h = harness(maxUint256);
+    const otherUser = `0x${"99".repeat(20)}` as Address;
+    const foreign = tradeLog({ amountOut: 1n, fee: 0n, holderRate: false });
+    foreign.topics = encodeEventTopics({
+      abi: svRouterAbi,
+      eventName: "Trade",
+      args: { user: otherUser, poolId: POOL_ID, tokenIn: TOKEN_IN },
+    }) as [Hex, ...Hex[]];
+    const mine = tradeLog({ amountOut: 42n, fee: 7n, holderRate: false });
+    h.waitForTransactionReceipt.mockResolvedValue({ status: "success", logs: [foreign, mine] });
+    const handle = await executeSwap(REQUEST, h.deps);
+    await expect(handle.confirmation).resolves.toMatchObject({ amountOut: 42n, fee: 7n });
   });
 });
