@@ -139,7 +139,7 @@ query PoolKey($id: String!) {
   Token(where: { id: { _eq: $id } }, limit: 1) {
     id address decimals
     primaryPool { ${POOL_KEY_FIELDS} }
-    fallbackPool: pools(where: { ${SANE_PRICE} }, order_by: [{ swapCount: desc }, { lastSwapAt: desc_nulls_last }, { id: asc }], limit: 1) { ${POOL_KEY_FIELDS} }
+    fallbackPool: pools(where: { ${SANE_PRICE} }, order_by: [{ swapCount: desc }, { id: asc }], limit: 1) { ${POOL_KEY_FIELDS} }
   }
 }`;
 

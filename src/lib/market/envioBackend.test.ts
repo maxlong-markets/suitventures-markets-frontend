@@ -58,7 +58,7 @@ describe("createEnvioBackend", () => {
     // of the rule this file *can* pin: the client-side choice between primary and fallback).
     const fallback = POOL_KEY_QUERY.slice(POOL_KEY_QUERY.indexOf("fallbackPool"));
     expect(fallback).toContain(
-      'pools(where: { priceQuote: { _gt: "1e-24", _lt: "1e18" } }, order_by: [{ swapCount: desc }, { lastSwapAt: desc_nulls_last }, { id: asc }], limit: 1)',
+      'pools(where: { priceQuote: { _gt: "1e-24", _lt: "1e18" } }, order_by: [{ swapCount: desc }, { id: asc }], limit: 1)',
     );
   });
 
