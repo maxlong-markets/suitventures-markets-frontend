@@ -35,11 +35,11 @@ describe("GET /api/traders", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it("answers 503 with a sentence the page can print when there is no store", async () => {
+  it("answers 503 with a sentence the page can print and a machine-readable code when there is no store", async () => {
     h.hasDb.mockReturnValue(false);
     const res = await call();
     expect(res.status).toBe(503);
-    await expect(res.json()).resolves.toEqual({ error: "traders board needs the market store" });
+    await expect(res.json()).resolves.toEqual({ error: "traders board needs the market store", code: "no-store" });
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     expect(h.topTraders).not.toHaveBeenCalled();
   });
@@ -51,15 +51,25 @@ describe("GET /api/traders", () => {
     expect(h.topTraders).not.toHaveBeenCalled();
   });
 
-  it("ranks by volume over the last 24 hours by default, top 50, cached a minute", async () => {
+  it("ranks by volume over the last 24 hours by default, top 50, cached a minute, with a window that moves with the clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_789_000_000_000);
     const res = await call();
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual([ROW]);
     expect(res.headers.get("Cache-Control")).toBe("public, s-maxage=60, stale-while-revalidate=60");
-    const opts = h.topTraders.mock.calls[0][1];
-    expect(opts.by).toBe("volume");
-    expect(opts.limit).toBe(50);
-    expect(Math.floor(Date.now() / 1000) - opts.sinceTs).toBe(86_400);
+    const first = h.topTraders.mock.calls[0][1];
+    expect(first.by).toBe("volume");
+    expect(first.limit).toBe(50);
+    expect(first.sinceTs).toBe(1_789_000_000 - 86_400);
+
+    // Past the memo's 60 s TTL: a `sinceTs` hoisted to module scope would stay put here, but the
+    // loader recomputes it against the clock every time the memo refills (review M3/M4).
+    vi.setSystemTime(1_789_000_000_000 + 61_000);
+    await call();
+    const second = h.topTraders.mock.calls[1][1];
+    expect(second.sinceTs).toBe(first.sinceTs + 61);
+    vi.useRealTimers();
   });
 
   it("takes the trades ordering when asked for it", async () => {
@@ -75,10 +85,14 @@ describe("GET /api/traders", () => {
     expect(h.topTraders).toHaveBeenCalledTimes(2);
   });
 
-  it("answers 503 when the database itself is unreachable", async () => {
+  it("answers 503 with no code when the database itself is unreachable — a different condition than a missing store", async () => {
     h.topTraders.mockRejectedValue(new DbUnavailableError("database unavailable (ECONNREFUSED)"));
     const res = await call();
     expect(res.status).toBe(503);
-    await expect(res.json()).resolves.toEqual({ error: "database unavailable" });
+    const body = (await res.json()) as { error: string; code?: string };
+    // toEqual already fails if an extra `code` key snuck in; the explicit check makes the intent
+    // impossible to miss on a future read.
+    expect(body).toEqual({ error: "database unavailable" });
+    expect(body.code).toBeUndefined();
   });
 });

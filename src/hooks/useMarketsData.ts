@@ -2,6 +2,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useDataSource } from "@/context/DataSource";
+import { StoreUnavailableError } from "@/lib/data/envio";
 import type { Denom, Interval, Side, TokenPair, TradersBy } from "@/lib/types";
 
 export const keys = {
@@ -115,5 +116,8 @@ export function useTraders(by: TradersBy) {
     queryFn: () => ds.traders(by),
     // The route caches for 60 s; asking more often than that only moves bytes.
     staleTime: 60_000,
+    // A missing store is a deploy step, not a blip (review M2): retrying it only delays the note
+    // the board already knows how to show. Any other failure still gets the usual three attempts.
+    retry: (count, err) => !(err instanceof StoreUnavailableError) && count < 3,
   });
 }

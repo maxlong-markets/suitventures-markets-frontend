@@ -39,7 +39,7 @@
 5. **`TraderRow` is declared exactly once in `src/lib/types.ts`, by Task 2 Step 3**, and re-exported from the store module (`export type { TraderRow } from "@/lib/types";`, already in Task 2's `store.ts`); client components import it from `types`. Task 5 adds only `TradersBy` and the `traders` method — it must not re-declare the row.
 6. **`MarketsDataSource.vote` returns `Promise<VoteDir | null>`**, the resulting state, matching the route.
 7. **Address comparisons between the cookie (lowercase) and the wallet (checksummed) are case-insensitive.**
-8. **A 503 from `/api/traders` is `StoreUnavailableError`** so the board distinguishes "no store yet" from "request failed" without string matching.
+8. **A 503 from `/api/traders` whose body carries `code: "no-store"` is `StoreUnavailableError`**; any other 503 (the database being unavailable) is an ordinary failure, so the board distinguishes "no store yet" from "request failed" without string matching.
 9. **`src/lib/data/localStore.ts` is deleted** with its only importer; the demo source's own storage is untouched.
 10. **Task 6 commits twice**: the frontend repo and, separately, the workspace README with the frontend gitlink.
 11. **The nonce is `randomBytes(16)` hex**, never viem's `generateSiweNonce` (see the verified facts).

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { StoreUnavailableError } from "@/lib/data/envio";
 import type { Address, TraderRow } from "@/lib/types";
 import { queryHarness, renderHook, waitFor } from "@/test/dom";
 import { keys, useTraders, useVotes, useWatchlist } from "./useMarketsData";
@@ -34,6 +35,14 @@ describe("useMarketsData", () => {
     expect(h.ds.traders).toHaveBeenCalledWith("trades");
     expect(keys.traders("trades")).toEqual(["traders", "trades"]);
     expect(keys.traders("volume")).not.toEqual(keys.traders("trades"));
+  });
+
+  it("gives up after one try when the store is missing, rather than retrying a permanent condition", async () => {
+    const { wrapper } = queryHarness();
+    h.ds.traders.mockReset().mockRejectedValue(new StoreUnavailableError("traders board needs the market store"));
+    const { result } = renderHook(() => useTraders("volume"), { wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(h.ds.traders).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the user's lists unfetched until the caller says a session exists", async () => {

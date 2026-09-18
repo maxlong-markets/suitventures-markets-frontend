@@ -17,8 +17,11 @@ const LIMIT = 50;
  * swap's `wallet` as the transaction sender, so a routed trade counts for the person who made it
  * rather than for the router.
  *
- * Without a database there is nothing to rank: 503 with a plain sentence the page can print, and
- * `no-store`, so the CDN does not hold that answer past the deploy that configures the store.
+ * Without a database there is nothing to rank: 503 with a plain sentence the page can print, a
+ * `code: "no-store"` the data source matches on, and `no-store`, so the CDN does not hold that
+ * answer past the deploy that configures the store. A database that *is* configured but
+ * unreachable also answers 503, from `failure()` below — but without that code, which is how the
+ * data source tells the two apart without matching on either sentence (review I1).
  */
 export async function GET(req: Request) {
   const raw = new URL(req.url).searchParams.get("by") ?? "volume";
@@ -26,7 +29,7 @@ export async function GET(req: Request) {
   const by: TradersBy = raw;
   if (!hasDb()) {
     return NextResponse.json(
-      { error: "traders board needs the market store" },
+      { error: "traders board needs the market store", code: "no-store" },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }

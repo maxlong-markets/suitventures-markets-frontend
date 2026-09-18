@@ -217,7 +217,13 @@ describe("EnvioDataSource sessions and user data", () => {
     return {
       ok: answer.status >= 200 && answer.status < 300,
       status: answer.status,
-      json: async () => answer.body,
+      // A route entry with no `body` at all models an empty response: real `Response#json()`
+      // throws on one, and the traders 503 path's `.catch(() => null)` (review I1) needs a real
+      // rejection here to prove it treats that the same as any other non-"no-store" 503.
+      json: async () => {
+        if (answer.body === undefined) throw new SyntaxError("Unexpected end of JSON input");
+        return answer.body;
+      },
     } as unknown as Response;
   });
 
@@ -369,9 +375,24 @@ describe("EnvioDataSource sessions and user data", () => {
     expect(calls.map((c) => c.url)).toEqual(["/api/traders?by=trades"]);
   });
 
-  it("turns the route's 503 into StoreUnavailableError, which the board can tell apart", async () => {
-    routes["GET /api/traders"] = { status: 503, body: { error: "traders board needs the market store" } };
+  it("turns the route's 503 into StoreUnavailableError only when its body carries the no-store code", async () => {
+    routes["GET /api/traders"] = {
+      status: 503,
+      body: { error: "traders board needs the market store", code: "no-store" },
+    };
     await expect(source().traders("volume")).rejects.toBeInstanceOf(StoreUnavailableError);
+  });
+
+  it("throws a plain error for a 503 without the code — a database outage, not a missing store", async () => {
+    routes["GET /api/traders"] = { status: 503, body: { error: "database unavailable" } };
+    await expect(source().traders("volume")).rejects.toThrow("503");
+    await expect(source().traders("volume")).rejects.not.toBeInstanceOf(StoreUnavailableError);
+  });
+
+  it("throws a plain error for a 503 whose body is not JSON at all", async () => {
+    routes["GET /api/traders"] = { status: 503 }; // no body — the mock's json() rejects, as an empty response would
+    await expect(source().traders("volume")).rejects.toThrow("503");
+    await expect(source().traders("volume")).rejects.not.toBeInstanceOf(StoreUnavailableError);
   });
 
   it("throws a plain error for any other traders failure", async () => {

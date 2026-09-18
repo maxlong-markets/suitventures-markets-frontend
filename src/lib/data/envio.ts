@@ -133,7 +133,13 @@ export class EnvioDataSource implements MarketsDataSource {
 
   async traders(by: TradersBy): Promise<TraderRow[]> {
     const res = await fetch(`/api/traders?by=${by}`, { cache: "no-store" });
-    if (res.status === 503) throw new StoreUnavailableError("traders board needs the market store");
+    if (res.status === 503) {
+      // The route's two 503s differ only by this field (review I1): a missing store carries
+      // `code: "no-store"`, a database outage does not. `.catch(() => null)` treats a non-JSON
+      // or empty body the same as any other shape that isn't this one — the ordinary error below.
+      const body = (await res.json().catch(() => null)) as { code?: string } | null;
+      if (body?.code === "no-store") throw new StoreUnavailableError("traders board needs the market store");
+    }
     if (!res.ok) throw new Error(`/api/traders: ${res.status}`);
     return (await res.json()) as TraderRow[];
   }
