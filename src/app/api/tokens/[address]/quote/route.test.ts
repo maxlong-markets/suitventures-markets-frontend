@@ -168,6 +168,30 @@ describe("GET /api/tokens/[address]/quote", () => {
     expect(exactIn).toHaveBeenCalledTimes(1);
   });
 
+  it("prices two concurrent requests for the same pool independently: a refusal is never shared", async () => {
+    // The bug this pins: pricing used to run inside `ttlCache`'s loader, so a concurrent request
+    // for the same pool key could inherit whichever outcome the in-flight call happened to produce.
+    // A huge amount the pool refuses and a small one it serves happily, requested at the same time,
+    // must each be priced on their own numbers — never on the other request's.
+    exactIn.mockImplementation(async (call: QuoterCall) => {
+      // amount=100 nets 99_500_000 (6 dp); amount=100000000 nets 99_500_000_000_000 — comfortably
+      // apart, so the mock can tell the two requests' own calls apart without a shared counter.
+      if (call.exactAmount > 1_000_000_000n) throw new NotRoutableError("pool cannot be routed");
+      return 199n * 10n ** 18n;
+    });
+    const [refused, servable] = await Promise.all([
+      call(ADDR, "side=buy&amount=100000000&denom=quote&slippageBps=100"),
+      call(ADDR, OK), // amount=100
+    ]);
+    expect(refused.status).toBe(200);
+    await expect(refused.json()).resolves.toEqual({ routable: false });
+    expect(servable.status).toBe(200);
+    const body = (await servable.json()) as { routable: boolean; receiveAmount: string };
+    expect(body.routable).toBe(true);
+    expect(body.receiveAmount).toBe("199");
+    expect(exactIn).toHaveBeenCalledTimes(2);
+  });
+
   it("caches the routable verdict but never the price: every request is quoted afresh", async () => {
     exactIn.mockResolvedValue(199n * 10n ** 18n);
     await call(ADDR, OK);

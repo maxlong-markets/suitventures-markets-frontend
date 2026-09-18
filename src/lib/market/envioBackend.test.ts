@@ -47,7 +47,19 @@ describe("createEnvioBackend", () => {
     expect(gqlMock).toHaveBeenCalledTimes(1);
   });
 
+  it("poolKey()'s fallback does not require a swap count, unlike the market-listing query", () => {
+    // TOKEN_QUERY's fallbackPool (what pairs/candles/trades list) filters on swapCount > 0 — the
+    // store's listed_pool_id has the same rule (LISTED_POOL, spec section 6). Trading is a looser
+    // bar: a fresh launch with liquidity and zero trades is still perfectly routable, so
+    // POOL_KEY_QUERY's own fallback must never filter on swaps (Fix D; MarketBackend.poolKey) —
+    // though it may still *prefer* the most-traded sane pool as a tie-break.
+    const fallback = POOL_KEY_QUERY.slice(POOL_KEY_QUERY.indexOf("fallbackPool"));
+    expect(fallback).not.toContain("swapCount: { _gt: 0 }");
+    expect(fallback).toContain("swapCount: desc");
+  });
+
   it("poolKey() resolves the same listed pool as pair() and lowercases every address", async () => {
+    // Also how a never-swapped sane pool is found now: the fallback query above no longer excludes it.
     gqlMock.mockImplementation(async (query) => {
       if (query === POOL_KEY_QUERY) return { Token: [aiPoolKey] } as never;
       throw new Error(`unexpected query ${query.slice(0, 30)}`);
@@ -74,6 +86,8 @@ describe("createEnvioBackend", () => {
   it("poolKey() is null for an unknown token and for one whose every pool is parked at a boundary", async () => {
     gqlMock.mockResolvedValue({ Token: [] });
     expect(await backend.poolKey(AI)).toBeNull();
+    // AI's only sane pool is gone (fallbackPool: []) and the primary is the insane 3.4e50 one: the
+    // widened fallback must not paper over a genuinely insane price (Fix D).
     gqlMock.mockResolvedValue({ Token: [{ ...aiPoolKey, fallbackPool: [] }] });
     expect(await backend.poolKey(AI)).toBeNull();
   });

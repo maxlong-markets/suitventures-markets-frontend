@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { ttlCache } from "@/lib/envio/cache";
 import { getBackend } from "@/lib/market/backend";
-import { priceSwap, type PriceResult } from "@/lib/quote/price";
+import { priceSwap } from "@/lib/quote/price";
 import { QuoterUnavailableError, createQuoter } from "@/lib/quote/quoter";
 import type { Denom, Side } from "@/lib/types";
 import { badRequest, failure, isAddress } from "../../../_lib/respond";
@@ -47,20 +47,21 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
 
     const request = { side, amount, denom, slippageBps, holder: holder === "1", pool };
     const quoter = createQuoter();
-    // The quote for this pool prices inside the loader and records only the verdict; no priced
-    // answer is ever kept. The loader returns `true` for a pool the quoter priced and `undefined`
-    // for a refusal — and `ttlCache` stores nothing for `undefined`, because the quoter also
-    // refuses an amount this pool's liquidity cannot serve and the key is the pool alone. One
-    // dust-sized keystroke must never lock a live pool out for five minutes (ruling 6).
-    const probe: { priced: PriceResult | null } = { priced: null };
-    const routable = await ttlCache<true | undefined>(`routable:${pool.poolId}`, ROUTABLE_TTL_MS, async () => {
-      const priced = await priceSwap(quoter, request);
-      probe.priced = priced;
-      return priced.routable ? true : undefined;
-    });
-    // `probe.priced` is null only when the cached `true` short-circuited the loader.
-    if (!routable) return answer(probe.priced ?? { routable: false });
-    return answer(probe.priced ?? (await priceSwap(quoter, request)));
+    // Pricing runs per request, never inside `ttlCache`: two concurrent requests for the same pool
+    // — the normal case in a debounced typing UI, not an edge case — must never share one outcome
+    // (ruling 6). Sharing an in-flight *pricing* promise let a huge refused amount hand
+    // `routable: false` to a concurrent request for a perfectly servable amount, with the quoter
+    // called only once. A refusal must leave no trace any other request can observe, so it is
+    // never written to the cache below.
+    const priced = await priceSwap(quoter, request);
+    if (priced.routable) {
+      // Populate-if-absent, D28: the loader here is a bare `true`, independent of this request's
+      // own numbers, so two concurrent callers sharing its in-flight promise is harmless — unlike
+      // pricing, whose outcome depends on the caller's own amount. This is write-only from the
+      // route's point of view: nothing here ever reads the cache to decide a response.
+      await ttlCache(`routable:${pool.poolId}`, ROUTABLE_TTL_MS, async () => true);
+    }
+    return answer(priced);
   } catch (err) {
     // toBase() rejects anything the query validation let through; the user sees one message.
     if (err instanceof RangeError) return badRequest("bad amount");

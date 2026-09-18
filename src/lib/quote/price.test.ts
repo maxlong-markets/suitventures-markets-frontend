@@ -28,6 +28,14 @@ const POOL: PoolKeyRow = {
   quoteDecimals: 6,
 };
 
+/** The same pool, but built the other way round: the quote is currency0 and the token is currency1. */
+const POOL_QUOTE_CURRENCY0: PoolKeyRow = {
+  ...POOL,
+  currency0: QUOTE,
+  currency1: TOKEN,
+  tokenIsCurrency0: false,
+};
+
 type Answer = bigint | Error;
 type Recorded = { fn: "exactIn" | "exactOut"; zeroForOne: boolean; exactAmount: bigint; poolId: Address };
 
@@ -120,6 +128,38 @@ describe("priceSwap", () => {
     expect(res.priceImpactPct).toBeCloseTo(0, 6);
   });
 
+  it("buys against a pool where the token is currency1, so the swap is one-for-zero", async () => {
+    // Both fixtures above set tokenIsCurrency0: true; this is the untested other half of the
+    // direction table (review I2): buy against a currency0=QUOTE pool must give zeroForOne: true.
+    const { quoter, calls } = fakeQuoter([199n * 10n ** 18n]);
+    const res = routable(await priceSwap(quoter, req({ pool: POOL_QUOTE_CURRENCY0 })));
+    expect(calls).toEqual([
+      { fn: "exactIn", zeroForOne: true, exactAmount: 99_500_000n, poolId: POOL_QUOTE_CURRENCY0.poolId },
+    ]);
+    expect(res.call.zeroForOne).toBe(true);
+    expect(res.call.tokenIn).toBe(QUOTE);
+    expect(res.call.tokenOut).toBe(TOKEN);
+    expect(res.call.tokenInDecimals).toBe(6);
+    expect(res.call.tokenOutDecimals).toBe(18);
+    expect(Number(res.receiveAmount)).toBe(199);
+  });
+
+  it("sells against a pool where the token is currency1, so the swap is zero-for-one", async () => {
+    // The other untested half (review I2): sell against a currency0=QUOTE pool must give
+    // zeroForOne: false — the mirror image of "sells the pair token, which is currency0" above.
+    const { quoter, calls } = fakeQuoter([49_750_000n]);
+    const res = routable(await priceSwap(quoter, req({ side: "sell", denom: "token", pool: POOL_QUOTE_CURRENCY0 })));
+    expect(calls).toEqual([
+      { fn: "exactIn", zeroForOne: false, exactAmount: 99_500_000_000_000_000_000n, poolId: POOL_QUOTE_CURRENCY0.poolId },
+    ]);
+    expect(res.call.zeroForOne).toBe(false);
+    expect(res.call.tokenIn).toBe(TOKEN);
+    expect(res.call.tokenOut).toBe(QUOTE);
+    expect(res.call.tokenInDecimals).toBe(18);
+    expect(res.call.tokenOutDecimals).toBe(6);
+    expect(Number(res.receiveAmount)).toBe(49.75);
+  });
+
   it("inverts a buy typed in the token: exact-output, gross up past the fee, then re-quote exact-in", async () => {
     // The pool needs 99.6 quote net for the 200 tokens asked; grossed up that is 100.100503 quote,
     // whose net of 99.600001 buys a shade more than the 200 typed — and that is what is reported.
@@ -160,6 +200,18 @@ describe("priceSwap", () => {
     const inverted = fakeQuoter([new NotRoutableError("pool cannot be routed")]);
     expect(await priceSwap(inverted.quoter, req({ denom: "token" }))).toEqual({ routable: false });
     expect(inverted.calls).toHaveLength(1); // the exact-out leg failed; no second call was made
+  });
+
+  it("treats a quoted 0 as an honest zero, not a refusal (review I3 — pin decision 4)", async () => {
+    // Only the quoter's own NotRoutableError verdict may answer routable: false. A pool that
+    // quotes a genuine 0 (e.g. an amount below its smallest tradeable unit) is still routable.
+    const { quoter, calls } = fakeQuoter([0n]);
+    const res = routable(await priceSwap(quoter, req()));
+    expect(calls).toHaveLength(1);
+    expect(res.receiveAmount).toBe("0");
+    expect(res.minReceived).toBe("0");
+    expect(res.call.amountOutMin).toBe("0");
+    expect(res.priceImpactPct).toBe(0);
   });
 
   it("lets a failure that is not a routability verdict through", async () => {

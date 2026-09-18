@@ -123,16 +123,23 @@ query Token($id: String!) {
 const POOL_KEY_FIELDS = "id quote_id tokenIsCurrency0 hooks fee tickSpacing priceQuote quote { address decimals }";
 
 /**
- * One token's listed pool, resolved by the same primary-then-fallback rule as TOKEN_QUERY, with
- * the quote's own address — the field QUOTES_QUERY already selects on the same entity — because a
- * PoolKey needs both currencies and `quote_id` is an id, not an address the swap can sign over.
+ * One token's pool to trade against: the same TVL-picked `primaryPool` as TOKEN_QUERY, but a
+ * *wider* fallback than TOKEN_QUERY's own. TOKEN_QUERY's `fallbackPool` (market listing — what
+ * pairs/candles/trades show) requires `swapCount: { _gt: 0 }`, mirroring the store's
+ * `listed_pool_id`. Trading is a looser bar: any sane-priced pool is routable whether or not it
+ * has swapped yet, because a freshly launched token can have liquidity and zero trades and still
+ * be perfectly tradeable (see MarketBackend.poolKey) — so this fallback drops the swap-count
+ * filter and orders by swap count, then recency, then id, so the pick is deterministic.
+ * Carries the quote's own address — the field QUOTES_QUERY already selects on the same entity —
+ * because a PoolKey needs both currencies and `quote_id` is an id, not an address the swap can
+ * sign over.
  */
 export const POOL_KEY_QUERY = `
 query PoolKey($id: String!) {
   Token(where: { id: { _eq: $id } }, limit: 1) {
     id address decimals
     primaryPool { ${POOL_KEY_FIELDS} }
-    fallbackPool: pools(where: { swapCount: { _gt: 0 }, ${SANE_PRICE} }, order_by: { swapCount: desc }, limit: 1) { ${POOL_KEY_FIELDS} }
+    fallbackPool: pools(where: { ${SANE_PRICE} }, order_by: [{ swapCount: desc }, { lastSwapAt: desc_nulls_last }, { id: asc }], limit: 1) { ${POOL_KEY_FIELDS} }
   }
 }`;
 

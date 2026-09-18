@@ -65,6 +65,18 @@ const HOLDERS_SQL = `select holder, balance::text as balance from market.token_b
 const POOL_KEY_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_spacing, p.token_is_currency0, p.price_quote,
   t.address as token_address, t.decimals as token_decimals, q.address as quote_address, q.decimals as quote_decimals
   from market.tokens t join market.pools p on p.id = t.listed_pool_id join market.quotes q on q.id = p.quote_id where t.id = $1`;
+/**
+ * The trading fallback for `poolKey()` (see MarketBackend.poolKey): reached only when the token
+ * has no *listed* pool (`listed_pool_id` is null — `recomputeListedPools`'s `LISTED_POOL` requires
+ * `swap_count > 0`, spec section 6, untouched here). Any pool with a sane price is routable, swap
+ * count included or not, so a freshly launched token with liquidity and no trades yet is still
+ * tradeable. Same tie-break as `LISTED_POOL`: highest swap count, then most recent swap, then id.
+ */
+const POOL_KEY_FALLBACK_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_spacing, p.token_is_currency0, p.price_quote,
+  t.address as token_address, t.decimals as token_decimals, q.address as quote_address, q.decimals as quote_decimals
+  from market.pools p join market.tokens t on t.id = p.token_id join market.quotes q on q.id = p.quote_id
+  where p.token_id = $1 and p.price_quote > 1e-24 and p.price_quote < 1e18
+  order by p.swap_count desc, p.last_swap_at desc nulls last, p.id limit 1`;
 const REFRESH_SQL = `select refreshed_at from market.holder_refresh where token_id = $1`;
 const QUOTES_SQL = `select id, address, symbol, name, decimals, usd_price, usd_updated_at, aggregator from market.quotes order by id`;
 const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('market', 'nightly')`;
@@ -127,8 +139,11 @@ export function createDbBackend(db: Db, source: EnvioSource, now: () => number =
       return { holders: shapeHolders(rows, token.decimals, BigInt(token.total_supply)), count: token.holders_count };
     },
     async poolKey(tokenId) {
-      const row = (await db.query<PoolKeyCols>(POOL_KEY_SQL, [tokenId]))[0];
-      if (!row) return null; // no such token, or no listed pool: the join drops it either way
+      // The listed pool first, so a quote routes through the same pool the table and chart show;
+      // the wider sane-price fallback only when nothing is listed (fresh launch, no trades yet).
+      const row = (await db.query<PoolKeyCols>(POOL_KEY_SQL, [tokenId]))[0]
+        ?? (await db.query<PoolKeyCols>(POOL_KEY_FALLBACK_SQL, [tokenId]))[0];
+      if (!row) return null; // no such token, or no sane pool at all
       return poolKeyRow({
         poolId: row.pool_id,
         hooks: row.hooks,

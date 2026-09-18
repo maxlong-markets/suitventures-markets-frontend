@@ -303,12 +303,23 @@ describe("createDbBackend poolKey", () => {
   // One more token whose pool was created with the quote as currency0; the fixtures above are all token-first.
   const F = addr("8");
   const PF = poolId("8");
+  // A token whose only pool prices insanely: the fallback must not treat it as routable either.
+  const G = addr("g");
+  const PG = poolId("g");
 
   beforeAll(async () => {
     db = await testDb();
     await upsertQuotes(db, quotes, prices);
-    await upsertTokens(db, [...tokens, tokenRec(F, "FFF", "LONG", PF)], NOW);
-    await upsertPools(db, [...pools, poolRec(PF, F, USDG, { tokenIsCurrency0: false, fee: 500, tickSpacing: 10, lastSwapAt: NOW - 3000 })], NOW);
+    await upsertTokens(db, [...tokens, tokenRec(F, "FFF", "LONG", PF), tokenRec(G, "GGG", "LONG", PG)], NOW);
+    await upsertPools(
+      db,
+      [
+        ...pools,
+        poolRec(PF, F, USDG, { tokenIsCurrency0: false, fee: 500, tickSpacing: 10, lastSwapAt: NOW - 3000 }),
+        poolRec(PG, G, NVDA, { priceQuote: "3.4e50" }), // parked at a tick boundary, like PB_BROKEN
+      ],
+      NOW,
+    );
     await recomputeListedPools(db, "all");
   });
   afterAll(() => db.end());
@@ -348,8 +359,31 @@ describe("createDbBackend poolKey", () => {
     expect(await backend().poolKey(B)).toMatchObject({ poolId: PB, currency1: USDG, priceQuote: 0.5, quoteDecimals: 6 });
   });
 
-  it("is null for a token with no listed pool and for one that does not exist", async () => {
-    expect(await backend().poolKey(D)).toBeNull();
+  it("is null for a token that does not exist", async () => {
     expect(await backend().poolKey(addr("0"))).toBeNull();
+  });
+
+  it("falls back to the token's best sane pool when nothing is listed for market data: a fresh launch with liquidity but no trades yet is still routable", async () => {
+    // D's only pool never swapped (poolRec above: swapCount: 0), so LISTED_POOL leaves
+    // listed_pool_id null and D is absent from pairs('all') — but trading does not depend on a
+    // pool having already traded (Fix D).
+    expect(await backend().poolKey(D)).toEqual({
+      poolId: PD,
+      currency0: D,
+      currency1: NVDA,
+      fee: 3000,
+      tickSpacing: 60,
+      hooks: addr("9"),
+      tokenIsCurrency0: true,
+      priceQuote: 0.000866,
+      tokenAddress: D,
+      tokenDecimals: 18,
+      quoteAddress: NVDA,
+      quoteDecimals: 18,
+    });
+  });
+
+  it("still answers null when the token's only pool prices insanely, fallback included", async () => {
+    expect(await backend().poolKey(G)).toBeNull();
   });
 });

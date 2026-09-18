@@ -64,6 +64,8 @@ export function createEnvioBackend(): MarketBackend {
       const rows = await gql<{ TokenBalance: BalanceRow[] }>(HOLDERS_QUERY, { token: id });
       return { holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)), count: token.holdersCount };
     },
+    // POOL_KEY_QUERY's own fallbackPool is wider than TOKEN_QUERY's (no swap-count floor): trading
+    // is routable, not listed — see MarketBackend.poolKey and the query's own doc comment.
     async poolKey(tokenId) {
       const t = await gql<{ Token: PoolKeyTokenRow[] }>(POOL_KEY_QUERY, { id: tokenId });
       const token = t.Token[0];

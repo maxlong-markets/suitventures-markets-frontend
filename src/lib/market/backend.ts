@@ -26,7 +26,19 @@ export interface MarketBackend {
   candles(id: string, interval: IndexerInterval): Promise<Candle[]>;
   trades(id: string): Promise<Trade[]>;
   holders(id: string): Promise<{ holders: Holder[]; count: number }>;
-  /** The listed pool's v4 PoolKey, the direction flag and both assets' decimals; null when the token has no listed pool. */
+  /**
+   * A v4 PoolKey to trade against, the direction flag and both assets' decimals. Two different
+   * meanings of "the token's pool" meet here, and this method answers the trading one:
+   * - **Listed, for market data** — the table, the chart, the trade list. Decided by
+   *   `listed_pool_id` / `recomputeListedPools`'s `LISTED_POOL` (spec section 6), which requires
+   *   `swap_count > 0`. A product decision this method does not own or change.
+   * - **Routable, for trading** — a looser bar: any pool with a sane price, swapped or not,
+   *   because a freshly launched token can have liquidity and zero trades and still be perfectly
+   *   tradeable. This method prefers the listed pool when one exists (so a quote routes through
+   *   the same pool the rest of the app shows), and falls back to the token's best sane pool —
+   *   highest swap count, ties broken deterministically — only when nothing is listed.
+   * Null only when the token has no sane pool at all.
+   */
   poolKey(tokenId: string): Promise<PoolKeyRow | null>;
   health(): Promise<HealthReport>;
 }
