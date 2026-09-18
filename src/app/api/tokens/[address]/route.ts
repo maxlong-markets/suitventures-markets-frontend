@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { ttlCache } from "@/lib/envio/cache";
 import { getBackend } from "@/lib/market/backend";
+import { withVoteCounts } from "../../_lib/counts";
 import { badRequest, cached, failure, isAddress } from "../../_lib/respond";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +18,9 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
       // Unknown is a fact for the next 30 s too, so the CDN may hold it as long as the list.
       return NextResponse.json({ error: "unknown token" }, { status: 404, headers: { "Cache-Control": `public, s-maxage=${TTL}, stale-while-revalidate=60` } });
     }
-    return cached(pair, TTL);
+    // Merged onto a copy after the memo answered: `ttlCache` hands every caller the same object.
+    const [withCounts] = await withVoteCounts([pair]);
+    return cached(withCounts, TTL);
   } catch (err) {
     return failure(err);
   }
