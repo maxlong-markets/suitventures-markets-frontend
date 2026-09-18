@@ -1,5 +1,5 @@
 import { defineChain } from "viem";
-import type { Address, Origin } from "./types";
+import type { Address, Origin, TokenPair } from "./types";
 
 /** Robinhood Chain — Arbitrum Orbit L2, chain id 4663, gas in ETH. */
 export const robinhoodChain = defineChain({
@@ -33,8 +33,19 @@ export function addressUrl(address: string): string {
   return `${EXPLORER_URL}/address/${address}`;
 }
 
-/** Where an untradeable pool sends the user instead; no origin has a URL yet. */
-export const ORIGIN_URLS: Partial<Record<Origin, string>> = {};
+/** Per-origin launchpad page for a token; empty pattern = no link yet. `{address}` is replaced with the lowercase token address. Patterns come from MAXLONG (README section 2). */
+export const LAUNCHPAD_URL_PATTERNS: Partial<Record<Origin, string>> = { LONG: "", Pons: "" };
+
+/**
+ * Where an untradeable pool sends the user instead: the origin's launchpad page for this
+ * token, or `undefined` when the origin has no pattern yet (`UntradeableCard` then renders
+ * its text without a button, exactly as before this existed).
+ */
+export function launchpadUrl(pair: Pick<TokenPair, "origin" | "address">): string | undefined {
+  const pattern = LAUNCHPAD_URL_PATTERNS[pair.origin];
+  if (!pattern) return undefined;
+  return pattern.replaceAll("{address}", pair.address.toLowerCase());
+}
 
 /** Permit2, the same canonical address on every chain it is deployed to. */
 export const PERMIT2_ADDRESS: Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3";

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PERMIT2_ADDRESS, UNIVERSAL_ROUTER_ADDRESS, V4_QUOTER_ADDRESS, robinhoodChain } from "./chain";
+import {
+  LAUNCHPAD_URL_PATTERNS,
+  PERMIT2_ADDRESS,
+  UNIVERSAL_ROUTER_ADDRESS,
+  V4_QUOTER_ADDRESS,
+  launchpadUrl,
+  robinhoodChain,
+} from "./chain";
+import type { Address } from "./types";
 
 /** The module reads NEXT_PUBLIC_SVROUTER_ADDRESS once, at import, so a stubbed value needs a fresh module. */
 async function reload(value: string) {
@@ -39,5 +47,41 @@ describe("chain constants", () => {
       expect(m.SVROUTER_ADDRESS).toBeUndefined();
       expect(m.hasRouter()).toBe(false);
     }
+  });
+});
+
+describe("launchpadUrl", () => {
+  const MIXED_CASE = "0xABCDEF0123456789ABCDEF0123456789ABCDEF01" as Address;
+  const LOWER = "0xabcdef0123456789abcdef0123456789abcdef01";
+
+  afterEach(() => {
+    // A couple of tests below mutate the exported pattern map to exercise substitution;
+    // restore the shipped (currently empty, per spec section 3) patterns afterward so no
+    // test's mutation leaks into another.
+    LAUNCHPAD_URL_PATTERNS.LONG = "";
+    LAUNCHPAD_URL_PATTERNS.Pons = "";
+  });
+
+  it("substitutes {address} with the token address", () => {
+    LAUNCHPAD_URL_PATTERNS.LONG = "https://longmarkets.example/token/{address}";
+    expect(launchpadUrl({ origin: "LONG", address: LOWER as Address })).toBe(
+      "https://longmarkets.example/token/0xabcdef0123456789abcdef0123456789abcdef01",
+    );
+  });
+
+  it("lowercases a mixed-case address before substituting", () => {
+    LAUNCHPAD_URL_PATTERNS.Pons = "https://bags.example/{address}/trade";
+    expect(launchpadUrl({ origin: "Pons", address: MIXED_CASE })).toBe(
+      `https://bags.example/${LOWER}/trade`,
+    );
+  });
+
+  it("returns undefined for an empty pattern", () => {
+    // LAUNCHPAD_URL_PATTERNS.LONG ships empty until MAXLONG has a page (spec section 3).
+    expect(launchpadUrl({ origin: "LONG", address: MIXED_CASE })).toBeUndefined();
+  });
+
+  it("returns undefined for an origin with no pattern at all", () => {
+    expect(launchpadUrl({ origin: "Uniswap", address: MIXED_CASE })).toBeUndefined();
   });
 });

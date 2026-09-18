@@ -87,6 +87,7 @@ const h = vi.hoisted(() => ({
   quoteIsPlaceholderData: false,
   quoteIsFetching: false,
   router: true,
+  launchpadUrlValue: undefined as string | undefined,
   wallet: { id: "wallet-client" } as unknown,
   publicClient: { id: "public-client" } as unknown,
   executeSwap: vi.fn(),
@@ -117,6 +118,7 @@ vi.mock("wagmi", () => ({
 vi.mock("@/lib/chain", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/chain")>()),
   hasRouter: () => h.router,
+  launchpadUrl: () => h.launchpadUrlValue,
 }));
 // importOriginal, not a hand-enumerated factory (I4/I5): the real error classes flow through
 // unmocked, so `instanceof` inside the panel's catch sees the same classes this file imports
@@ -160,6 +162,7 @@ describe("TradePanel", () => {
     h.quoteIsPlaceholderData = false;
     h.quoteIsFetching = false;
     h.router = true;
+    h.launchpadUrlValue = undefined;
     h.wallet = { id: "wallet-client" };
     h.publicClient = { id: "public-client" };
     h.executeSwap.mockReset();
@@ -174,6 +177,24 @@ describe("TradePanel", () => {
     render(<TradePanel pair={{ ...pair, tradeable: false }} />, { wrapper });
     expect(screen.getByText("Not routed")).toBeTruthy();
     expect(screen.queryByLabelText("Amount")).toBeNull();
+  });
+
+  it("renders the not-routed card without a trade link when the origin has no launchpad URL yet", () => {
+    h.launchpadUrlValue = undefined;
+    const { wrapper } = queryHarness();
+    render(<TradePanel pair={{ ...pair, tradeable: false }} />, { wrapper });
+    expect(screen.getByText("Not routed")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("renders a trade link to the launchpad when launchpadUrl resolves one", () => {
+    h.launchpadUrlValue = "https://longmarkets.example/token/0xabc";
+    const { wrapper } = queryHarness();
+    render(<TradePanel pair={{ ...pair, tradeable: false }} />, { wrapper });
+    const link = screen.getByRole("link", { name: /Trade on LONG/ });
+    expect(link.getAttribute("href")).toBe("https://longmarkets.example/token/0xabc");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noreferrer");
   });
 
   it("keeps the form and explains it inline when this amount can't be routed", () => {

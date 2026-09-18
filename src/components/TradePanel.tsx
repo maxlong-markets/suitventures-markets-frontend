@@ -6,7 +6,7 @@ import { usePublicClient, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
 import { invalidatePairBalances, usePairBalances } from "@/hooks/useTokenBalance";
 import { useSwapQuote } from "@/hooks/useMarketsData";
-import { hasRouter, ORIGIN_URLS, robinhoodChain } from "@/lib/chain";
+import { hasRouter, launchpadUrl, robinhoodChain } from "@/lib/chain";
 import { fmtAmt, fmtQuote, fmtTradeAmt, fmtUsd } from "@/lib/format";
 import { toHuman } from "@/lib/quote/math";
 import { executeSwap, SwapFailedError, SwapRejectedError, SwapUnconfirmedError } from "@/lib/swap";
@@ -39,7 +39,7 @@ export default function TradePanel({ pair }: { pair: TokenPair }) {
 }
 
 function UntradeableCard({ pair }: { pair: TokenPair }) {
-  const url = ORIGIN_URLS[pair.origin];
+  const url = launchpadUrl(pair);
   return (
     <div className="border border-hairline px-[22px] py-[34px] text-center">
       <div className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-ink-40">

@@ -2,7 +2,7 @@
 
 import { useHolders, useTrades } from "@/hooks/useMarketsData";
 import type { TokenPair } from "@/lib/types";
-import { txUrl } from "@/lib/chain";
+import { addressUrl, txUrl } from "@/lib/chain";
 import {
   ageHours,
   fmtAge,
@@ -68,14 +68,20 @@ function TradesTable({ pair }: { pair: TokenPair }) {
         data?.map((t, i) => (
           <div
             key={`${t.tx}:${i}`}
-            className={`${TRADE_COLS} h-8 whitespace-nowrap border-b border-hairline-soft hover:bg-hover-soft`}
+            className={`${TRADE_COLS} min-h-8 whitespace-nowrap border-b border-hairline-soft py-1 tablet:h-8 tablet:py-0 hover:bg-hover-soft`}
           >
             <div className="text-ink-55">{fmtClock(t.t)}</div>
             <div className={t.side === "buy" ? "text-up" : "text-down"}>
               {t.side === "buy" ? "Buy" : "Sell"}
             </div>
             <div className="text-right">
-              {fmtAmt(t.amount, 0)} {pair.ticker}
+              <div>
+                {fmtAmt(t.amount, 0)} {pair.ticker}
+              </div>
+              {/* Below tablet width the grid drops the Wallet column's track entirely (see
+                  TRADE_COLS), so the wallet rides as a second line under the amount instead —
+                  "with wallets" (README M3) shouldn't read as "wallets, except on a phone". */}
+              <div className="text-[10px] text-ink-45 tablet:hidden">{short(t.wallet)}</div>
             </div>
             <div className="text-right">{pair.stale ? "—" : fmtPrice(t.priceUsd)}</div>
             <div className="hidden text-right text-ink-55 tablet:block">{short(t.wallet)}</div>
@@ -132,25 +138,42 @@ function HoldersTable({ pair }: { pair: TokenPair }) {
   );
 }
 
+interface InfoRow {
+  label: string;
+  value: string;
+  /** Blockscout link for this row; rows without one (pool id, fee tier, …) stay plain text. */
+  href?: string;
+}
+
 function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
   const quoteUsd = pair.priceUsd / pair.priceQuote;
   const liquidity = fmtUsdOrDash(pair.liquidity);
-  const rows: Array<[string, string]> = [
-    ["Pool", short(pair.poolId)],
-    ["Hook", pair.hook],
-    ["Fee tier", pair.feeTier],
-    ["Created", `${fmtISODate(pair.createdAt)} · ${fmtAge(ageHours(pair.createdAt, now))} ago`],
-    [
-      "Liquidity",
-      pair.liquidity === null
-        ? liquidity
-        : `${liquidity} · ${fmtAmt(pair.liquidity / 2 / quoteUsd, 2)} ${pair.quote}`,
-    ],
-    ["Quote", `${pair.quote} · ${fmtUsdOrDash(pair.stale ? null : quoteUsd)}`],
+  const rows: InfoRow[] = [
+    // A v4 pool id is a bytes32, not an address (spec section 4) — plain text, unlike the
+    // three rows below.
+    { label: "Pool", value: short(pair.poolId) },
+    { label: "Hook", value: pair.hook, href: pair.hook ? addressUrl(pair.hook) : undefined },
+    { label: "Token", value: short(pair.address), href: addressUrl(pair.address) },
+    { label: "Fee tier", value: pair.feeTier },
+    {
+      label: "Created",
+      value: `${fmtISODate(pair.createdAt)} · ${fmtAge(ageHours(pair.createdAt, now))} ago`,
+    },
+    {
+      label: "Liquidity",
+      value:
+        pair.liquidity === null
+          ? liquidity
+          : `${liquidity} · ${fmtAmt(pair.liquidity / 2 / quoteUsd, 2)} ${pair.quote}`,
+    },
+    // The quote asset's address isn't on TokenPair, and nothing in this page's tree already
+    // holds useQuotes()'s result to resolve it from — pulling that query into this tab just
+    // for a link isn't worth the new fetch, so this row stays unlinked (Task 3 spec note).
+    { label: "Quote", value: `${pair.quote} · ${fmtUsdOrDash(pair.stale ? null : quoteUsd)}` },
   ];
   return (
     <>
-      {rows.map(([label, value]) => (
+      {rows.map(({ label, value, href }) => (
         <div
           key={label}
           className="flex justify-between gap-4 border-b border-hairline-soft py-[11px]"
@@ -158,7 +181,18 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
           <span className="flex-none text-[10px] uppercase tracking-[0.16em] text-ink-40">
             {label}
           </span>
-          <span className="truncate text-right">{value}</span>
+          {href ? (
+            <a
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="truncate text-right text-ink-70 hover:text-ink"
+            >
+              {value}
+            </a>
+          ) : (
+            <span className="truncate text-right">{value}</span>
+          )}
         </div>
       ))}
     </>
