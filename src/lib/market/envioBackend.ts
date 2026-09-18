@@ -1,12 +1,13 @@
 import { gql } from "@/lib/envio/client";
 import { loadPairs } from "@/lib/envio/pairs";
 import {
-  CANDLES_QUERY, HEALTH_QUERY, HOLDERS_QUERY, QUOTES_QUERY, TOKEN_QUERY, TRADES_QUERY, windowQuery,
-  type BalanceRow, type CandleRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow,
+  CANDLES_QUERY, HEALTH_QUERY, HOLDERS_QUERY, POOL_KEY_QUERY, QUOTES_QUERY, TOKEN_QUERY, TRADES_QUERY, windowQuery,
+  type BalanceRow, type CandleRow, type PoolKeyTokenRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow,
 } from "@/lib/envio/queries";
-import { isStale, resolvePool, shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
+import { isStale, num, resolvePool, shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
 import { nowSec } from "@/lib/time";
 import type { HealthReport, MarketBackend } from "./backend";
+import { poolKeyRow } from "./poolKey";
 
 const CHAIN_ID = 4663;
 const MAX_LAG = 500;
@@ -62,6 +63,25 @@ export function createEnvioBackend(): MarketBackend {
       if (!token) return { holders: [], count: 0 };
       const rows = await gql<{ TokenBalance: BalanceRow[] }>(HOLDERS_QUERY, { token: id });
       return { holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)), count: token.holdersCount };
+    },
+    async poolKey(tokenId) {
+      const t = await gql<{ Token: PoolKeyTokenRow[] }>(POOL_KEY_QUERY, { id: tokenId });
+      const token = t.Token[0];
+      const pool = token ? resolvePool(token) : null;
+      if (!token || !pool) return null;
+      return poolKeyRow({
+        poolId: pool.id,
+        hooks: pool.hooks,
+        fee: pool.fee,
+        tickSpacing: pool.tickSpacing,
+        tokenIsCurrency0: pool.tokenIsCurrency0,
+        // Hasura sends every numeric as a string; `+` on one of these would concatenate.
+        priceQuote: num(pool.priceQuote),
+        tokenAddress: token.address,
+        tokenDecimals: token.decimals,
+        quoteAddress: pool.quote.address,
+        quoteDecimals: pool.quote.decimals,
+      });
     },
     async health(): Promise<HealthReport> {
       try {

@@ -8,6 +8,7 @@ import { replaceHolders } from "@/lib/sync/writers";
 import { nowSec } from "@/lib/time";
 import type { HealthReport, MarketBackend } from "./backend";
 import { PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
+import { poolKeyRow } from "./poolKey";
 
 /** A token's stored top holders are re-pulled from Envio when older than this (spec 5.4). */
 export const HOLDER_REFRESH_SEC = 300;
@@ -25,6 +26,10 @@ type QuoteCols = { usd_price: number | null; usd_updated_at: number | null; aggr
 type ListedRow = { symbol: string; pool_id: string; quote_id: string } & QuoteCols;
 type TokenCols = { decimals: number; total_supply: string; holders_count: number };
 type StateRow = { job: string; cursor: number; phase: string; last_ok_at: number | null; last_error: string | null };
+type PoolKeyCols = {
+  pool_id: string; hooks: string; fee: number; tick_spacing: number; token_is_currency0: boolean; price_quote: number;
+  token_address: string; token_decimals: number; quote_address: string; quote_decimals: number;
+};
 /** A public route: a stored error (indexer or driver text) is cut to this many characters; the full text goes to the log. */
 const LAST_ERROR_SHOWN = 120;
 
@@ -57,6 +62,9 @@ const TRADES_SQL = `select ts as timestamp, side, amount_token as "amountToken",
   from market.swaps where pool_id = $1 order by ts desc limit ${TRADES_LIMIT}`;
 const HOLDERS_SQL = `select holder, balance::text as balance from market.token_balances
   where token_id = $1 and balance > 0 order by balance desc limit ${HOLDERS_SHOWN}`;
+const POOL_KEY_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_spacing, p.token_is_currency0, p.price_quote,
+  t.address as token_address, t.decimals as token_decimals, q.address as quote_address, q.decimals as quote_decimals
+  from market.tokens t join market.pools p on p.id = t.listed_pool_id join market.quotes q on q.id = p.quote_id where t.id = $1`;
 const REFRESH_SQL = `select refreshed_at from market.holder_refresh where token_id = $1`;
 const QUOTES_SQL = `select id, address, symbol, name, decimals, usd_price, usd_updated_at, aggregator from market.quotes order by id`;
 const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('market', 'nightly')`;
@@ -117,6 +125,22 @@ export function createDbBackend(db: Db, source: EnvioSource, now: () => number =
       }
       const rows = await db.query<BalanceRow>(HOLDERS_SQL, [id]);
       return { holders: shapeHolders(rows, token.decimals, BigInt(token.total_supply)), count: token.holders_count };
+    },
+    async poolKey(tokenId) {
+      const row = (await db.query<PoolKeyCols>(POOL_KEY_SQL, [tokenId]))[0];
+      if (!row) return null; // no such token, or no listed pool: the join drops it either way
+      return poolKeyRow({
+        poolId: row.pool_id,
+        hooks: row.hooks,
+        fee: row.fee,
+        tickSpacing: row.tick_spacing,
+        tokenIsCurrency0: row.token_is_currency0,
+        priceQuote: row.price_quote,
+        tokenAddress: row.token_address,
+        tokenDecimals: row.token_decimals,
+        quoteAddress: row.quote_address,
+        quoteDecimals: row.quote_decimals,
+      });
     },
     async health(): Promise<HealthReport> {
       const at = now();

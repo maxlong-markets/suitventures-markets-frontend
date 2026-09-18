@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearTtlCache } from "@/lib/envio/cache";
 import { gql } from "@/lib/envio/client";
-import { AI, NOW, POOL, aiTokenBroken, prices, windowRows } from "@/lib/envio/fixtures";
-import { TOKEN_QUERY } from "@/lib/envio/queries";
+import { AI, NOW, NVDA, POOL, aiPoolKey, aiTokenBroken, prices, windowRows } from "@/lib/envio/fixtures";
+import { POOL_KEY_QUERY, TOKEN_QUERY } from "@/lib/envio/queries";
 import { shapePairs, usdMap, windowStats } from "@/lib/envio/shape";
 import { createEnvioBackend } from "./envioBackend";
 
@@ -45,6 +45,37 @@ describe("createEnvioBackend", () => {
     gqlMock.mockResolvedValue({ Token: [], QuotePrice: [] });
     expect(await backend.pair(AI)).toBeNull();
     expect(gqlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("poolKey() resolves the same listed pool as pair() and lowercases every address", async () => {
+    gqlMock.mockImplementation(async (query) => {
+      if (query === POOL_KEY_QUERY) return { Token: [aiPoolKey] } as never;
+      throw new Error(`unexpected query ${query.slice(0, 30)}`);
+    });
+    expect(await backend.poolKey(AI)).toEqual({
+      poolId: POOL,
+      currency0: AI,
+      currency1: NVDA,
+      fee: 8388608,
+      tickSpacing: 8,
+      hooks: "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
+      tokenIsCurrency0: true,
+      priceQuote: 0.000866,
+      tokenAddress: AI,
+      tokenDecimals: 18,
+      quoteAddress: NVDA,
+      quoteDecimals: 18,
+    });
+    // One document, one round trip: the quote route calls this on every keystroke's quote.
+    expect(gqlMock).toHaveBeenCalledTimes(1);
+    expect(gqlMock).toHaveBeenCalledWith(POOL_KEY_QUERY, { id: AI });
+  });
+
+  it("poolKey() is null for an unknown token and for one whose every pool is parked at a boundary", async () => {
+    gqlMock.mockResolvedValue({ Token: [] });
+    expect(await backend.poolKey(AI)).toBeNull();
+    gqlMock.mockResolvedValue({ Token: [{ ...aiPoolKey, fallbackPool: [] }] });
+    expect(await backend.poolKey(AI)).toBeNull();
   });
 
   it("health() reports the lag and quote ages, and not ok when the chain lags", async () => {

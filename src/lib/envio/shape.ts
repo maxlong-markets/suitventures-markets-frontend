@@ -1,5 +1,5 @@
 import type { Candle, Holder, Origin, QuoteAsset, TokenPair, Trade } from "@/lib/types";
-import type { BalanceRow, CandleRow, Numeric, PoolRow, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "./queries";
+import type { BalanceRow, CandleRow, Numeric, QuotePriceRow, QuoteRow, SwapRow, TokenRow, WindowRow } from "./queries";
 
 export const STALE_AFTER_SEC = 259_200; // 3 days: distinguishes a dead aggregator from an off-hours hold
 const POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951";
@@ -10,16 +10,16 @@ const ORIGINS = new Set<Origin>(["LONG", "Pons", "Uniswap", "Other", "SUIT", "SV
  * Every Float-derived column arrives from Hasura as a string. `+` would concatenate them,
  * so nothing may read one of these fields without passing it through here first.
  */
-const num = (v: Numeric): number => (typeof v === "number" ? v : Number(v));
+export const num = (v: Numeric): number => (typeof v === "number" ? v : Number(v));
 
-/** A pool parked at a tick boundary quotes ~3.4e50 or ~0; both are unusable as a price. */
-export function isSanePool(p: PoolRow): boolean {
+/** A pool parked at a tick boundary quotes ~3.4e50 or ~0; both are unusable as a price. Structural, so a narrower row can be checked too. */
+export function isSanePool(p: { priceQuote: Numeric }): boolean {
   const q = num(p.priceQuote);
   return q > 1e-24 && q < 1e18;
 }
 
-/** The indexer's TVL-ranked `primaryPool` is wrong for 1000+ tokens; prefer it only when it prices sanely. */
-export function resolvePool(t: TokenRow): PoolRow | null {
+/** The indexer's TVL-ranked `primaryPool` is wrong for 1000+ tokens; prefer it only when it prices sanely. Generic so POOL_KEY_QUERY's narrower rows use the same rule. */
+export function resolvePool<P extends { priceQuote: Numeric }>(t: { primaryPool: P | null; fallbackPool?: P[] }): P | null {
   if (t.primaryPool && isSanePool(t.primaryPool)) return t.primaryPool;
   const fallback = t.fallbackPool?.[0];
   return fallback && isSanePool(fallback) ? fallback : null;

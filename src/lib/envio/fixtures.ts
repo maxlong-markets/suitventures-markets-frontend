@@ -1,4 +1,4 @@
-import type { TokenRow, PoolRow, QuotePriceRow, WindowRow, CandleRow, SwapRow, BalanceRow, QuoteRow } from "./queries";
+import type { TokenRow, PoolRow, PoolKeyPoolRow, PoolKeyTokenRow, QuotePriceRow, WindowRow, CandleRow, SwapRow, BalanceRow, QuoteRow } from "./queries";
 
 export const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec";
 export const AI = "0x2e8c31162b855a2ffa90f6f8634643ad6f111e18";
@@ -65,3 +65,18 @@ export const brokenPool: PoolRow = {
 };
 /** AI as the indexer really returns it: broken primary, the real LONG/NVDA pool only as fallback. */
 export const aiTokenBroken: TokenRow = { ...aiToken, primaryPool: brokenPool, fallbackPool: [aiToken.primaryPool!] };
+
+/** The same two pools as `aiTokenBroken`, as POOL_KEY_QUERY selects them: no TVL, no origin, the quote's address instead of its symbol. */
+const poolKeyPool = (p: PoolRow, address: string): PoolKeyPoolRow => ({
+  id: p.id, quote_id: p.quote_id, tokenIsCurrency0: p.tokenIsCurrency0, hooks: p.hooks,
+  fee: p.fee, tickSpacing: p.tickSpacing, priceQuote: p.priceQuote, quote: { address, decimals: p.quote.decimals },
+});
+
+/** AI through POOL_KEY_QUERY: a broken primary against USDG, the real LONG/NVDA pool as the fallback. */
+export const aiPoolKey: PoolKeyTokenRow = {
+  id: aiToken.id,
+  address: aiToken.address,
+  decimals: aiToken.decimals,
+  primaryPool: poolKeyPool(brokenPool, USDG),
+  fallbackPool: [poolKeyPool(aiToken.primaryPool!, quotes[0]!.address)],
+};

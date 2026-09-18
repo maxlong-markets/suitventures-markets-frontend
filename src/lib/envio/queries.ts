@@ -23,6 +23,17 @@ export type WindowRow = { pool_id: string; t: number; open: Numeric; close: Nume
 export type CandleRow = { t: number; open: Numeric; high: Numeric; low: Numeric; close: Numeric; volumeQuote: Numeric };
 export type SwapRow = { timestamp: number; side: "buy" | "sell"; amountToken: Numeric; priceQuote: Numeric; wallet: string; txHash: string };
 export type BalanceRow = { holder: string; balance: string };
+/** Only what a swap needs: the v4 PoolKey's five fields, the direction, the stored price and both assets' decimals. */
+export type PoolKeyPoolRow = {
+  id: string; quote_id: string; tokenIsCurrency0: boolean; hooks: string; fee: number; tickSpacing: number;
+  priceQuote: Numeric; quote: { address: string; decimals: number };
+};
+export type PoolKeyTokenRow = {
+  id: string; address: string; decimals: number;
+  primaryPool: PoolKeyPoolRow | null;
+  /** Best sane pool by swap count, as in TOKEN_QUERY. */
+  fallbackPool?: PoolKeyPoolRow[];
+};
 
 const POOL_FIELDS = "id quote_id tokenIsCurrency0 hooks fee tickSpacing origin createdAt priceQuote tvlToken tvlQuote swapCount lastSwapAt quote { symbol decimals }";
 const TOKEN_FIELDS = `id address symbol name decimals totalSupply holdersCount origin createdAt primaryPool { ${POOL_FIELDS} }`;
@@ -107,6 +118,22 @@ query Token($id: String!) {
     ${FALLBACK_POOL}
   }
   ${QUOTE_PRICES}
+}`;
+
+const POOL_KEY_FIELDS = "id quote_id tokenIsCurrency0 hooks fee tickSpacing priceQuote quote { address decimals }";
+
+/**
+ * One token's listed pool, resolved by the same primary-then-fallback rule as TOKEN_QUERY, with
+ * the quote's own address — the field QUOTES_QUERY already selects on the same entity — because a
+ * PoolKey needs both currencies and `quote_id` is an id, not an address the swap can sign over.
+ */
+export const POOL_KEY_QUERY = `
+query PoolKey($id: String!) {
+  Token(where: { id: { _eq: $id } }, limit: 1) {
+    id address decimals
+    primaryPool { ${POOL_KEY_FIELDS} }
+    fallbackPool: pools(where: { swapCount: { _gt: 0 }, ${SANE_PRICE} }, order_by: { swapCount: desc }, limit: 1) { ${POOL_KEY_FIELDS} }
+  }
 }`;
 
 export const TRADES_QUERY = `

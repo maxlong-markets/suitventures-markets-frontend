@@ -296,3 +296,60 @@ describe("createDbBackend health", () => {
     expect(console.warn).toHaveBeenCalledTimes(1); // the nightly's long one
   });
 });
+
+describe("createDbBackend poolKey", () => {
+  let db: Db;
+  const backend = () => createDbBackend(db, new FakeSource({}), () => NOW);
+  // One more token whose pool was created with the quote as currency0; the fixtures above are all token-first.
+  const F = addr("8");
+  const PF = poolId("8");
+
+  beforeAll(async () => {
+    db = await testDb();
+    await upsertQuotes(db, quotes, prices);
+    await upsertTokens(db, [...tokens, tokenRec(F, "FFF", "LONG", PF)], NOW);
+    await upsertPools(db, [...pools, poolRec(PF, F, USDG, { tokenIsCurrency0: false, fee: 500, tickSpacing: 10, lastSwapAt: NOW - 3000 })], NOW);
+    await recomputeListedPools(db, "all");
+  });
+  afterAll(() => db.end());
+
+  it("builds the listed pool's key, with the token as currency0", async () => {
+    expect(await backend().poolKey(A)).toEqual({
+      poolId: PA,
+      currency0: A,
+      currency1: NVDA,
+      fee: 3000,
+      tickSpacing: 60,
+      hooks: addr("9"),
+      tokenIsCurrency0: true,
+      priceQuote: 0.000866,
+      tokenAddress: A,
+      tokenDecimals: 18,
+      quoteAddress: NVDA,
+      quoteDecimals: 18,
+    });
+  });
+
+  it("puts the quote first when the pool was created that way", async () => {
+    expect(await backend().poolKey(F)).toMatchObject({
+      poolId: PF,
+      currency0: USDG,
+      currency1: F,
+      tokenIsCurrency0: false,
+      fee: 500,
+      tickSpacing: 10,
+      tokenAddress: F,
+      quoteAddress: USDG,
+      quoteDecimals: 6,
+    });
+  });
+
+  it("reads the recovered pool, not the broken primary, exactly as the listing does", async () => {
+    expect(await backend().poolKey(B)).toMatchObject({ poolId: PB, currency1: USDG, priceQuote: 0.5, quoteDecimals: 6 });
+  });
+
+  it("is null for a token with no listed pool and for one that does not exist", async () => {
+    expect(await backend().poolKey(D)).toBeNull();
+    expect(await backend().poolKey(addr("0"))).toBeNull();
+  });
+});

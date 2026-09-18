@@ -5,6 +5,7 @@ import { getDb } from "@/lib/db/client";
 import { createEnvioSource } from "@/lib/sync/envioSource";
 import { createDbBackend } from "./dbBackend";
 import { createEnvioBackend } from "./envioBackend";
+import type { PoolKeyRow } from "./poolKey";
 
 export type HealthReport = {
   ok: boolean; backend: "db" | "envio";
@@ -25,6 +26,8 @@ export interface MarketBackend {
   candles(id: string, interval: IndexerInterval): Promise<Candle[]>;
   trades(id: string): Promise<Trade[]>;
   holders(id: string): Promise<{ holders: Holder[]; count: number }>;
+  /** The listed pool's v4 PoolKey, the direction flag and both assets' decimals; null when the token has no listed pool. */
+  poolKey(tokenId: string): Promise<PoolKeyRow | null>;
   health(): Promise<HealthReport>;
 }
 
