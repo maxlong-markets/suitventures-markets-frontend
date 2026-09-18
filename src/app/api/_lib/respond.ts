@@ -36,3 +36,21 @@ export function failure(err: unknown): NextResponse {
   console.error(`internal error: ${line}`);
   return NextResponse.json({ error: "internal error" }, { status: 500, headers });
 }
+
+/** A user's own data: no CDN, no browser cache, no shared copy of one wallet's watchlist. */
+export function noStore<T>(data: T): NextResponse {
+  return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
+}
+
+/** 401 for a missing or unusable session. `error` is always a fixed constant: never an address, never a nonce. */
+export function unauthorized(error: string): NextResponse {
+  return NextResponse.json({ error }, { status: 401, headers: { "Cache-Control": "no-store" } });
+}
+
+/** 429 for a wallet past its write budget (Task 3). A plain body: there is nothing here worth parsing. */
+export function tooManyRequests(): NextResponse {
+  return new NextResponse("too many requests", {
+    status: 429,
+    headers: { "Cache-Control": "no-store", "Retry-After": "60", "Content-Type": "text/plain; charset=utf-8" },
+  });
+}

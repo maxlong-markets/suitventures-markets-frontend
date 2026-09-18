@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DbUnavailableError } from "@/lib/db/client";
 import { EnvioUnavailableError } from "@/lib/envio/client";
-import { failure } from "./respond";
+import { failure, noStore, tooManyRequests, unauthorized } from "./respond";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -31,5 +31,30 @@ describe("failure", () => {
     expect(failure(new TypeError("no code")).status).toBe(500);
     expect(failure("a thrown string").status).toBe(500);
     expect(error.mock.calls).toEqual([["internal error: TypeError: no code"], ["internal error: a thrown string"]]);
+  });
+});
+
+describe("answers that must never be cached", () => {
+  it("serves a user's own data with no-store", async () => {
+    const res = noStore(["0xabc"]);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.json()).resolves.toEqual(["0xabc"]);
+  });
+
+  it("answers 401 with a fixed reason and no-store", async () => {
+    const res = unauthorized("not signed in");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    await expect(res.json()).resolves.toEqual({ error: "not signed in" });
+  });
+
+  it("answers 429 with a plain body and a retry hint", async () => {
+    const res = tooManyRequests();
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    await expect(res.text()).resolves.toBe("too many requests");
   });
 });
