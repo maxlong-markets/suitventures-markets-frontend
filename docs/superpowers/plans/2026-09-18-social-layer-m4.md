@@ -32,11 +32,11 @@
 
 ## Rulings that override the task text below
 
-1. **Reads never fail closed on a missing session or an unconfigured secret.** `watchlist()`, `votes()` and `session()` answer `[]`, `{}` and `null` on 401 and on 503; `setWatch()` and `vote()` throw so the optimistic update rolls back.
+1. **Reads never fail closed on a missing session or an unconfigured secret.** `watchlist()`, `votes()` and `session()` answer `[]`, `{}` and `null` on 401 and on 503; `setWatch()` and `vote()` throw so the optimistic update rolls back. The demo source answers the same three values while nobody has signed in, and its two writes throw the same way — a read must never throw in either source.
 2. **Query keys for user data are plain constants** (`keys.watchlist`, `keys.votes`) and the hooks take `enabled`; `AppState` drops both caches whenever the session is not the connected wallet.
 3. **`completeSign(sign, address)`** takes the signer and the address: `SignModal` hands over `signMessageAsync`; the data source builds the SIWE message and runs the exchange. The modal keeps its UI and shows a description rather than the message, which exists only at sign time.
 4. **`signOut()` exists, is tested, and is not wired to wallet disconnection**: calling it on `isConnected === false` would clear a good cookie during hydration. A sign-out control is M5.
-5. **`TraderRow` is declared in `src/lib/types.ts`** and re-exported from the store module; client components import it from `types`.
+5. **`TraderRow` is declared exactly once in `src/lib/types.ts`, by Task 2 Step 3**, and re-exported from the store module (`export type { TraderRow } from "@/lib/types";`, already in Task 2's `store.ts`); client components import it from `types`. Task 5 adds only `TradersBy` and the `traders` method — it must not re-declare the row.
 6. **`MarketsDataSource.vote` returns `Promise<VoteDir | null>`**, the resulting state, matching the route.
 7. **Address comparisons between the cookie (lowercase) and the wallet (checksummed) are case-insensitive.**
 8. **A 503 from `/api/traders` is `StoreUnavailableError`** so the board distinguishes "no store yet" from "request failed" without string matching.
@@ -47,7 +47,8 @@
 13. **`/api/votes` without a database answers zeros**, not 503: counts are decoration, not identity.
 14. **The board prices with `coalesce(usd_price, 0)` and ignores feed staleness**: dropping stale feeds would empty the whole board during a price-feed outage; a stale feed is flagged elsewhere.
 15. **`signNonce(nonce, secret)` reads the clock itself**, as drafted; its test uses fake timers.
-16. **The commit trailer is `Claude Fable 5.1`**, this session's model, on every commit, whatever a generic reminder says.
+16. **The commit trailer is `Claude Fable 5.1`**, this session's model, on every commit, whatever a generic reminder says. **Open before Task 1's commit:** an executing session may carry a different attribution line (`Claude Opus 5 (1M context)` was current on 18 Sep 2026). The two cannot both be right on one commit — ask Kobe which name goes on the six M4 commits, and use that answer in all six.
+17. **`.env.example` gains `SESSION_SECRET` exactly once, in Task 1 Step 11**, in the file's bottom-half inline style. Task 6 Step 1 only *verifies* the line is there and commits nothing of `.env.example`; a second append would leave two `SESSION_SECRET=` keys and fail Task 6's own `grep`.
 
 ---
 ### Task 1: Sign-in — the session cookie, SIWE verification and the session routes
@@ -65,6 +66,8 @@ Decisions where the contract is silent (each one line):
 - **`newNonce()` lives in `cookie.ts` and viem's `generateSiweNonce()` is not used.** viem 2.56.3 implements it as `uid(96)`: `Math.random()` over a 512-character shared buffer whose index advances **one** character per call, so two successive nonces overlap in 95 of their 96 characters and none of it is CSPRNG. `randomBytes(16).toString("hex")` is 32 alphanumeric characters, which satisfies EIP-4361's "at least 8, alphanumeric" rule that `createSiweMessage` enforces.
 - **The token format is `base64url(json).base64url(hmac-sha256(base64url(json)))`** for both cookies, sealed and opened by one pair of private helpers, so the session and the nonce cannot disagree about the format. The MAC covers the base64url body, not the raw JSON, so nothing depends on `JSON.stringify` key order surviving a round trip.
 - **`timingSafeEqual` is called only on equal lengths**, which is checked first and returned as a plain `false`: the function throws on a length mismatch, and the length of an HMAC is not a secret.
+- **`cookieValue` never throws.** It runs before every route's own `try`, on a header the caller controls, and `decodeURIComponent("%")` raises `URIError`; a value that is not valid percent-encoding is answered as `null`, so a corrupt cookie reads as "no cookie" and the routes answer 401 or 503 rather than 500.
+- **The POST's `catch` logs nothing from the error and spends the nonce.** viem's `CallExecutionError`/`BaseError` messages embed the request `data` — the address and the signature — and sometimes the RPC URL, against Global Constraint 4 and this module's own "no address, nonce, host or message body" promise; the catch answers `failure(new Error("sign-in verification failed"))` and clears `svm_nonce`, so the single-use rule holds on the thrown path as well as the refused one.
 - **`verifySession` re-checks the address shape** (`/^0x[0-9a-f]{40}$/`) after parsing. A token signed with the real secret still has to carry a lowercase address, because that string is concatenated into no SQL but is the primary key of every row the user owns.
 - **`signNonce` reads the clock itself** (`nowSec()`), because the contract gives it no `now`; the expiry travels inside the sealed body as well as in `Max-Age`, so a browser that keeps the cookie past its window still cannot use it.
 - **`siwe.ts` does not import `server-only`, `cookie.ts` does.** Only `cookie.ts` touches `SESSION_SECRET`; `siwe.ts` is pure viem, and the client task needs `SIWE_STATEMENT` from it to build the very message this module verifies.
@@ -551,9 +554,21 @@ describe("cookieValue", () => {
     expect(cookieValue("a=1; svm_session=xyz; b=2", SESSION_COOKIE)).toBe("xyz");
     expect(cookieValue("svm_session=xyz", SESSION_COOKIE)).toBe("xyz");
     expect(cookieValue("  svm_session = xyz ", SESSION_COOKIE)).toBe("xyz");
+    expect(cookieValue("svm_session%20", SESSION_COOKIE)).toBeNull();
     expect(cookieValue("svm_session_other=xyz", SESSION_COOKIE)).toBeNull();
     expect(cookieValue("novalue", SESSION_COOKIE)).toBeNull();
     expect(cookieValue(null, SESSION_COOKIE)).toBeNull();
+  });
+
+  it("treats a cookie that is not valid percent-encoding as absent instead of throwing", () => {
+    // `decodeURIComponent("%")` throws `URIError`. A cookie is attacker-supplied text and this
+    // function is called outside every route's `try`, so an un-guarded decode is a 500 anyone
+    // can trigger with one character.
+    expect(cookieValue("svm_session=%", SESSION_COOKIE)).toBeNull();
+    expect(cookieValue("a=1; svm_session=%ZZ; b=2", SESSION_COOKIE)).toBeNull();
+    expect(cookieValue("svm_session=%E0%A4%A", SESSION_COOKIE)).toBeNull();
+    // Valid escapes still decode.
+    expect(cookieValue("svm_session=a%2Eb", SESSION_COOKIE)).toBe("a.b");
   });
 });
 
@@ -597,6 +612,14 @@ describe("requireSession", () => {
     expect(res.headers.get("Retry-After")).toBe("60");
     await expect(res.json()).resolves.toEqual({ error: "sessions not configured" });
   });
+
+  it("answers 401, not 500, for a corrupt cookie", async () => {
+    // The whole reason `cookieValue` guards its decode: this header reaches `requireSession`
+    // before any route's `try`, so an exception here would be a 500 from every /api/me/* route.
+    const res = requireSession(req(`${SESSION_COOKIE}=%`)) as Response;
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toEqual({ error: "not signed in" });
+  });
 });
 ```
 
@@ -620,7 +643,16 @@ export function cookieValue(header: string | null, name: string): string | null 
   for (const part of header.split(";")) {
     const eq = part.indexOf("=");
     if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+    if (part.slice(0, eq).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      // `decodeURIComponent("%")` throws `URIError`, and this runs before every route's own
+      // `try`: an un-guarded decode would turn one corrupt character into a 500 from every
+      // /api/me/* route and from both session routes. A cookie that is not valid
+      // percent-encoding is no cookie, which is the answer that makes them all say 401.
+      return null;
+    }
   }
   return null;
 }
@@ -660,7 +692,7 @@ export function clearCookie(res: NextResponse, name: string): void {
 ```
 
 Run: `npx vitest run src/app/api/_lib/session.test.ts`
-Expected: PASS (7 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 9: Write the failing route tests**
 
@@ -815,6 +847,23 @@ describe("POST /api/session", () => {
     await expect(res.json()).resolves.toEqual({ error: "wrong domain" });
     expect(res.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
     expect(res.headers.getSetCookie().some((c) => c.startsWith("svm_session="))).toBe(false);
+  });
+
+  it("spends the nonce, says nothing about the error and logs nothing from it when verification throws", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The shape of a real viem failure: the message carries the signed data and the RPC URL.
+    verifySiwe.mockRejectedValue(
+      new Error(`HTTP request failed. URL: https://rpc.internal/abcdef body: {"params":["${ADDR}","${SIG}"]}`),
+    );
+    const res = await post({ message: MESSAGE, signature: SIG }, nonceCookie(newNonce()));
+    expect(res.status).toBe(500);
+    await expect(res.json()).resolves.toEqual({ error: "internal error" });
+    // Single use on this path too: a nonce a thrown verification has spoken for is spent.
+    expect(res.headers.getSetCookie().find((c) => c.startsWith("svm_nonce="))).toMatch(/;\s*Max-Age=0\b/);
+    expect(res.headers.getSetCookie().some((c) => c.startsWith("svm_session="))).toBe(false);
+    // Global Constraint 4: neither the address, the signature nor the RPC URL reaches the log.
+    expect(error).toHaveBeenCalledWith("internal error: Error: sign-in verification failed");
+    error.mockRestore();
   });
 
   it("refuses a forged, an expired and an absent nonce cookie", async () => {
@@ -972,8 +1021,14 @@ export async function POST(req: Request) {
     setCookie(res, SESSION_COOKIE, signSession({ address: result.address, iat, exp: iat + SESSION_TTL_SEC }, secret), SESSION_TTL_SEC);
     clearCookie(res, NONCE_COOKIE);
     return res;
-  } catch (err) {
-    return failure(err);
+  } catch {
+    // Nothing from the error is logged or answered: viem's `BaseError` messages embed the request
+    // `data` — which carries the address and the signature — and sometimes the RPC URL (Global
+    // Constraint 4). The nonce is spent here too, so a verification that threw cannot be retried
+    // against it.
+    const res = failure(new Error("sign-in verification failed"));
+    clearCookie(res, NONCE_COOKIE);
+    return res;
   }
 }
 
@@ -993,17 +1048,18 @@ export async function DELETE() {
 ```
 
 Run: `npx vitest run src/app/api/session`
-Expected: PASS (nonce route 4 tests, session route 12 tests).
+Expected: PASS (nonce route 4 tests, session route 13 tests).
 
 - [ ] **Step 11: Document the new variable and run every gate**
 
-Append to `.env.example`:
+Append to the end of `.env.example`, after the `SYNC_INTERVAL_SEC` line. This is the **only** place
+in the plan that writes this block (Ruling 17): everything below the `# Market store (server-only)`
+heading is a server variable with an inline comment beside it, so the new one takes that form and
+gets its own heading, and Task 6 Step 1 merely checks that the line is here.
 
 ```
-# Sign-in (server-only). 32+ characters; `openssl rand -hex 32` is 64. The HMAC key for the
-# svm_session and svm_nonce cookies. While unset, /api/session* answers 503 and the app stays
-# read-only: watchlist, votes and every public read keep working.
-SESSION_SECRET=
+# Social layer (server-only)
+SESSION_SECRET=          # 32 random bytes, `openssl rand -hex 32`; unset → sign-in and user data off, reads unaffected
 ```
 
 Run: `npm test && npx tsc --noEmit && npx eslint . && npm run build`
@@ -1245,7 +1301,12 @@ describe("topTraders", () => {
 
   it("obeys the window and the limit", async () => {
     await seedTrades();
-    expect(await topTraders(db, { sinceTs: NOW - 250, by: "volume", limit: 50 })).toEqual([{ wallet: W1, volumeUsd: 200, trades: 1, tokens: 1 }]);
+    // NOW − 150 keeps only `0xa1` (NOW − 100). W1's second trade sits at NOW − 200 and W2's
+    // earliest at NOW − 300, so both fall outside — which is the exclusion this case is for.
+    // (NOW − 250 would still have caught `0xa2`: the window is `ts >= sinceTs`.)
+    expect(await topTraders(db, { sinceTs: NOW - 150, by: "volume", limit: 50 })).toEqual([{ wallet: W1, volumeUsd: 200, trades: 1, tokens: 1 }]);
+    // The boundary is inclusive: asking from exactly the second `0xa2` was written in keeps it.
+    expect(await topTraders(db, { sinceTs: NOW - 200, by: "volume", limit: 50 })).toEqual([{ wallet: W1, volumeUsd: 500, trades: 2, tokens: 2 }]);
     expect(await topTraders(db, { sinceTs: DAY_AGO, by: "volume", limit: 1 })).toHaveLength(1);
     expect(await topTraders(db, { sinceTs: NOW + 1, by: "volume", limit: 50 })).toEqual([]);
   });
@@ -1279,12 +1340,21 @@ Append to the end of `src/lib/types.ts`:
  * One row of the top-traders board (M4 spec section 4): a wallet's last-24h volume in USD, its trade
  * count and the number of distinct tokens it traded. It lives here rather than in
  * `src/lib/social/store.ts`, which is `server-only`, because the `/traders` page renders these rows in
- * a client component. `volumeUsd` is a display number and never an execution amount.
+ * a client component.
+ *
+ * This is the **only** declaration of the type in the plan (Ruling 5): Task 5 adds `TradersBy` beside
+ * it and the `traders` method to `MarketsDataSource`, and re-declares nothing.
  */
 export interface TraderRow {
   wallet: Address;
+  /**
+   * Display only: the 24-hour volume already converted through the pool's quote asset and its USD
+   * price. Never an execution amount, so a float is the right shape for it (Global Constraint 1
+   * governs amounts the chain will see; this one it never does).
+   */
   volumeUsd: number;
   trades: number;
+  /** Distinct tokens this wallet traded in the window. */
   tokens: number;
 }
 ```
@@ -2236,6 +2306,9 @@ beforeEach(async () => {
   await db.exec("truncate market.votes");
 });
 
+/** Hex letters, so upper-casing it really changes the string — `0x111…1` would not. */
+const T3 = `0x${"c".repeat(40)}`;
+
 const call = (ids?: string) =>
   GET(new Request(`http://localhost:3000/api/votes${ids === undefined ? "" : `?ids=${ids}`}`));
 
@@ -2250,8 +2323,10 @@ describe("GET /api/votes", () => {
   });
 
   it("accepts a checksummed id and answers under the lowercase key", async () => {
-    await toggleVote(db, W1, T1, "bull", NOW);
-    await expect((await call(T1.toUpperCase().replace("0X", "0x"))).json()).resolves.toEqual({ [T1]: { bull: 1, bear: 0 } });
+    await toggleVote(db, W1, T3, "bull", NOW);
+    const mixed = T3.toUpperCase().replace("0X", "0x");
+    expect(mixed).not.toBe(T3); // the whole case rests on this, which is why T3 carries letters
+    await expect((await call(mixed)).json()).resolves.toEqual({ [T3]: { bull: 1, bear: 0 } });
   });
 
   it("de-duplicates and tolerates whitespace and empty entries", async () => {
@@ -2443,6 +2518,11 @@ and this `describe` at the end of the same file:
 ```ts
 describe("GET /api/tokens/[address] vote counts", () => {
   beforeEach(() => {
+    // This `describe` sits outside the first one, so none of its hooks run here. Without the
+    // clear, the 30 s `pair:<addr>` memo the earlier cases filled is still live and the 404 case
+    // below would be served a 200 out of it.
+    clearTtlCache();
+    pair.mockReset();
     holder.db = null;
     voteCounts.mockReset();
   });
@@ -2452,11 +2532,14 @@ describe("GET /api/tokens/[address] vote counts", () => {
     pair.mockResolvedValue({ ...found, bull: 0, bear: 0 });
     voteCounts.mockResolvedValue({ [ADDR]: { bull: 4, bear: 1 } });
     await expect((await call(ADDR)).json()).resolves.toMatchObject({ bull: 4, bear: 1 });
-    // The second read is served from the pair memo; the counts are merged onto it again, not into it.
-    voteCounts.mockResolvedValue({ [ADDR]: { bull: 9, bear: 9 } });
-    clearTtlCache();
-    pair.mockResolvedValue({ ...found, bull: 0, bear: 0 });
-    await expect((await call(ADDR)).json()).resolves.toMatchObject({ bull: 9, bear: 9 });
+    expect(pair).toHaveBeenCalledTimes(1);
+
+    // No `clearTtlCache()` here: clearing the memo is exactly what would hide the bug. Taking the
+    // store away instead means nothing is merged on the second read, so it answers whatever the
+    // memo actually holds — the backend's zeros, unless the first merge wrote into that object.
+    holder.db = null;
+    await expect((await call(ADDR)).json()).resolves.toMatchObject({ bull: 0, bear: 0 });
+    expect(pair).toHaveBeenCalledTimes(1); // served from the memo, not re-fetched
   });
 
   it("carries zeros, and asks nothing, without a store", async () => {
@@ -2552,24 +2635,18 @@ Decisions where the spec and the contract left room (one line each):
 - **`completeSign(sign, address)` takes both.** The contract writes `completeSign(address)` and the task text says the modal hands over `signMessageAsync`; the modal already holds a non-optional `address` prop, so passing both satisfies each reading literally and spares `AppState` a redundant undefined check inside an async callback.
 - **`ds.signOut()` exists and is tested, but nothing calls it in M4.** Wiring it to a wallet disconnect is a trap: `isConnected` is false for the first frames of hydration, and a sign-out fired there would clear a perfectly good cookie on every page load. The cookie expires on its own in seven days and a wallet switch re-signs; a deliberate "sign out" button is M5's if the client asks for one.
 - **`src/lib/data/localStore.ts` is deleted.** The contract's rule "the demo data source keeps `LocalWatchStore`" describes a file the demo source never imported: `grep -rn "LocalWatchStore" src` on 18 Sep 2026 matches only `src/lib/data/envio.ts` and the class's own file. `MockDataSource` has always had its own identical `storageKey`/`readStore`/`writeStore` trio plus the in-memory books and the `SUIT`/`AI` default watchlist, and this task leaves all of that untouched — which is the behaviour the rule protects. Once `EnvioDataSource` talks to the routes the class has no importer at all, and an unimported file is worse than no file.
+- **The demo source obeys Ruling 1 as well: its reads answer empty, its writes throw.** `MockDataSource` gains a session it did not have, so a behaviour does change — the `SUIT`/`AI` default watchlist now appears once the demo wallet signs rather than to anyone who opens the page, because a watchlist belongs to an address from M4 on. Making the reads throw instead would break Ruling 1 in the one build a reviewer is most likely to open; making them answer `[]` and `{}` costs nothing and keeps both sources the same shape. The spec does not ask the demo to gate reads, so nothing else about it moves.
 - **`SignModal` keeps every pixel; its preview stops claiming to be the message.** The exact EIP-4361 text cannot be shown before the button is pressed, because the nonce comes from the server at that moment. The mono box keeps its place and its styling and shows the statement, the short address and the chain — which is what a reader takes from it anyway — and the client-side `makeNonce()` goes.
 
 - [ ] **Step 1: Widen `src/lib/types.ts`**
 
-Add two types beside `VoteDir` (after line 16, `export type VoteDir = "bull" | "bear";`):
+**Make the two edits bottom-up — the tail replacement first, then the insertion.** Both line numbers
+below are of the file as it stands before this step (after Task 2's `TraderRow` append, which is past
+both anchors and moves neither); inserting at the top first would shift the tail's numbers by ten.
+The text anchors are authoritative either way.
 
-```ts
-/** A 0x-prefixed hex string. Spelt here rather than imported from viem, exactly as `Address` is. */
-export type Hex = `0x${string}`;
-
-/**
- * Signs an EIP-191 personal message: wagmi's `signMessageAsync` with its options object adapted
- * away, so the data source can run the sign-in flow without importing a React hook.
- */
-export type SignMessage = (message: string) => Promise<Hex>;
-```
-
-Replace the whole tail of `MarketsDataSource`, from `  /** token addresses */` (line 150) to the closing brace of the interface (line 177), with:
+First, replace the whole tail of `MarketsDataSource`, from `  /** token addresses */` (line 150) to
+the closing brace of the interface (line 177), with:
 
 ```ts
   // --- The signed-in user's own data ------------------------------------
@@ -2600,7 +2677,25 @@ Replace the whole tail of `MarketsDataSource`, from `  /** token addresses */` (
 }
 ```
 
+Then add two types beside `VoteDir` (after line 16, `export type VoteDir = "bull" | "bear";`):
+
+```ts
+/** A 0x-prefixed hex string. Spelt here rather than imported from viem, exactly as `Address` is. */
+export type Hex = `0x${string}`;
+
+/**
+ * Signs an EIP-191 personal message: wagmi's `signMessageAsync` with its options object adapted
+ * away, so the data source can run the sign-in flow without importing a React hook.
+ */
+export type SignMessage = (message: string) => Promise<Hex>;
+```
+
 - [ ] **Step 2: Point `src/lib/data/envio.ts` at the routes**
+
+**Apply this step's four edits bottom-up, which is the reverse of the order they are printed in:
+the 114–128 replacement first, then the line 33 deletion, then the insertion after line 28, then the
+import block.** Every line number here is of `src/lib/data/envio.ts` as it stands today (128 lines,
+the class's closing brace on line 128); editing upwards keeps all four numbers true.
 
 Replace the import block at the top (lines 1–4) with:
 
@@ -2629,7 +2724,9 @@ const SIWE_STATEMENT = "Sign in to SuitVentures Markets";
 const SIGN_IN_TTL_MS = 7 * 86_400 * 1000;
 ```
 
-Replace the four user-data methods at the bottom of the class (lines 114–127) with:
+Replace the four user-data methods at the bottom of the class **together with the class's own
+closing brace — lines 114–128, from `  async watchlist(address: Address)` through the final `}` of
+the file** — with this block, which ends in that same brace:
 
 ```ts
   // --- The signed-in user's own data ------------------------------------
@@ -2734,9 +2831,19 @@ git rm src/lib/data/localStore.ts
 
 - [ ] **Step 3: Give `src/lib/data/mock.ts` a session of its own**
 
+**Apply this step's five edits bottom-up, the reverse of the order they are printed in: the 265–337
+replacement first, then the line 170 insertion, the line 161 insertion, the 145–148 replacement, the
+72–74 replacement, and the type import last.** Every number here is of `src/lib/data/mock.ts` as it
+stands today (337 lines, the class's closing brace on line 337); the earlier edits add nine lines
+between them, so editing downwards would put every later number nine lines out.
+
 Replace `requireSignature` (lines 72–74) with:
 
 ```ts
+/**
+ * The demo's writes are the loud half of Ruling 1: `setWatch` and `vote` throw while nobody has
+ * signed in, so an optimistic star rolls back. The reads answer empty instead — see `watchlist()`.
+ */
 function requireSession(address: Address | null): Address {
   if (!address) throw new Error("Sign in first.");
   return address;
@@ -2770,12 +2877,21 @@ and one line at the end of the constructor (after line 170's `);`):
     this.signedAddress = opts.address ? (opts.address.toLowerCase() as Address) : null;
 ```
 
-Replace the six user-data methods (lines 265–336, `private loadWatch` through the end of `vote`) with:
+Replace the six user-data methods **together with the class's own closing brace — lines 265–337,
+from `  private loadWatch(address: Address)` through the final `}` of the file** — with this block,
+which ends in that same brace:
 
 ```ts
   // The demo keeps its watchlist and votes in this browser, keyed by the signed-in address —
   // the local persistence the contract protects. Nothing here talks to a route: a demo build has
   // no market store behind it and every mock token is a generated address no backend knows.
+  //
+  // Ruling 1 applies to this source too: the two reads answer `[]` and `{}` while nobody has
+  // signed in rather than throwing. That is a real behaviour change — before M4 a demo build
+  // showed the SUIT/AI default watchlist to anyone who opened it, and from M4 it appears once the
+  // wallet signs, because a watchlist now belongs to an address rather than to a browser. The
+  // spec does not require the demo to gate reads, so nothing else about it changes: sign in and
+  // the same `localStorage` list, defaults and all, is exactly where it was.
 
   private loadWatch(address: Address): string[] {
     const key = address.toLowerCase();
@@ -2790,10 +2906,11 @@ Replace the six user-data methods (lines 265–336, `private loadWatch` through 
     return list;
   }
 
+  /** Empty rather than a throw while nobody is signed in — Ruling 1, the same as the live source. */
   async watchlist(): Promise<string[]> {
-    const address = requireSession(this.signedAddress);
+    const address = this.signedAddress;
     await this.delay();
-    return [...this.loadWatch(address)];
+    return address ? [...this.loadWatch(address)] : [];
   }
 
   async setWatch(id: string, on: boolean): Promise<void> {
@@ -2819,10 +2936,11 @@ Replace the six user-data methods (lines 265–336, `private loadWatch` through 
     return book;
   }
 
+  /** Empty rather than a throw while nobody is signed in — Ruling 1, the same as the live source. */
   async votes(): Promise<Record<string, VoteDir>> {
-    const address = requireSession(this.signedAddress);
+    const address = this.signedAddress;
     await this.delay();
-    return { ...this.loadVotes(address) };
+    return address ? { ...this.loadVotes(address) } : {};
   }
 
   async vote(id: string, dir: VoteDir): Promise<VoteDir | null> {
@@ -2865,7 +2983,8 @@ Replace the six user-data methods (lines 265–336, `private loadWatch` through 
 }
 ```
 
-Add `SignMessage` to the type import at the top of the file (line 12 area), so the list reads `..., Side, SignMessage, TokenPair, Trade, VoteDir,`.
+Finally, the type import at the top is one name per line (lines 1–14): insert `  SignMessage,`
+between `  Side,` (line 10) and `  TokenPair,` (line 11).
 
 - [ ] **Step 4: Drop the address from the two user hooks**
 
@@ -3327,17 +3446,18 @@ import { EnvioDataSource } from "./envio";
 ```
 
 Run: `npx vitest run src/lib/data/envio.test.ts`
-Expected: PASS, the 20 quote tests unchanged plus 15 new ones (three of them from the two `it.each` tables), 35 in the file.
+Expected: PASS, the 20 quote tests unchanged plus 13 new ones — 11 `it`s, of which two are `it.each([401, 503])` tables contributing two cases each — for 33 in the file.
 
 - [ ] **Step 8: Write the `AppState` sign-in test**
 
 `src/context/AppState.test.tsx`:
 
 ```tsx
+import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Address, Hex, SignMessage, VoteDir } from "@/lib/types";
 import { act, fireEvent, queryHarness, render, screen, waitFor } from "@/test/dom";
-import { AppStateProvider, useAppState } from "./AppState";
+import { AppStateProvider, useAppState, type AppState } from "./AppState";
 
 /** Checksummed, as wagmi reports it; the server's copy below is lowercase, as the cookie carries it. */
 const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
@@ -3368,8 +3488,19 @@ vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
 /** The fake wallet: one signature, always accepted, recorded for the assertion. */
 const sign: SignMessage = vi.fn(async () => "0xsignature" as Hex);
 
+/**
+ * The live context value, captured after each commit. `completeSign` returns a promise that
+ * rejects when the wallet or the server refuses, and a rejection nobody holds is an unhandled
+ * error Vitest 4 fails the whole run on — so the refusal case awaits it from here instead of
+ * firing it from a click and dropping it.
+ */
+let api: AppState | null = null;
+
 function Probe() {
   const s = useAppState();
+  useEffect(() => {
+    api = s;
+  });
   return (
     <div>
       <div data-testid="signed">{String(s.signed)}</div>
@@ -3378,7 +3509,14 @@ function Probe() {
       <button type="button" onClick={() => s.toggleStar(TOKEN)}>
         star
       </button>
-      <button type="button" onClick={() => void s.completeSign(sign, WALLET)}>
+      <button
+        type="button"
+        // The real `SignModal` awaits inside a try/catch; the button must not float a rejection
+        // either, so every path out of a click is handled.
+        onClick={() => {
+          s.completeSign(sign, WALLET).catch(() => {});
+        }}
+      >
         complete
       </button>
     </div>
@@ -3398,6 +3536,7 @@ function show() {
 
 describe("AppStateProvider sign-in", () => {
   beforeEach(() => {
+    api = null;
     h.account = { address: WALLET, isConnected: true };
     h.openConnectModal.mockClear();
     h.ds.session.mockReset().mockResolvedValue(null);
@@ -3450,9 +3589,15 @@ describe("AppStateProvider sign-in", () => {
     show();
     await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
     fireEvent.click(screen.getByText("star"));
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+
+    // The rejection is awaited here rather than fired from the button and dropped: `completeSign`
+    // must let the failure travel — that is how `SignModal` knows to stay open and show its line —
+    // and a floating rejection is an unhandled error Vitest fails the run on.
     await act(async () => {
-      fireEvent.click(screen.getByText("complete"));
+      await expect(api!.completeSign(sign, WALLET)).rejects.toThrow("401");
     });
+
     expect(screen.getByTestId("signed").textContent).toBe("false");
     expect(screen.getByTestId("modal").textContent).toBe("star");
     expect(h.ds.setWatch).not.toHaveBeenCalled();
@@ -3552,7 +3697,7 @@ Expected: PASS, 4 tests.
 - [ ] **Step 10: Run the gates**
 
 Run: `npm test && npx tsc --noEmit && npx eslint . && npm run build`
-Expected: all green. `grep -rn "signature" src/lib/data src/context/AppState.tsx` matches nothing outside a comment — no address and no signature is carried in client state any more; `grep -rn "LocalWatchStore" src` matches nothing; `grep -rn 'from "viem"' src/lib/data/envio.ts` matches nothing (the SIWE helper comes from `viem/siwe`).
+Expected: all green. `grep -rn "signature" src/context/AppState.tsx` matches one line and it is the comment `// A wallet connected while an action was waiting: continue to the signature.` — no signature is carried in client state any more. (The same grep over `src/lib/data` is *not* silent and must not be: `signIn` legitimately has `const signature = await sign(message)` and `JSON.stringify({ message, signature })`, which is the one place a signature exists at all, on its way to the route.) `grep -rn "LocalWatchStore" src` matches nothing; `grep -rn 'from "viem"' src/lib/data/envio.ts` matches nothing (the SIWE helper comes from `viem/siwe`).
 
 - [ ] **Step 11: Commit**
 
@@ -3570,15 +3715,16 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 
 **Files:**
 - Create: `src/app/api/traders/route.ts`, `src/app/api/traders/route.test.ts`, `src/app/traders/page.tsx`, `src/components/TradersBoard.tsx`, `src/components/TradersBoard.test.tsx`, `src/hooks/useMarketsData.test.tsx`
-- Modify: `src/lib/types.ts` (`TradersBy`, `TraderRow`, `MarketsDataSource.traders`), `src/lib/data/envio.ts` (`traders`, `StoreUnavailableError`), `src/lib/data/envio.test.ts` (three more tests), `src/lib/data/mock.ts` (a fixed list), `src/hooks/useMarketsData.ts` (`keys.traders`, `useTraders`), `src/components/TopBar.tsx` (one nav entry)
+- Modify: `src/lib/types.ts` (`TradersBy` and `MarketsDataSource.traders` only — `TraderRow` is Task 2's and is not touched here), `src/lib/data/envio.ts` (`traders`, `StoreUnavailableError`), `src/lib/data/envio.test.ts` (three more tests), `src/lib/data/mock.ts` (a fixed list), `src/hooks/useMarketsData.ts` (`keys.traders`, `useTraders`), `src/components/TopBar.tsx` (one nav entry)
+- Not modified: `src/lib/social/store.ts` — Task 2 already writes the `export type { TraderRow } from "@/lib/types";` re-export this task's board relies on.
 
 **Interfaces:**
 - Consumes: `topTraders(db, { sinceTs, by, limit })` from `@/lib/social/store` (Task 3); `hasDb()`, `getDb()` from `@/lib/db/client`; `cached`, `badRequest`, `failure` from `@/app/api/_lib/respond`; `ttlCache`, `clearTtlCache` from `@/lib/envio/cache`; `addressUrl` from `@/lib/chain`; `fmtUsd`, `fmtInt`, `short` from `@/lib/format`.
-- Produces: `GET /api/traders?by=volume|trades` → `TraderRow[]`; `TradersBy` and `TraderRow` in `src/lib/types.ts`; `MarketsDataSource.traders(by)`; `StoreUnavailableError` from `src/lib/data/envio.ts`; `useTraders(by)`; `TradersBoard`; the `/traders` page and its nav link.
+- Produces: `GET /api/traders?by=volume|trades` → `TraderRow[]`; `TradersBy` in `src/lib/types.ts` (`TraderRow` comes from Task 2); `MarketsDataSource.traders(by)`; `StoreUnavailableError` from `src/lib/data/envio.ts`; `useTraders(by)`; `TradersBoard`; the `/traders` page and its nav link.
 
 Decisions where the spec and the contract left room (one line each):
 
-- **`TraderRow` is declared in `src/lib/types.ts`, and `src/lib/social/store.ts` re-exports it.** The contract declares it in the store module, which sits next to `Db` and the `market` schema and is a server module by neighbourhood; a client component that imported a type from there would pull a `server-only` path into the browser bundle the day someone adds the marker. The type lives where every other shared shape lives and the store keeps its contracted export name with a one-line `export type { TraderRow } from "@/lib/types";`. **Task 3 is amended to that one line.**
+- **`TraderRow` is declared in `src/lib/types.ts`, and `src/lib/social/store.ts` re-exports it.** The contract declares it in the store module, which sits next to `Db` and the `market` schema and is a server module by neighbourhood; a client component that imported a type from there would pull a `server-only` path into the browser bundle the day someone adds the marker. The type lives where every other shared shape lives and the store keeps its contracted export name with a one-line `export type { TraderRow } from "@/lib/types";`. **Both halves of that are Task 2's work and are already written** (Step 3 declares the interface in `types.ts` and the store module carries the re-export line): this task re-declares nothing and amends nothing, it only adds `TradersBy` and the `traders` method.
 - **`volumeUsd` is a `number`, and that is not a Global Constraint 1 violation.** It is a display figure — a sum of quote amounts already multiplied by a USD price — and nothing on any execution path reads it. The contract says so in as many words ("the board's USD is display"); the comment on the field says so too, so nobody later reaches for it as an amount.
 - **The 503 is decided before the query, and is not cached.** `hasDb()` is a synchronous environment check, so a build without a store never reaches `getDb()` and never allocates a connection; the answer carries `Cache-Control: no-store` so the CDN does not pin "no store" across the deploy that turns one on.
 - **The cache key carries `by`, and the 24-hour window is computed inside the loader.** `ttlCache("traders:volume", …)` and `ttlCache("traders:trades", …)` are separate entries, so one ordering cannot serve the other; `sinceTs` is evaluated where the query is, so each recompute asks for the window ending now rather than the window that existed when the route module loaded.
@@ -3587,27 +3733,19 @@ Decisions where the spec and the contract left room (one line each):
 - **The board is its own table, not `PairsTable`.** `PairsTable` is built around a `TokenPair` row with stars, sparklines and a sort model; a five-column wallet ranking shares its type scale and hairlines and nothing else. The grid is the `HOLDER_COLS` idiom from `ActivityTabs`, which is what a reader of this repo already recognises as "a small ranked table".
 - **The mock's list is fixed and small, and re-orders itself.** Three wallets whose volume ranking and trade-count ranking disagree, so a demo build's toggle visibly does something; the mock never throws `StoreUnavailableError`, because a demo build has no store to be missing.
 
-- [ ] **Step 1: Declare the row in `src/lib/types.ts`**
+- [ ] **Step 1: Declare the ordering in `src/lib/types.ts`**
 
-Add these two types just below `SignMessage` (added in Task 4):
+`TraderRow` is already in `src/lib/types.ts` — Task 2 Step 3 put it there, with the `volumeUsd`
+comment, and Task 2's `src/lib/social/store.ts` already carries the one-line re-export
+`export type { TraderRow } from "@/lib/types";`. **Do not declare the interface again** (Ruling 5):
+a second `export interface TraderRow` with the same members declaration-merges, so every gate stays
+green while the file ends up carrying the type twice under two doc blocks.
+
+So this step adds one type, just below `SignMessage` (added in Task 4):
 
 ```ts
 /** How the traders board is ranked. */
 export type TradersBy = "volume" | "trades";
-
-/** One wallet on the top traders board, over the route's 24-hour window. */
-export interface TraderRow {
-  wallet: Address;
-  /**
-   * Display only: the 24-hour volume already converted through the pool's quote asset and its USD
-   * price. Never an execution amount, so a float is the right shape for it (Global Constraint 1
-   * governs amounts the chain will see; this one it never does).
-   */
-  volumeUsd: number;
-  trades: number;
-  /** Distinct tokens this wallet traded in the window. */
-  tokens: number;
-}
 ```
 
 and one method to `MarketsDataSource`, just above the `// --- The signed-in user's own data` comment:
@@ -3617,11 +3755,9 @@ and one method to `MarketsDataSource`, just above the `// --- The signed-in user
   traders(by: TradersBy): Promise<TraderRow[]>;
 ```
 
-Then amend Task 3's `src/lib/social/store.ts` to re-export rather than declare the row:
-
-```ts
-export type { TraderRow } from "@/lib/types";
-```
+`TraderRow` is declared in this same file — Task 2 Step 3 appended it after `MarketsDataSource` — and
+type declarations are hoisted within a module, so the method above may name it and no import line
+here changes.
 
 - [ ] **Step 2: Write the route**
 
@@ -3859,7 +3995,7 @@ import { EnvioDataSource, StoreUnavailableError } from "./envio";
 ```
 
 Run: `npx vitest run src/lib/data/envio.test.ts`
-Expected: PASS, 38 tests (the 35 from Task 4 plus these three).
+Expected: PASS, 36 tests (the 33 the file holds after Task 4, plus these three).
 
 - [ ] **Step 5: Add the hook, and test it**
 
@@ -4115,13 +4251,17 @@ import { addressUrl } from "@/lib/chain";
 import { StoreUnavailableError } from "@/lib/data/envio";
 import { fmtInt, fmtUsd, short } from "@/lib/format";
 import type { Address, TraderRow } from "@/lib/types";
-import { fireEvent, render, screen } from "@/test/dom";
+import { fireEvent, render, screen, within } from "@/test/dom";
 import TradersBoard from "./TradersBoard";
 
+/**
+ * No figure here may collide with a rank cell (`1`, `2`, `3`) inside its own row, or `getByText`
+ * throws "found multiple elements" — which is why the third row's `tokens` is 5 rather than 3.
+ */
 const ROWS: TraderRow[] = [
   { wallet: "0x1111111111111111111111111111111111111111" as Address, volumeUsd: 1_284_500, trades: 96, tokens: 7 },
   { wallet: "0x2222222222222222222222222222222222222222" as Address, volumeUsd: 742_300, trades: 318, tokens: 12 },
-  { wallet: "0x3333333333333333333333333333333333333333" as Address, volumeUsd: 118_900, trades: 41, tokens: 3 },
+  { wallet: "0x3333333333333333333333333333333333333333" as Address, volumeUsd: 118_900, trades: 41, tokens: 5 },
 ];
 
 const h = vi.hoisted(() => ({
@@ -4148,21 +4288,22 @@ describe("TradersBoard", () => {
     h.seenBy.mockClear();
   });
 
-  it("ranks three wallets, each linked to the explorer, with volume in USD", () => {
+  it("ranks three wallets, each linked to the explorer, with its own volume, trades and tokens", () => {
     render(<TradersBoard />);
     for (const [i, row] of ROWS.entries()) {
       const link = screen.getByRole("link", { name: short(row.wallet) });
       expect(link.getAttribute("href")).toBe(addressUrl(row.wallet));
       expect(link.getAttribute("target")).toBe("_blank");
       expect(link.getAttribute("rel")).toBe("noreferrer");
-      // The rank is the first cell of the row this wallet's own link sits in, so a mis-ordered
-      // board fails here instead of reading "some 1 is somewhere on the page".
-      const cells = link.parentElement?.children ?? [];
-      expect(cells[0]?.textContent).toBe(String(i + 1));
+      // Every figure is read inside the row this wallet's own link sits in, so a mis-ordered board
+      // fails here instead of reading "some 1 is somewhere on the page" — and a board-wide
+      // `getByText(fmtInt(tokens))` would anyway throw on a count that some rank cell also renders.
+      const rowEl = link.parentElement as HTMLElement;
+      expect(rowEl.children[0]?.textContent).toBe(String(i + 1));
+      expect(within(rowEl).getByText(fmtUsd(row.volumeUsd))).toBeTruthy();
+      expect(within(rowEl).getByText(fmtInt(row.trades))).toBeTruthy();
+      expect(within(rowEl).getByText(fmtInt(row.tokens))).toBeTruthy();
     }
-    expect(screen.getByText(fmtUsd(ROWS[0].volumeUsd))).toBeTruthy();
-    expect(screen.getByText(fmtInt(ROWS[1].trades))).toBeTruthy();
-    expect(screen.getByText(fmtInt(ROWS[2].tokens))).toBeTruthy();
   });
 
   it("starts on volume and switches the ordering it asks for", () => {
@@ -4221,7 +4362,7 @@ Expected: all green. `npm run build` lists `/api/traders` as a dynamic route (ƒ
 - [ ] **Step 10: Commit**
 
 ```bash
-git add src/lib/types.ts src/lib/social/store.ts src/app/api/traders/route.ts src/app/api/traders/route.test.ts \
+git add src/lib/types.ts src/app/api/traders/route.ts src/app/api/traders/route.test.ts \
   src/app/traders/page.tsx src/components/TradersBoard.tsx src/components/TradersBoard.test.tsx \
   src/components/TopBar.tsx src/hooks/useMarketsData.ts src/hooks/useMarketsData.test.tsx \
   src/lib/data/envio.ts src/lib/data/envio.test.ts src/lib/data/mock.ts
@@ -4234,27 +4375,32 @@ Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ### Task 6: Documentation and environment
 
 **Files:**
-- Modify: `.env.example`, `README.md` (frontend), `docs/superpowers/plans/2026-09-16-supabase-market-store.md`, `/Users/kobs/Desktop/SuitVenturesMarket/README.md` (the workspace repo, a level up)
+- Modify: `README.md` (frontend), `docs/superpowers/plans/2026-09-16-supabase-market-store.md`, `/Users/kobs/Desktop/SuitVenturesMarket/README.md` (the workspace repo, a level up)
+- Not modified: `.env.example` — Task 1 Step 11 owns it (Ruling 17); Step 1 below only verifies the line is there.
 
 **Interfaces:**
 - Consumes: nothing at runtime. It records what Tasks 1–5 built.
-- Produces: `SESSION_SECRET` in the example environment; the frontend README's stub table telling the truth; runbook step R4 carrying the one variable and the one migration M4 adds; D35 in the workspace Decision Log amended to what was actually built.
+- Produces: the frontend README's stub table telling the truth; runbook step R4 carrying the one variable and the one migration M4 adds; D35 in the workspace Decision Log amended to what was actually built. (`SESSION_SECRET` reached `.env.example` in Task 1.)
 
 Decisions where the spec and the contract left room (one line each):
 
 - **Two commits, because these are two repositories.** `/Users/kobs/Desktop/SuitVenturesMarket` is the workspace repo and tracks the frontend as a gitlink (its recent history is full of "frontend pointer at …" commits). The frontend's three files commit inside the frontend repo; the workspace README commits in the workspace repo together with the moved pointer, exactly as commit `3fafe9f` did.
-- **`SESSION_SECRET` joins the bottom half of `.env.example`, in that half's style.** Everything above the `# Market store (server-only)` heading is a `NEXT_PUBLIC_` variable with a paragraph comment above it; everything below is a server variable with an inline comment beside it. The new one is server-only, so it takes the inline form and gets its own heading, which is also where M5's rate-limit knobs will go.
+- **`SESSION_SECRET` joins the bottom half of `.env.example`, in that half's style — and Task 1 is what writes it.** Everything above the `# Market store (server-only)` heading is a `NEXT_PUBLIC_` variable with a paragraph comment above it; everything below is a server variable with an inline comment beside it. The new one is server-only, so it takes the inline form and gets its own heading, which is also where M5's rate-limit knobs will go. It lands in Task 1's commit beside the module that reads it (Ruling 17), so this task neither appends it a second time nor stages the file.
 - **The stub table's "Launchpad links" row is left alone.** It still reads "M3 — Bags dapp URL" and M3 has shipped, so it is stale — but it is stale about a different milestone, and rewriting rows this task did not touch is how a docs commit stops being reviewable. Flagged for Kobe instead.
 - **D35's amendment names the three things that changed, and nothing else.** The Decision Log's convention (see D34, D39) is one dated sentence appended inside the existing cell, never a rewrite of the original text, so the original decision stays readable next to what it became.
 
-- [ ] **Step 1: Add `SESSION_SECRET` to `.env.example`**
+- [ ] **Step 1: Check `SESSION_SECRET` is in `.env.example` — do not add it again**
 
-Append to the end of the file, after the `SYNC_INTERVAL_SEC` line:
+Task 1 Step 11 appended it (Ruling 17), so this step writes nothing. Confirm the file ends with:
 
 ```
 # Social layer (server-only)
 SESSION_SECRET=          # 32 random bytes, `openssl rand -hex 32`; unset → sign-in and user data off, reads unaffected
 ```
+
+Run: `grep -c "^SESSION_SECRET=" .env.example`
+Expected: `1`. If it is `0`, Task 1 Step 11 was skipped — append the block above and say so in the
+commit; if it is `2`, a second append crept in and one copy must be deleted before Step 5's grep.
 
 - [ ] **Step 2: Tell the truth in the frontend `README.md` stub table**
 
@@ -4284,7 +4430,7 @@ In `docs/superpowers/plans/2026-09-16-supabase-market-store.md`, inside the `R4`
 and these two immediately after that:
 
 ```
-The social tables ship as their own migration, since R0 froze the original file: `npm run db:migrate` applies `supabase/migrations/20260918000000_social.sql` (`market.watchlist`, `market.votes`, index `votes_token`) the first time it runs against this database. Run it before the deploy, not after — the user routes answer 500 rather than 503 against a database that has `DATABASE_URL` but no social tables.
+The social tables ship as their own migration, since R0 froze the original file: `npm run db:migrate` applies `supabase/migrations/20260919000000_social.sql` (`market.watchlist`, `market.votes`, index `votes_token`) the first time it runs against this database. Run it before the deploy, not after — the user routes answer 500 rather than 503 against a database that has `DATABASE_URL` but no social tables.
 ```
 
 - [ ] **Step 4: Amend D35 in the workspace Decision Log**
@@ -4312,24 +4458,25 @@ so the cell ends:
 Run: `npm test && npx tsc --noEmit && npx eslint . && npm run build`
 Expected: all green, unchanged from Task 5 — this task touches no code.
 
-Run these four greps from the frontend directory:
+Run these five greps from the frontend directory:
 
 ```bash
-grep -n "SESSION_SECRET" .env.example
+grep -c "^SESSION_SECRET=" .env.example
 grep -n "Done (M4)" README.md
 grep -n "SESSION_SECRET" docs/superpowers/plans/2026-09-16-supabase-market-store.md
+grep -n "20260919000000_social.sql" docs/superpowers/plans/2026-09-16-supabase-market-store.md
 grep -c "EIP-4361" ../README.md
 ```
 
-Expected: one line for `SESSION_SECRET` in `.env.example`; two lines carrying `**Done (M4)**` in the README; one line for `SESSION_SECRET` inside the R4 bullet; `1` from the workspace README. And `grep -rn "SESSION_SECRET" .env.local` must never be run and the file never printed.
+Expected: `1` for `SESSION_SECRET` in `.env.example` — exactly one key, written by Task 1 and already committed there, so `git status` shows `.env.example` unchanged in this task; two lines carrying `**Done (M4)**` in the README; one line for `SESSION_SECRET` inside the R4 bullet; one line naming the migration, spelt exactly as Task 2 Step 1 created it; `1` from the workspace README. And `grep -rn "SESSION_SECRET" .env.local` must never be run and the file never printed.
 
 - [ ] **Step 6: Commit, in both repositories**
 
-In the frontend repository:
+In the frontend repository — `.env.example` is deliberately not staged here; it belongs to Task 1's commit:
 
 ```bash
-git add .env.example README.md docs/superpowers/plans/2026-09-16-supabase-market-store.md
-git commit -m "Document the session secret, the social migration and the traders board" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+git add README.md docs/superpowers/plans/2026-09-16-supabase-market-store.md
+git commit -m "Document the social migration, the session secret's rollout step and the traders board" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_016tofArVnM9erCZUwPku467"
 ```
 
