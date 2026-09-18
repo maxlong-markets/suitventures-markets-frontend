@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { usePublicClient, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
-import { usePairBalances } from "@/hooks/useTokenBalance";
+import { invalidatePairBalances, usePairBalances } from "@/hooks/useTokenBalance";
 import { useSwapQuote } from "@/hooks/useMarketsData";
-import { ORIGIN_URLS } from "@/lib/chain";
+import { hasRouter, ORIGIN_URLS, robinhoodChain } from "@/lib/chain";
 import { fmtAmt, fmtQuote, fmtTradeAmt, fmtUsd } from "@/lib/format";
+import { toHuman } from "@/lib/quote/math";
 import { executeSwap, SwapFailedError, SwapRejectedError } from "@/lib/swap";
 import type { Denom, Side, TokenPair } from "@/lib/types";
 import { GearIcon, Spinner } from "./ui";
@@ -173,9 +175,10 @@ function SlippagePopover({
 
 function TradeForm({ pair }: { pair: TokenPair }) {
   const { isConnected, address, isHolder, addToast, updateToast } = useAppState();
-  const { data: walletClient } = useWalletClient();
-  const publicClient = usePublicClient();
   const balances = usePairBalances(pair);
+  const publicClient = usePublicClient({ chainId: robinhoodChain.id });
+  const { data: walletClient } = useWalletClient({ chainId: robinhoodChain.id });
+  const qc = useQueryClient();
   const [side, setSide] = useState<Side>("buy");
   const [denom, setDenom] = useState<Denom>("quote");
   const [amount, setAmount] = useState("");
@@ -185,21 +188,35 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   const buy = side === "buy";
+  // Display and gating only: every amount that reaches the route or the chain is the string
+  // above, never this (Global Constraint 1, ruling 11).
   const amountNum = parseFloat(amount) || 0;
   const payAsset = buy ? pair.quote : pair.ticker;
   const receiveAsset = buy ? pair.ticker : pair.quote;
   const payBalance = buy ? balances.quote : balances.token;
+  /** The pay balance to the last wei, for the Max button (ruling 12). */
+  const payBalanceText = buy ? balances.quoteText : balances.tokenText;
   const quoteUsd = pair.priceUsd / pair.priceQuote;
 
   const quoteQuery = useSwapQuote({
     id: pair.id,
     side,
+    // The text the user typed, unrounded: `toBase` on the server turns this very string into
+    // the amountIn Permit2 transfers.
     amount,
     denom,
     isSuitHolder: isHolder,
     slippagePct: slippage.value,
   });
+  const closeSlippage = useCallback(() => setSlipOpen(false), []);
+
+  // Every hook above runs unconditionally. Routability is the route's verdict, not the
+  // list's `tradeable` flag, so the "Not routed" card is decided here — and only on an
+  // explicit false, so it can never flash before anything has been priced.
   const quote = quoteQuery.data;
+  if (quote?.routable === false) return <UntradeableCard pair={pair} />;
+
+  const call = quote?.call;
   const payAmount = amountNum ? (quote?.payAmount ?? 0) : 0;
   const receiveAmount = amountNum ? (quote?.receiveAmount ?? 0) : 0;
   const impact = quote?.priceImpactPct ?? 0;
@@ -227,15 +244,31 @@ function TradeForm({ pair }: { pair: TokenPair }) {
 
   let state: "ready" | "disabled" | "pending" = "ready";
   let reason = "";
-  if (!isConnected) {
+  if (!hasRouter()) {
+    // The quote route still answers, so every number on the panel is real; only execution
+    // is off until NEXT_PUBLIC_SVROUTER_ADDRESS names a deployed router.
+    state = "disabled";
+    reason = "Trading goes live when the router is deployed";
+  } else if (!isConnected) {
     state = "disabled";
     reason = "Connect a wallet to trade.";
   } else if (!amountNum) {
     state = "disabled";
     reason = "Enter an amount.";
+  } else if (quoteQuery.isError) {
+    state = "disabled";
+    reason = "Quote unavailable. Try again.";
   } else if (payAmount > payBalance) {
     state = "disabled";
     reason = `Insufficient ${payAsset} balance.`;
+  } else if (!walletClient || !publicClient) {
+    state = "disabled";
+    reason = "Connecting to your wallet…";
+  } else if (!call) {
+    // No execution block: the first priced answer is still in flight, or this build's data
+    // source is the mock, which never asks the route.
+    state = "disabled";
+    reason = "Fetching a quote…";
   }
   if (pending) state = "pending";
 
@@ -253,24 +286,33 @@ function TradeForm({ pair }: { pair: TokenPair }) {
   };
   const quick = (pct: number) => {
     setDenom(buy ? "quote" : "token");
+    if (!payBalance) {
+      setAmount("");
+      return;
+    }
+    // 100 % is the balance to the last wei (spec section 5, ruling 12): the router's fee comes
+    // out of the input, so the whole balance is spendable, and a rounded Max would either leave
+    // dust behind or trip the insufficient-balance guard. 25/50/75 keep their display rounding —
+    // they are a convenience, not a promise about a balance.
     setAmount(
-      payBalance ? String(+((payBalance * pct) / 100).toFixed(buy ? 2 : 0)) : "",
+      pct === 100
+        ? payBalanceText
+        : String(+((payBalance * pct) / 100).toFixed(buy ? 2 : 0)),
     );
   };
-  const closeSlippage = useCallback(() => setSlipOpen(false), []);
 
   const submit = async () => {
-    if (state !== "ready" || !address) return;
+    if (state !== "ready" || !address || !call || !walletClient || !publicClient) return;
     const verb = buy ? "Buying" : "Selling";
     const done = buy ? "Bought" : "Sold";
-    const line = `${fmtTradeAmt(receiveAmount)} ${receiveAsset} for ${fmtTradeAmt(payAmount)} ${payAsset}`;
+    const paid = `${fmtTradeAmt(payAmount)} ${payAsset}`;
     setPending(true);
     setSlipOpen(false);
-    const toastId = addToast({ kind: "pending", message: `${verb} ${line}` });
+    const toastId = addToast({
+      kind: "pending",
+      message: `${verb} ${fmtTradeAmt(receiveAmount)} ${receiveAsset} for ${paid}`,
+    });
     try {
-      if (!quote?.call || !walletClient || !publicClient) {
-        throw new SwapFailedError("Trading goes live when the router is deployed. Nothing was spent.");
-      }
       const handle = await executeSwap(
         {
           ticker: pair.ticker,
@@ -282,19 +324,26 @@ function TradeForm({ pair }: { pair: TokenPair }) {
           slippagePct: slippage.value,
           account: address,
           isSuitHolder: isHolder,
-          call: quote.call,
+          // Verbatim: the browser never recomputes an amount the route returned.
+          call,
         },
         { wallet: walletClient, publicClient, account: address },
       );
       updateToast(toastId, { hash: handle.hash });
-      await handle.confirmation;
-      updateToast(toastId, { kind: "confirmed", message: `${done} ${line}` });
+      const receipt = await handle.confirmation;
+      // The Trade event's own number, never the quote's: a hook can take a cut on the way
+      // out, and the user is told what actually landed in the wallet.
+      const received = fmtTradeAmt(Number(toHuman(receipt.amountOut, call.tokenOutDecimals)));
+      updateToast(toastId, { kind: "confirmed", message: `${done} ${received} ${receiveAsset} for ${paid}` });
       setAmount("");
+      void invalidatePairBalances(qc);
     } catch (err) {
       updateToast(toastId, {
         kind: "failed",
+        // src/lib/swap.ts owns the wording (spec section 4); duplicating it here would let
+        // the two drift.
         message:
-          err instanceof SwapFailedError || err instanceof SwapRejectedError
+          err instanceof SwapRejectedError || err instanceof SwapFailedError
             ? err.message
             : "Swap failed. Nothing was spent.",
       });

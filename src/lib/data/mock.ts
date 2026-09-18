@@ -232,6 +232,17 @@ export class MockDataSource implements MarketsDataSource {
     return out.map((h) => ({ ...h }));
   }
 
+  /**
+   * The seeded approximation, deliberately not the quote route: every mock token is a
+   * pseudo-random address no backend knows, so `/api/tokens/{id}/quote` would 404 for all
+   * of them and the demo build's panel would break. The result therefore carries no `call`,
+   * which the panel reads as "nothing can be submitted" — the state a build with no
+   * NEXT_PUBLIC_SVROUTER_ADDRESS is already in.
+   *
+   * `amount` is the typed string (ruling 11); this is one of the two float models allowed to
+   * parse it, because nothing it computes ever reaches the chain. A half-typed "." is NaN,
+   * which reads as 0.
+   */
   async quoteSwap(
     id: string,
     side: Side,
