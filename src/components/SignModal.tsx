@@ -93,7 +93,7 @@ function SignDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="h-10 border border-hairline-btn bg-transparent font-mono text-[10px] uppercase tracking-[0.22em] text-ink hover:border-[rgba(240,232,214,0.5)]"
+            className="h-10 border border-hairline-btn bg-transparent font-mono text-[10px] uppercase tracking-[0.22em] text-ink hover:border-[rgba(252,251,247,0.85)]"
           >
             Cancel
           </button>
@@ -101,7 +101,7 @@ function SignDialog({
             type="button"
             onClick={sign}
             disabled={busy || isPending}
-            className="flex h-10 items-center justify-center gap-2 bg-chalk font-mono text-[10px] uppercase tracking-[0.22em] text-void hover:bg-white disabled:cursor-wait disabled:bg-[rgba(244,238,218,0.55)]"
+            className="flex h-10 items-center justify-center gap-2 bg-chalk font-mono text-[10px] uppercase tracking-[0.22em] text-onlight hover:bg-white disabled:cursor-wait disabled:bg-[rgba(244,238,218,0.55)]"
           >
             {busy || isPending ? (
               <>

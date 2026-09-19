@@ -50,7 +50,7 @@ export default function MarketsPage() {
             <button
               type="button"
               onClick={() => pairsQuery.refetch()}
-              className="mt-[18px] h-[30px] border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(240,232,214,0.5)]"
+              className="mt-[18px] h-[30px] border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(252,251,247,0.85)]"
             >
               Retry
             </button>

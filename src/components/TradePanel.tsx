@@ -498,7 +498,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
         <button
           type="button"
           onClick={submit}
-          className="mt-[14px] h-11 w-full bg-chalk font-mono text-[11px] uppercase tracking-[0.22em] text-void hover:bg-white"
+          className="mt-[14px] h-11 w-full bg-chalk font-mono text-[11px] uppercase tracking-[0.22em] text-onlight hover:bg-white"
         >
           {buttonLabel}
         </button>
@@ -508,7 +508,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
           <button
             type="button"
             disabled
-            className="mt-[14px] h-11 w-full cursor-not-allowed border border-hairline-mid bg-[rgba(244,238,218,0.06)] font-mono text-[11px] uppercase tracking-[0.22em] text-ink-34"
+            className="mt-[14px] h-11 w-full cursor-not-allowed border border-hairline-mid bg-[rgba(12,13,16,0.16)] font-mono text-[11px] uppercase tracking-[0.22em] text-ink-34"
           >
             {buttonLabel}
           </button>
@@ -520,7 +520,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
           <button
             type="button"
             disabled
-            className="mt-[14px] flex h-11 w-full cursor-wait items-center justify-center gap-[10px] bg-[rgba(244,238,218,0.55)] font-mono text-[11px] uppercase tracking-[0.22em] text-void"
+            className="mt-[14px] flex h-11 w-full cursor-wait items-center justify-center gap-[10px] bg-[rgba(244,238,218,0.55)] font-mono text-[11px] uppercase tracking-[0.22em] text-onlight"
           >
             <Spinner dark />
             Confirm in wallet

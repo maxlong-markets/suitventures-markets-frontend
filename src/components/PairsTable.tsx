@@ -87,7 +87,7 @@ function SkeletonRows() {
           key={i}
           className="flex h-11 items-center gap-[14px] border-b border-hairline-row"
         >
-          <span className="h-[22px] w-[22px] flex-none rounded-full bg-[rgba(232,228,220,0.06)]" />
+          <span className="h-[22px] w-[22px] flex-none rounded-full bg-[rgba(252,251,247,0.14)]" />
           <span className="skeleton h-[10px]" style={{ width: w.a }} />
           <span className="flex-1" />
           <span className="skeleton h-[10px]" style={{ width: w.b }} />
@@ -108,7 +108,7 @@ function EmptyState({ title, sub, onReset }: EmptyStateProps) {
         <button
           type="button"
           onClick={onReset}
-          className="mt-[18px] h-[30px] border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(240,232,214,0.5)]"
+          className="mt-[18px] h-[30px] border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(252,251,247,0.85)]"
         >
           Show all pairs
         </button>
@@ -281,7 +281,7 @@ const PairRow = memo(function PairRow({
             </button>
             <Link
               href={href}
-              className="flex h-8 flex-1 items-center justify-center bg-chalk text-[10px] uppercase tracking-[0.18em] text-void hover:bg-white"
+              className="flex h-8 flex-1 items-center justify-center bg-chalk text-[10px] uppercase tracking-[0.18em] text-onlight hover:bg-white"
             >
               Open {pair.ticker} →
             </Link>

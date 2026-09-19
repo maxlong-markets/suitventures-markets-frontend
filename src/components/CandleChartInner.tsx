@@ -29,16 +29,16 @@ import { fmtHHMM, fmtMonthDay, fmtPlainPrice, priceMinMove } from "@/lib/format"
  * puts the plot at y 70→270 and the volume base at y 306 like the design.
  */
 
-const UP = "#5DBE8A";
-const DOWN = "#D46A63";
-const UP_VOL = "rgba(93,190,138,0.26)";
-const DOWN_VOL = "rgba(212,106,99,0.26)";
-const GRID = "rgba(240,232,214,0.06)";
-const AXIS = "rgba(240,232,214,0.12)";
-const TEXT = "rgba(232,228,220,0.45)";
-const CROSSHAIR = "rgba(232,228,220,0.5)";
+const UP = "#6FDF9C";
+const DOWN = "#FFB0A6";
+const UP_VOL = "rgba(111,223,156,0.45)";
+const DOWN_VOL = "rgba(255,176,166,0.45)";
+const GRID = "rgba(12,13,16,0.18)";
+const AXIS = "rgba(12,13,16,0.32)";
+const TEXT = "rgba(250,248,244,0.8)";
+const CROSSHAIR = "rgba(252,251,247,0.85)";
 const TAG = "#2A2A31";
-const WATERMARK = "rgba(232,228,220,0.045)";
+const WATERMARK = "rgba(252,251,247,0.1)";
 const MONO =
   '"SF Mono", SFMono-Regular, ui-monospace, Menlo, Consolas, monospace';
 const SANS = '"Helvetica Neue", Helvetica, Arial, sans-serif';
@@ -99,7 +99,7 @@ export default function CandleChartInner({
     const chart = createChart(el, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: "#050506" },
+        background: { type: ColorType.Solid, color: "#727478" },
         textColor: TEXT,
         fontFamily: MONO,
         fontSize: 10,

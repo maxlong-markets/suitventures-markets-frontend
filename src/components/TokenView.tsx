@@ -27,7 +27,7 @@ function TokenSkeleton() {
   return (
     <div aria-busy className="border-b border-hairline py-[18px]">
       <div className="flex items-center gap-[14px]">
-        <span className="h-10 w-10 rounded-full bg-[rgba(232,228,220,0.06)]" />
+        <span className="h-10 w-10 rounded-full bg-[rgba(252,251,247,0.14)]" />
         <div className="flex flex-col gap-2">
           <span className="skeleton h-[12px] w-[140px]" />
           <span className="skeleton h-[10px] w-[220px]" />

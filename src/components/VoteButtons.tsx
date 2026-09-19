@@ -11,7 +11,7 @@ interface Props {
 }
 
 const BASE =
-  "h-[34px] whitespace-nowrap border bg-transparent px-3 font-mono text-[11px] tracking-[0.06em] hover:border-[rgba(240,232,214,0.4)]";
+  "h-[34px] whitespace-nowrap border bg-transparent px-3 font-mono text-[11px] tracking-[0.06em] hover:border-[rgba(252,251,247,0.8)]";
 
 function cls(on: boolean): string {
   return `${BASE} ${on ? "border-chalk-60 text-chalk" : "border-hairline-strong text-ink"}`;

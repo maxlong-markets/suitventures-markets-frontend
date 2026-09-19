@@ -86,7 +86,7 @@ export default function TopBar() {
             aria-expanded={searchOpen}
             className="flex h-8 w-8 items-center justify-center border border-hairline-strong bg-transparent tablet:hidden"
           >
-            <MagnifierIcon stroke="rgba(232,228,220,0.6)" />
+            <MagnifierIcon stroke="rgba(250,248,244,0.85)" />
           </button>
           <WalletButton />
         </div>

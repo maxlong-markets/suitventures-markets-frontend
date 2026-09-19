@@ -115,10 +115,10 @@ export default function QuotePicker({
               className={`${GRID} h-9 cursor-pointer border-b border-hairline-soft text-[11.5px] tabular-nums hover:bg-hover-row`}
             >
               <span
-                className={`flex h-[14px] w-[14px] items-center justify-center border text-[9px] leading-none text-void ${
+                className={`flex h-[14px] w-[14px] items-center justify-center border text-[9px] leading-none text-onlight ${
                   on
                     ? "border-chalk bg-chalk"
-                    : "border-[rgba(240,232,214,0.3)] bg-transparent"
+                    : "border-[rgba(12,13,16,0.35)] bg-transparent"
                 }`}
               >
                 {on ? "✓" : ""}
@@ -157,7 +157,7 @@ export default function QuotePicker({
           <button
             type="button"
             onClick={onDone}
-            className="h-7 bg-chalk px-[14px] text-[9.5px] uppercase tracking-[0.18em] text-void hover:bg-white"
+            className="h-7 bg-chalk px-[14px] text-[9.5px] uppercase tracking-[0.18em] text-onlight hover:bg-white"
           >
             Done
           </button>
