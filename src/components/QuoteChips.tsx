@@ -81,10 +81,10 @@ export default function QuoteChips() {
             type="button"
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
-            className={`ml-1 h-[26px] flex-none whitespace-nowrap border border-dashed bg-transparent px-[11px] font-mono text-[10px] tracking-[0.14em] hover:border-[rgba(252,251,247,0.9)] hover:text-ink ${
+            className={`ml-1 h-[26px] flex-none whitespace-nowrap border border-dashed bg-transparent px-[11px] font-mono text-[10px] tracking-[0.14em] hover:border-[rgba(240,232,214,0.6)] hover:text-ink ${
               open
                 ? "border-chalk-60 text-chalk"
-                : "border-[rgba(12,13,16,0.35)] text-ink-60"
+                : "border-[rgba(240,232,214,0.28)] text-ink-60"
             }`}
           >
             +{hidden} more {open ? "▴" : "▾"}

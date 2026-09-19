@@ -118,7 +118,7 @@ export default function QuotePicker({
                 className={`flex h-[14px] w-[14px] items-center justify-center border text-[9px] leading-none text-onlight ${
                   on
                     ? "border-chalk bg-chalk"
-                    : "border-[rgba(12,13,16,0.35)] bg-transparent"
+                    : "border-[rgba(240,232,214,0.3)] bg-transparent"
                 }`}
               >
                 {on ? "✓" : ""}

@@ -18,7 +18,7 @@ export function SuitsMark({
       alt=""
       width={size}
       height={size}
-      className={`block flex-none rounded-full object-cover shadow-[0_0_0_1px_rgba(12,13,16,0.28)] ${className}`}
+      className={`block flex-none rounded-full object-cover shadow-[0_0_0_1px_rgba(240,232,214,0.16)] ${className}`}
       style={{ width: size, height: size }}
     />
   );
@@ -91,7 +91,7 @@ export function Avatar({
 
 export function MagnifierIcon({
   className = "",
-  stroke = "rgba(250,248,244,0.8)",
+  stroke = "rgba(232,228,220,0.45)",
 }: {
   className?: string;
   stroke?: string;

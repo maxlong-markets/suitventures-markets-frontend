@@ -508,7 +508,7 @@ function TradeForm({ pair }: { pair: TokenPair }) {
           <button
             type="button"
             disabled
-            className="mt-[14px] h-11 w-full cursor-not-allowed border border-hairline-mid bg-[rgba(12,13,16,0.16)] font-mono text-[11px] uppercase tracking-[0.22em] text-ink-34"
+            className="mt-[14px] h-11 w-full cursor-not-allowed border border-hairline-mid bg-[rgba(244,238,218,0.06)] font-mono text-[11px] uppercase tracking-[0.22em] text-ink-34"
           >
             {buttonLabel}
           </button>

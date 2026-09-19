@@ -20,7 +20,7 @@ function HolderBadge() {
     >
       <SuitsMark
         size={16}
-        className="shadow-[0_0_0_1px_rgba(12,13,16,0.3)]"
+        className="shadow-[0_0_0_1px_rgba(240,232,214,0.22)]"
       />
       {tip ? (
         <span

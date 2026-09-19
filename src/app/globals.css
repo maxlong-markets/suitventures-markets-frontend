@@ -6,62 +6,64 @@
  * and bull/bear, chalk cream only for the primary action and active/selected
  * states. Hairline borders, no radius except circles.
  *
- * The ground is mid-grey (19 Sep 2026, client request): the midpoint of the two
- * mocks MAXLONG compared, #1f2125 and #c4c7cc. A mid-grey ground is the hardest
- * case for contrast — the most a colour can reach against it is 4.7:1 (pure
- * white) — so the rest of the palette is tuned around it rather than inherited
- * from the near-black version: text sits near white, the dim ladder is
- * compressed so its lowest step stays legible, hairlines are drawn dark rather
- * than light because a light hairline disappears into the ground, and up/down
- * are light tints (a saturated green or red lands within a shade of the ground's
- * own lightness and reads as mud). Panels stay dark so overlay text keeps the
- * contrast the page cannot give it.
+ * The ground is #1f2125 (20 Sep 2026, client request): a dark grey rather than
+ * the near-black this started as, matching the editor grey the client pointed
+ * at. It is the same value as the darker of the two mocks MAXLONG compared, and
+ * it sits in the band every dark-theme guideline recommends — Material's #121212
+ * surface, Carbon's #161616, Apple's #1c1c1e — all of which exist because a pure
+ * black ground makes light text bloom and forces uncomfortably high contrast.
+ *
+ * Everything else here is the handoff palette unchanged, because at this ground
+ * it all still clears WCAG: cream text 14:1, half-strength cream 4.5:1, the up
+ * green 7:1, the down red 4.6:1. The mid-grey tried first (#727478, the exact
+ * midpoint of the two mocks) could not carry it — nothing reaches past 4.7:1
+ * against a mid-grey, and the green and red landed within a shade of the
+ * ground's own lightness.
  */
 @theme {
-  --color-void: #727478;
-  --color-panel: #35373c;
-  /* Ink for text and icons sitting ON a cream or white fill. It used to be the
-     ground itself (`text-void`); with a mid-grey ground that reads 4:1 on cream,
-     so the two roles are separate tokens now. */
+  --color-void: #1f2125;
+  --color-panel: #282b30;
+  /* Ink for text and icons sitting ON a cream or white fill (the primary
+     buttons and the active chips), which used to be the ground itself. */
   --color-onlight: #14161a;
-  --color-ink: #fdfcf9;
-  --color-ink-85: rgba(250, 248, 244, 0.98);
-  --color-ink-80: rgba(250, 248, 244, 0.96);
-  --color-ink-75: rgba(250, 248, 244, 0.94);
-  --color-ink-70: rgba(250, 248, 244, 0.92);
-  --color-ink-65: rgba(250, 248, 244, 0.9);
-  --color-ink-60: rgba(250, 248, 244, 0.88);
-  --color-ink-55: rgba(250, 248, 244, 0.86);
-  --color-ink-50: rgba(250, 248, 244, 0.84);
-  --color-ink-45: rgba(250, 248, 244, 0.8);
-  --color-ink-40: rgba(250, 248, 244, 0.76);
-  --color-ink-35: rgba(250, 248, 244, 0.72);
-  --color-ink-34: rgba(250, 248, 244, 0.7);
-  --color-ink-30: rgba(250, 248, 244, 0.66);
-  --color-ink-25: rgba(250, 248, 244, 0.6);
-  --color-hairline: rgba(12, 13, 16, 0.28);
-  --color-hairline-strong: rgba(12, 13, 16, 0.38);
-  --color-hairline-row: rgba(12, 13, 16, 0.22);
-  --color-hairline-soft: rgba(12, 13, 16, 0.18);
-  --color-hairline-mid: rgba(12, 13, 16, 0.32);
-  --color-hairline-btn: rgba(12, 13, 16, 0.45);
-  --color-hairline-hover: rgba(252, 251, 247, 0.85);
-  --color-hairline-focus: rgba(252, 251, 247, 0.95);
-  --color-hover-row: rgba(252, 251, 247, 0.1);
-  --color-hover-soft: rgba(252, 251, 247, 0.08);
-  --color-hover-item: rgba(252, 251, 247, 0.12);
+  --color-ink: #f1efe9;
+  --color-ink-85: rgba(232, 228, 220, 0.85);
+  --color-ink-80: rgba(232, 228, 220, 0.8);
+  --color-ink-75: rgba(232, 228, 220, 0.75);
+  --color-ink-70: rgba(232, 228, 220, 0.7);
+  --color-ink-65: rgba(232, 228, 220, 0.65);
+  --color-ink-60: rgba(232, 228, 220, 0.6);
+  --color-ink-55: rgba(232, 228, 220, 0.55);
+  --color-ink-50: rgba(232, 228, 220, 0.5);
+  --color-ink-45: rgba(232, 228, 220, 0.45);
+  --color-ink-40: rgba(232, 228, 220, 0.4);
+  --color-ink-35: rgba(232, 228, 220, 0.35);
+  --color-ink-34: rgba(232, 228, 220, 0.34);
+  --color-ink-30: rgba(232, 228, 220, 0.3);
+  --color-ink-25: rgba(232, 228, 220, 0.25);
+  --color-hairline: rgba(240, 232, 214, 0.09);
+  --color-hairline-strong: rgba(240, 232, 214, 0.14);
+  --color-hairline-row: rgba(240, 232, 214, 0.07);
+  --color-hairline-soft: rgba(240, 232, 214, 0.06);
+  --color-hairline-mid: rgba(240, 232, 214, 0.12);
+  --color-hairline-btn: rgba(240, 232, 214, 0.18);
+  --color-hairline-hover: rgba(240, 232, 214, 0.45);
+  --color-hairline-focus: rgba(244, 238, 218, 0.55);
+  --color-hover-row: rgba(232, 228, 220, 0.045);
+  --color-hover-soft: rgba(232, 228, 220, 0.035);
+  --color-hover-item: rgba(232, 228, 220, 0.05);
   --color-chalk: #f4eeda;
-  --color-chalk-10: rgba(244, 238, 218, 0.22);
-  --color-chalk-50: rgba(244, 238, 218, 0.7);
-  --color-chalk-60: rgba(244, 238, 218, 0.8);
-  --color-up: #6fdf9c;
-  --color-down: #ffb0a6;
-  --color-up-vol: rgba(111, 223, 156, 0.45);
-  --color-down-vol: rgba(255, 176, 166, 0.45);
+  --color-chalk-10: rgba(244, 238, 218, 0.1);
+  --color-chalk-50: rgba(244, 238, 218, 0.5);
+  --color-chalk-60: rgba(244, 238, 218, 0.6);
+  --color-up: #5dbe8a;
+  --color-down: #d46a63;
+  --color-up-vol: rgba(93, 190, 138, 0.26);
+  --color-down-vol: rgba(212, 106, 99, 0.26);
   --color-tag: #2a2a31;
-  --color-wallet-border: rgba(255, 255, 255, 0.55);
-  --color-wallet-border-hover: rgba(255, 255, 255, 0.9);
-  --color-wallet-hover: rgba(255, 255, 255, 0.14);
+  --color-wallet-border: rgba(255, 255, 255, 0.3);
+  --color-wallet-border-hover: rgba(255, 255, 255, 0.75);
+  --color-wallet-hover: rgba(255, 255, 255, 0.08);
 
   --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --font-mono:
@@ -148,7 +150,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(250, 248, 244, 0.45);
+  background: rgba(232, 228, 220, 0.18);
 }
 
 .no-scrollbar {
@@ -163,9 +165,9 @@
 .skeleton {
   background: linear-gradient(
     90deg,
-    rgba(252, 251, 247, 0.12) 25%,
-    rgba(252, 251, 247, 0.24) 50%,
-    rgba(252, 251, 247, 0.12) 75%
+    rgba(232, 228, 220, 0.05) 25%,
+    rgba(232, 228, 220, 0.11) 50%,
+    rgba(232, 228, 220, 0.05) 75%
   );
   background-size: 200% 100%;
   animation: var(--animate-shimmer);

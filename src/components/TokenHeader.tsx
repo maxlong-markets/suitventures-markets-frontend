@@ -88,7 +88,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             onClick={() => toggleStar(pair.id)}
             aria-label={starred ? "Remove from watchlist" : "Add to watchlist"}
             aria-pressed={starred}
-            className={`h-[34px] w-[34px] border border-hairline-strong bg-transparent text-[15px] hover:border-[rgba(252,251,247,0.8)] ${
+            className={`h-[34px] w-[34px] border border-hairline-strong bg-transparent text-[15px] hover:border-[rgba(240,232,214,0.4)] ${
               starred ? "text-chalk" : "text-ink-40"
             }`}
           >
