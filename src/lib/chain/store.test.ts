@@ -193,12 +193,60 @@ describe("loadFoldState", () => {
     expect(state.pools.get(POOL_B)).toEqual(pool({ id: POOL_B }));
   });
 
+  it("discovers an existing token when it is the Initialize event's currency1, not currency0", async () => {
+    // Same setup as the currency0 case above, but the new pool's event carries the token on the other side.
+    // Every other test in this file puts the tracked token in currency0, so this is the only thing that would
+    // catch initCurrencies dropping the currency1 term.
+    await applyFold(db, result({ pools: [pool(), pool({ id: POOL_B })], tokens: [token({ poolCount: 2 })], candles: [], trades: [] }), 100, T0);
+
+    const poolC = poolId(0x14);
+    const state = await loadFoldState(db, [initEvent({ poolId: poolC, currency0: QUOTE, currency1: TOKEN_A })]);
+    expect(state.tokens.get(TOKEN_A)).toEqual(token({ poolCount: 2 }));
+    expect(new Set(state.poolsByToken.get(TOKEN_A))).toEqual(new Set([POOL_A, POOL_B]));
+    expect(state.pools.get(POOL_A)).toEqual(pool());
+    expect(state.pools.get(POOL_B)).toEqual(pool({ id: POOL_B }));
+  });
+
   it("an Initialize currency that is a quote, or a genuinely new token, matches no row: harmless", async () => {
     await insertQuote();
     const state = await loadFoldState(db, [initEvent({ currency0: addr(0x99), currency1: QUOTE })]);
     expect(state.tokens.size).toBe(0);
     expect(state.pools.size).toBe(0);
     expect(state.quotes.get(QUOTE)?.usdPrice).toBe(182.5);
+  });
+
+  it("two Initialize events in one batch for two new pools of the same not-yet-existing token load and apply as one token", async () => {
+    const tokenNew = addr(0xb3);
+    const poolE = poolId(0x15);
+    const poolF = poolId(0x16);
+
+    // Nothing exists yet: loadFoldState must not crash or double-count the token named by both events.
+    const before = await loadFoldState(db, [
+      initEvent({ poolId: poolE, currency0: tokenNew, currency1: QUOTE }),
+      initEvent({ poolId: poolF, currency0: tokenNew, currency1: QUOTE, logIndex: 1, txHash: txHash(51) }),
+    ]);
+    expect(before.tokens.has(tokenNew)).toBe(false);
+    expect(before.pools.size).toBe(0);
+
+    // What the fold (Task 3) would produce from those two events: one token, poolCount 2, both new pools,
+    // and a primary chosen between them (here, the first).
+    await applyFold(
+      db,
+      result({
+        pools: [pool({ id: poolE, tokenId: tokenNew }), pool({ id: poolF, tokenId: tokenNew })],
+        tokens: [token({ id: tokenNew, address: tokenNew, poolCount: 2, primaryPoolId: poolE })],
+        candles: [],
+        trades: [],
+      }),
+      250,
+      T0 + 2000,
+    );
+
+    const after = await loadFoldState(db, [swapEvent({ poolId: poolE })]);
+    expect(after.tokens.get(tokenNew)).toEqual(token({ id: tokenNew, address: tokenNew, poolCount: 2, primaryPoolId: poolE }));
+    expect(new Set(after.poolsByToken.get(tokenNew))).toEqual(new Set([poolE, poolF]));
+    expect(after.pools.get(poolE)).toEqual(pool({ id: poolE, tokenId: tokenNew }));
+    expect(after.pools.get(poolF)).toEqual(pool({ id: poolF, tokenId: tokenNew }));
   });
 });
 
@@ -334,6 +382,23 @@ describe("applyFold", () => {
       await applyFold(db, result(), 100, T0);
       const row = (await db.query<{ metadata_retry_at: number }>("select metadata_retry_at from market.tokens where id = $1", [TOKEN_A]))[0];
       expect(row.metadata_retry_at).toBe(0);
+    });
+
+    it("never writes metadata_retry_at on an update either: a non-zero value survives a fold that changes the token's other columns", async () => {
+      // The insert-default test above would also pass if some statement wrote a literal 0 on every write;
+      // this is the case that actually proves the column is never in the token update's SET list at all.
+      await applyFold(db, result(), 100, T0);
+      await db.query("update market.tokens set metadata_retry_at = $1 where id = $2", [T0 + 3600, TOKEN_A]);
+
+      await applyFold(db, result({ tokens: [token({ poolCount: 5, symbol: "CHANGED" })] }), 200, T0 + 1000);
+
+      const row = (await db.query<{ metadata_retry_at: number; pool_count: number; symbol: string }>(
+        "select metadata_retry_at, pool_count, symbol from market.tokens where id = $1",
+        [TOKEN_A],
+      ))[0];
+      expect(row.metadata_retry_at).toBe(T0 + 3600); // untouched
+      expect(row.pool_count).toBe(5); // other columns still update
+      expect(row.symbol).toBe("CHANGED");
     });
 
     it("never writes baseline_at, defaults it to 0 for a pool it creates, and leaves an existing value alone", async () => {
