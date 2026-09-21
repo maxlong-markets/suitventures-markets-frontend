@@ -1,40 +1,92 @@
+import { createHyperSyncSource } from "@/lib/chain/hypersyncSource";
+import { QUOTES } from "@/lib/chain/math/quotes";
+import { createChainClient, type QuoteFeedConfig } from "@/lib/chain/onchain";
+import type { ChainRunDeps } from "@/lib/chain/run";
 import { getDb, type Db } from "@/lib/db/client";
 import { createQuoter, type Quoter } from "@/lib/quote/quoter";
-import { createEnvioSource } from "./envioSource";
-import { createLimiter, type RetryOpts } from "./limiter";
 import type { EnvioSource } from "./source";
 import type { SyncJob } from "./state";
 
-/** `quoter` is only ever set for "nightly" (its probe phase, nightly.ts); the market job has no use for one. */
+/**
+ * Envio was decommissioned 21 Sep 2026 (Task 6, `.superpowers/sdd/2026-09-21-chain-reader/task-6-brief.md`):
+ * no production path builds a real EnvioSource anymore. Every method here is unreachable — nightly.ts dropped
+ * its EnvioSource parameter along with the tokens/pools phases it used it for, and the market job has no
+ * production caller left (src/app/api/internal/sync/route.ts now runs the chain job instead). This stub
+ * exists only so the untouched src/app/api/internal/sync/nightly/route.ts, which still destructures `source`
+ * from `syncDeps("nightly")` and forwards it into `runSync` positionally, keeps type-checking and running: it
+ * satisfies EnvioSource's shape without ever calling `createEnvioSource` or touching the network, and says so
+ * loudly if something somehow does call one of its methods.
+ */
+function deadEnvioSource(): EnvioSource {
+  // async, not a plain throwing function: every EnvioSource method is typed to return a Promise, and a caller
+  // that awaits it (as every real one does) must see a rejection, not a synchronous throw escaping the await.
+  const fail =
+    (methodName: string) =>
+    async (): Promise<never> => {
+      throw new Error(`Envio was decommissioned 21 Sep 2026 (Task 6): ${methodName}() should be unreachable`);
+    };
+  return {
+    quotes: fail("quotes"),
+    poolsSince: fail("poolsSince"),
+    poolsCreatedSince: fail("poolsCreatedSince"),
+    swapsFor: fail("swapsFor"),
+    candlesFor: fail("candlesFor"),
+    tokensById: fail("tokensById"),
+    topHolders: fail("topHolders"),
+    topHoldersBatch: fail("topHoldersBatch"),
+    chainMeta: fail("chainMeta"),
+    tokensPage: fail("tokensPage"),
+    poolsPage: fail("poolsPage"),
+    swapsPage: fail("swapsPage"),
+    candlesPage: fail("candlesPage"),
+    get queries() {
+      return 0;
+    },
+  };
+}
+
+/**
+ * `quoter` is only ever set for "nightly" (its probe phase, nightly.ts); the market job — kept only for
+ * src/lib/sync/run.ts's own tests of runSync's generic machinery, which build their own FakeSource rather
+ * than going through this factory — has no use for one. The chain job has its own shape entirely: see
+ * ChainDeps/chainDeps below.
+ */
 export type SyncDeps = { db: Db; source: EnvioSource; quoter?: Quoter };
 type Factory = (job: SyncJob) => SyncDeps;
 let override: Factory | null = null;
 
 /**
- * Inside the sync a request may take at most 3 attempts: 3 × the 20 s request timeout plus 1 + 2 s of backoff is
- * 63 s, so a request that starts at the end of the market window (50 s) still ends inside the 120 s lease.
+ * "market" and "nightly" get the process Db and a dead EnvioSource stub (see deadEnvioSource above) — neither
+ * job's own logic reads a source anymore. "chain" is not handled here at all; see chainDeps below.
  */
-export const SYNC_RETRY: RetryOpts = { attempts: 3 };
-
-/**
- * Requests a minute per job. The market route issues at most 150 per invocation, so its limiter is a ceiling; the
- * nightly's about 366 requests take three minutes at 120, inside its 280 s window, and the market invocation yields
- * while the nightly holds its lease (spec 5.1), so the two never add up against the endpoint's 250.
- */
-/**
- * `chain` is a placeholder so this literal still satisfies Record<SyncJob, number> now that SyncJob carries the
- * chain reader's job: that job reads HyperSync, not Envio's GraphQL, so it never builds a source from this file
- * and never spends this budget. Task 6 rewires deps.ts and removes the entry.
- */
-export const SOURCE_PER_MINUTE: Record<SyncJob, number> = { market: 200, nightly: 120, chain: 0 };
-
-/** What a cron route runs against: the process Db (getDb throws DbUnavailableError without DATABASE_URL), the real source with the job's limiter, and — for "nightly" only — a real Quoter for its probe phase. */
 export function syncDeps(job: SyncJob): SyncDeps {
   if (override) return override(job);
-  const deps: SyncDeps = { db: getDb(), source: createEnvioSource({ limiter: createLimiter(SOURCE_PER_MINUTE[job]), retry: SYNC_RETRY }) };
+  const deps: SyncDeps = { db: getDb(), source: deadEnvioSource() };
   return job === "nightly" ? { ...deps, quoter: createQuoter() } : deps;
 }
 /** Tests only: substitute PGlite and a FakeSource (the factory may ignore the job); null restores the defaults. */
 export function setSyncDeps(factory: Factory | null): void {
   override = factory;
+}
+
+/** What src/app/api/internal/sync/route.ts runs the chain job against: the process Db plus runChainSync's own ChainRunDeps. */
+export type ChainDeps = { db: Db } & ChainRunDeps;
+type ChainFactory = () => ChainDeps;
+let chainOverride: ChainFactory | null = null;
+
+/** QUOTES (54 rows, 24 with a Chainlink proxy — src/lib/chain/math/quotes.ts) narrowed to the fields readQuotePrices wants. */
+const CHAIN_QUOTES: QuoteFeedConfig[] = QUOTES.map((q) => ({
+  address: q.address,
+  chainlinkProxy: q.chainlinkProxy,
+  chainlinkDecimals: q.chainlinkDecimals,
+}));
+
+/** The real factory: the process Db, a real HyperSync source, a real chain RPC client, and the quote allowlist. */
+export function chainDeps(): ChainDeps {
+  if (chainOverride) return chainOverride();
+  return { db: getDb(), source: createHyperSyncSource(), client: createChainClient(), quotes: CHAIN_QUOTES };
+}
+/** Tests only: substitute PGlite, a fake LogSource and a fake chain client; null restores the default. */
+export function setChainDeps(factory: ChainFactory | null): void {
+  chainOverride = factory;
 }

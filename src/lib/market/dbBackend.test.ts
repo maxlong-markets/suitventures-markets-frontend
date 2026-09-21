@@ -6,7 +6,6 @@ import { AI, NOW as ENVIO_NOW, NVDA as ENVIO_NVDA, POOL as ENVIO_POOL, aiToken }
 import { TOKEN_QUERY, type CandleRow, type PoolRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow } from "@/lib/envio/queries";
 import { shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
 import { NotRoutableError, type Quoter } from "@/lib/quote/quoter";
-import { FakeSource } from "@/lib/sync/fakeSource";
 import type { BalanceRec, CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { finishRun, readState, saveCursors } from "@/lib/sync/state";
 import { insertSwaps, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
@@ -110,10 +109,24 @@ const expected = shapePairs([tokenRow(tokens[0]!), tokenRow(tokens[1]!, PB), tok
 
 describe("createDbBackend reads", () => {
   let db: Db;
-  let source: FakeSource;
   let now = NOW;
-  const backend = () => createDbBackend(db, source, () => now);
-  const topHolderCalls = () => source.calls.filter((c) => c === "topHolders").length;
+  // Task 6: the holders read-through refresh is an injected callback, not an EnvioSource method. `pulled`
+  // already represents exactly token A's top holders (the only token these tests ever ask for), so the fake
+  // can hand it back directly rather than re-implementing FakeSource's generic filter/sort. `topHoldersCalled`
+  // accumulates across this whole describe block, like the FakeSource it replaces did — tests below read it
+  // as a delta (`before` / `before + 1`), never an absolute count.
+  let topHoldersCalled = 0;
+  let topHoldersFailOnce: Error | null = null;
+  async function fakeTopHolders(): Promise<BalanceRec[]> {
+    topHoldersCalled += 1;
+    if (topHoldersFailOnce) {
+      const err = topHoldersFailOnce;
+      topHoldersFailOnce = null;
+      throw err;
+    }
+    return pulled;
+  }
+  const backend = () => createDbBackend(db, { topHolders: fakeTopHolders, now: () => now });
 
   beforeAll(async () => {
     db = await testDb();
@@ -124,7 +137,6 @@ describe("createDbBackend reads", () => {
     await upsertCandles(db, candles);
     await replaceHolders(db, A, stored, NOW - 10); // refreshed just now
     await recomputeListedPools(db, "all");
-    source = new FakeSource({ balances: pulled, chain: { latestProcessedBlock: 995, blockHeight: 1000 } });
   });
   afterAll(() => db.end());
   beforeEach(() => {
@@ -178,27 +190,36 @@ describe("createDbBackend reads", () => {
     expect(await backend().trades(D)).toEqual([]);
   });
 
-  it("holders() serves stored rows without asking Envio while the refresh is fresh", async () => {
-    const before = topHolderCalls();
+  it("holders() serves stored rows without asking the refresh callback while it is fresh", async () => {
+    const before = topHoldersCalled;
     expect(await backend().holders(A)).toEqual({ holders: shapeHolders(stored.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
-    expect(topHolderCalls()).toBe(before);
+    expect(topHoldersCalled).toBe(before);
     expect(await backend().holders(addr("f"))).toEqual({ holders: [], count: 0 });
   });
 
   it("holders() re-pulls the top 100 and replaces the rows once the refresh is older than 300 s", async () => {
     now = NOW + 301; // refreshed at NOW - 10: 311 s ago
-    const before = topHolderCalls();
+    const before = topHoldersCalled;
     expect(await backend().holders(A)).toEqual({ holders: shapeHolders(pulled.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
-    expect(topHolderCalls()).toBe(before + 1);
+    expect(topHoldersCalled).toBe(before + 1);
     expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [A])).toEqual([{ refreshed_at: NOW + 301 }]);
   });
 
-  it("holders() serves the stored rows when Envio fails, without stamping a refresh", async () => {
+  it("holders() serves the stored rows when the refresh callback fails, without stamping a refresh", async () => {
     now = NOW + 700; // stale again
-    source.failOn = { method: "topHolders", error: new Error("indexer unreachable: fetch failed") };
+    topHoldersFailOnce = new Error("indexer unreachable: fetch failed");
     expect(await backend().holders(A)).toEqual({ holders: shapeHolders(pulled.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
     expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [A])).toEqual([{ refreshed_at: NOW + 301 }]);
     expect(console.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("holders() never calls the refresh callback at all when none is supplied (Task 6: absent by default)", async () => {
+    now = NOW + 700; // stale, but there is no callback to ask
+    const noCallback = createDbBackend(db, { now: () => now });
+    // The stored rows are whatever the last successful refresh above left behind (`pulled`, from the
+    // "re-pulls" test two above this one) — this test's point is only that nothing here asks for fresh ones.
+    expect(await noCallback.holders(A)).toEqual({ holders: shapeHolders(pulled.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
+    expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [A])).toEqual([{ refreshed_at: NOW + 301 }]);
   });
 });
 
@@ -214,7 +235,7 @@ describe("createDbBackend limits", () => {
     await recomputeListedPools(db, "all");
     await upsertCandles(db, Array.from({ length: 310 }, (_, i) => candle(hex(1, 64), "m1", NOW - 60 * i, 1, 1, 1)));
     await insertSwaps(db, Array.from({ length: 60 }, (_, i) => ({ ...swap(1, NOW - i, "buy"), id: `${hex(1, 64)}-${i}`, pool_id: hex(1, 64), token_id: hex(1, 40), txHash: hex(1, 64) })));
-    const backend = createDbBackend(db, new FakeSource({}), () => NOW);
+    const backend = createDbBackend(db, { now: () => NOW });
     const pairs = await backend.pairs("all");
     expect(pairs).toHaveLength(500);
     expect(pairs[0]!.id).toBe(hex(1, 40)); // newest swap first
@@ -228,14 +249,23 @@ describe("createDbBackend limits", () => {
 
 describe("createDbBackend health", () => {
   let db: Db;
-  let source: FakeSource;
   let now = NOW;
-  const backend = () => createDbBackend(db, source, () => now);
+  // Task 6: lag is an injected `chainHead` callback (the node's own head) minus the stored chain cursor, not
+  // an EnvioSource's chainMeta(). `chainHeadFailOnce` mirrors FakeSource's old one-shot failOn.
+  let chainHeadFailOnce: Error | null = null;
+  async function fakeChainHead(): Promise<number> {
+    if (chainHeadFailOnce) {
+      const err = chainHeadFailOnce;
+      chainHeadFailOnce = null;
+      throw err;
+    }
+    return 1000;
+  }
+  const backend = () => createDbBackend(db, { chainHead: fakeChainHead, now: () => now });
 
   beforeAll(async () => {
     db = await testDb();
     await upsertQuotes(db, [quotes[0]!, quotes[3]!], [prices[0]!]); // one fed quote, one without a feed
-    source = new FakeSource({ chain: { latestProcessedBlock: 995, blockHeight: 1000 } });
   });
   afterAll(() => db.end());
   beforeEach(() => {
@@ -247,38 +277,44 @@ describe("createDbBackend health", () => {
   it("is not ok before the sync has ever succeeded, and still reports everything it knows", async () => {
     const h = await backend().health();
     expect(h).toMatchObject({
-      ok: false, backend: "db", lag: 5, quotes: [{ id: NVDA, ageSec: 60, stale: false }],
-      sync: { lastOkAgeSec: null, cursorAgeSec: null, lastError: null }, nightly: { lastOkAgeSec: null, lastError: null, phase: "" },
+      // No chain row yet (the job has never run): cursor reads as 0, so lag is the full node head.
+      ok: false, backend: "db", lag: 1000, quotes: [{ id: NVDA, ageSec: 60, stale: false }],
+      sync: { lastOkAgeSec: null, lastError: null }, nightly: { lastOkAgeSec: null, lastError: null, phase: "" },
     });
     expect(h.db!.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("is ok once the market sync succeeded within 300 s", async () => {
-    await readState(db, "market");
+  it("is ok once the chain sync succeeded within 300 s", async () => {
+    await readState(db, "chain");
     await readState(db, "nightly");
-    await saveCursors(db, "market", { cursor: NOW - 120 });
-    await finishRun(db, "market", { now: NOW - 30, ok: true, rows: 10, queries: 4 });
+    await saveCursors(db, "chain", { cursor: 995 }); // node head (1000) - 995 = 5
+    await finishRun(db, "chain", { now: NOW - 30, ok: true, rows: 10, queries: 4 });
     await finishRun(db, "nightly", { now: NOW - 3600, ok: true, rows: 0, queries: 0 });
     expect(await backend().health()).toMatchObject({
-      ok: true, sync: { lastOkAgeSec: 30, cursorAgeSec: 120, lastError: null }, nightly: { lastOkAgeSec: 3600, lastError: null, phase: "" },
+      ok: true, lag: 5, sync: { lastOkAgeSec: 30, lastError: null }, nightly: { lastOkAgeSec: 3600, lastError: null, phase: "" },
     });
   });
 
   it("carries the last error, and turns not ok when the last success is older than 300 s", async () => {
-    await finishRun(db, "market", { now: NOW, ok: false, error: "indexer responded 429", rows: 0, queries: 1 });
-    expect(await backend().health()).toMatchObject({ ok: true, sync: { lastOkAgeSec: 30, lastError: "indexer responded 429" } });
+    await finishRun(db, "chain", { now: NOW, ok: false, error: "HyperSync responded 429", rows: 0, queries: 1 });
+    expect(await backend().health()).toMatchObject({ ok: true, sync: { lastOkAgeSec: 30, lastError: "HyperSync responded 429" } });
     now = NOW + 400;
     expect((await backend().health()).ok).toBe(false);
   });
 
-  it("keeps serving with lag null when the indexer cannot be asked", async () => {
-    source.failOn = { method: "chainMeta", error: new Error("indexer unreachable: fetch failed") };
+  it("keeps serving with lag null when the chain head cannot be asked", async () => {
+    chainHeadFailOnce = new Error("rpc unreachable: fetch failed");
     expect(await backend().health()).toMatchObject({ ok: true, lag: null });
+  });
+
+  it("reports lag null when no chainHead callback is supplied at all (Task 6: absent by default)", async () => {
+    const noCallback = createDbBackend(db, { now: () => now });
+    expect(await noCallback.health()).toMatchObject({ ok: true, lag: null });
   });
 
   it("answers not ok with no report when the database does not answer", async () => {
     const broken: Db = { ...db, query: async () => { throw new Error("connection refused"); } };
-    expect(await createDbBackend(broken, source, () => now).health()).toEqual({ ok: false, backend: "db", lag: null, quotes: [], error: "database unavailable" });
+    expect(await createDbBackend(broken, { chainHead: fakeChainHead, now: () => now }).health()).toEqual({ ok: false, backend: "db", lag: null, quotes: [], error: "database unavailable" });
   });
 
   it("surfaces the nightly's phase, so a budget-stopped re-pull does not read as finished", async () => {
@@ -295,25 +331,25 @@ describe("createDbBackend health", () => {
 
   it("cuts a long last_error to 120 characters on the public route and keeps the full text in the log", async () => {
     const long = `relation "market.pools" does not exist; ${"x".repeat(200)}`;
-    await finishRun(db, "market", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
+    await finishRun(db, "chain", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
     await finishRun(db, "nightly", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
     const h = await backend().health();
     expect(h.sync!.lastError).toBe(long.slice(0, 120));
     expect(h.sync!.lastError).toHaveLength(120);
     expect(h.nightly!.lastError).toBe(long.slice(0, 120));
-    expect(console.warn).toHaveBeenCalledWith(`market last_error: ${long}`);
+    expect(console.warn).toHaveBeenCalledWith(`chain last_error: ${long}`);
     expect(console.warn).toHaveBeenCalledWith(`nightly last_error: ${long}`);
     // A short error travels whole, and is not logged again by the health check.
     vi.mocked(console.warn).mockClear();
-    await finishRun(db, "market", { now: NOW, ok: false, error: "indexer responded 429", rows: 0, queries: 1 });
-    expect((await backend().health()).sync!.lastError).toBe("indexer responded 429");
+    await finishRun(db, "chain", { now: NOW, ok: false, error: "HyperSync responded 429", rows: 0, queries: 1 });
+    expect((await backend().health()).sync!.lastError).toBe("HyperSync responded 429");
     expect(console.warn).toHaveBeenCalledTimes(1); // the nightly's long one
   });
 });
 
 describe("createDbBackend poolKey", () => {
   let db: Db;
-  const backend = () => createDbBackend(db, new FakeSource({}), () => NOW);
+  const backend = () => createDbBackend(db, { now: () => NOW });
   // One more token whose pool was created with the quote as currency0; the fixtures above are all token-first.
   const F = addr("8");
   const PF = poolId("8");
@@ -488,7 +524,7 @@ describe("tradeability parity: db reads the column, envio probes the quoter", ()
     );
     await recomputeListedPools(db, "all");
     await db.query("update market.pools set routable = false where id = $1", [ENVIO_POOL]);
-    const dbPair = await createDbBackend(db, new FakeSource({}), () => ENVIO_NOW).pair(AI);
+    const dbPair = await createDbBackend(db, { now: () => ENVIO_NOW }).pair(AI);
     expect(dbPair?.tradeable).toBe(false);
     await db.end();
 

@@ -6,7 +6,7 @@ import { FakeSource } from "./fakeSource";
 import { PROBE_UNREACHABLE, runSync, type RunOpts } from "./run";
 import { acquireLease, raiseHeadBlock, readHeadBlock, readState } from "./state";
 import { POOL_A, T0, poolRec, priceRec, quoteRec, tokenRec } from "./testRows";
-import { upsertQuotes } from "./writers";
+import { upsertPools, upsertQuotes, upsertTokens } from "./writers";
 
 const NOW_MS = (T0 + 1000) * 1000;
 let db: Db;
@@ -56,17 +56,24 @@ describe("runSync", () => {
     expect(await readState(db, "market")).toMatchObject({ lastRunAt: T0 + 1000, lastOkAt: null, lastError: "indexer responded 503", leaseOwner: null });
   });
   it("runs the nightly job once", async () => {
-    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    // Task 6: nightly no longer walks tokens/pools from a source — seed them directly, the way the chain
+    // reader would already have written them. The FakeSource here stands only for deps.ts's dead stub; its
+    // seeded rows (if any) would never be read now.
+    await upsertTokens(db, [tokenRec()], T0);
+    await upsertPools(db, [poolRec()], T0);
+    const src = new FakeSource({});
     const o = opts({ job: "nightly", windowSec: 250, queryBudget: 400, leaseSec: 300 });
     const report = await runSync(db, src, o);
     expect(report).toMatchObject({ job: "nightly", cycles: 1, error: null });
-    expect(report.results[0]).toMatchObject({ done: true, phase: "", tokens: 1, pools: 1, listed: 1 });
+    expect(report.results[0]).toMatchObject({ done: true, phase: "", listed: 1 });
     expect(o.slept).toEqual([]);
-    expect(await readState(db, "nightly")).toMatchObject({ rowsWritten: 3, queriesUsed: 3, leaseOwner: null });
+    expect(await readState(db, "nightly")).toMatchObject({ rowsWritten: 1, queriesUsed: 0, leaseOwner: null });
   });
   it("forwards opts.quoter through to the nightly's probe phase (I2a wiring)", async () => {
-    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    await upsertTokens(db, [tokenRec()], T0);
+    await upsertPools(db, [poolRec()], T0);
     await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    const src = new FakeSource({});
     const calls: string[] = [];
     const quoter: Quoter = {
       exactIn: async (call) => { calls.push(call.poolKey.poolId); return 1n; },
@@ -78,8 +85,10 @@ describe("runSync", () => {
     expect(report.results[0]).toMatchObject({ routable: 1, unroutable: 0, skipped: 0 });
   });
   it("records PROBE_UNREACHABLE through finishRun when every probe candidate is skipped (I2b), keeping the cursor and finishing the phase", async () => {
-    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    await upsertTokens(db, [tokenRec()], T0);
+    await upsertPools(db, [poolRec()], T0);
     await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    const src = new FakeSource({});
     const quoter: Quoter = {
       exactIn: async () => { throw new QuoterUnavailableError(new Error("down")); },
       exactOut: async () => { throw new Error("unused by probePools"); },
@@ -88,10 +97,10 @@ describe("runSync", () => {
     const report = await runSync(db, src, o);
     expect(report.error).toBe(PROBE_UNREACHABLE);
     expect(report.results[0]).toMatchObject({ done: true, phase: "", routable: 0, unroutable: 0, skipped: 1 });
-    // Not a thrown-error abort: tokens/pools/listed already wrote real rows, and the probe phase's own cursor
-    // and phase are already persisted (I3) by the time finishRun records the error — a dead RPC must not erase
-    // either, only stop the run from reading as healthy.
-    expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "", lastError: PROBE_UNREACHABLE, rowsWritten: 3, leaseOwner: null });
+    // Not a thrown-error abort: "listed" already wrote a real row, and the probe phase's own cursor and phase
+    // are already persisted (I3) by the time finishRun records the error — a dead RPC must not erase either,
+    // only stop the run from reading as healthy.
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "", lastError: PROBE_UNREACHABLE, rowsWritten: 1, leaseOwner: null });
   });
 });
 
@@ -110,7 +119,7 @@ describe("runSync yields to the nightly (spec 5.1)", () => {
     await acquireLease(db, "nightly", "night", T0 + 500, 300); // until T0 + 800, before this invocation at T0 + 1000
     expect(await runSync(db, source(), opts({ windowSec: 1 }))).toMatchObject({ skipped: null, cycles: 1 });
     await acquireLease(db, "market", "other", T0 + 1000, 120);
-    const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()] });
+    const src = new FakeSource({}); // nightly no longer reads a source at all (Task 6)
     expect(await runSync(db, src, opts({ job: "nightly", windowSec: 280, queryBudget: 400, leaseSec: 300 }))).toMatchObject({ skipped: null, cycles: 1 });
   });
 });
@@ -138,15 +147,19 @@ describe("runSync head-block guard (spec 5.3a)", () => {
     expect(await readState(db, "market")).toMatchObject({ lastError: null, queriesUsed: 8 });
     expect(await count("quotes")).toBe(1);
   });
-  it("guards the nightly job with the same mark and records the skip on the nightly row", async () => {
+  it("no longer guards the nightly job with the head-block mark (Task 6): runs even when the source's chain head is behind the stored mark, and never asks chainMeta or writes its seeded tokens/pools", async () => {
     await raiseHeadBlock(db, 1000);
     const src = new FakeSource({ tokens: [tokenRec()], pools: [poolRec()], chain: { latestProcessedBlock: 500, blockHeight: 1000 } });
     const o = opts({ job: "nightly", windowSec: 250, queryBudget: 400, leaseSec: 300 });
-    expect(await runSync(db, src, o)).toEqual({ job: "nightly", skipped: "indexer", cycles: 0, results: [], error: "indexer behind the store" });
-    expect(src.calls).toEqual(["chainMeta"]);
-    expect(await readState(db, "nightly")).toMatchObject({ lastError: "indexer behind the store", queriesUsed: 1, leaseOwner: null, leaseUntil: 0 });
+    const report = await runSync(db, src, o);
+    expect(report).toMatchObject({ job: "nightly", skipped: null, cycles: 1, error: null });
+    // chainMeta never asked: the guard is market-only now, and nightly no longer reads a source at all.
+    expect(src.calls).toEqual([]);
     expect(await readState(db, "market")).toMatchObject({ lastRunAt: null, lastError: null });
+    // The chain reader owns market.tokens/market.pools now (Task 6): nightly's dropped "tokens"/"pools"
+    // phases would have written this FakeSource's seeded rows into them; they must not exist.
     expect(await count("tokens")).toBe(0);
+    expect(await count("pools")).toBe(0);
   });
   it("records a failed probe like a failed cycle and releases the lease", async () => {
     const src = source();

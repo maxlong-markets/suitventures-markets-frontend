@@ -3,14 +3,14 @@ import { ttlCache } from "@/lib/envio/cache";
 import { PAIRS_LIMIT, PAIRS_TTL, type PairsScope } from "@/lib/envio/pairs";
 import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, WindowRow } from "@/lib/envio/queries";
 import { isStale, shapeCandles, shapeHolders, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
-import type { BalanceRec, EnvioSource } from "@/lib/sync/source";
+import type { BalanceRec } from "@/lib/sync/source";
 import { replaceHolders } from "@/lib/sync/writers";
 import { nowSec } from "@/lib/time";
 import type { HealthReport, MarketBackend } from "./backend";
 import { PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
 import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
-/** A token's stored top holders are re-pulled from Envio when older than this (spec 5.4). */
+/** A token's stored top holders are re-pulled through `opts.topHolders` (Task 6: optional, absent by default — see createDbBackend) when older than this (spec 5.4). */
 export const HOLDER_REFRESH_SEC = 300;
 const SYNC_OK_WITHIN_SEC = 300;
 const HOLDERS_SHOWN = 10;
@@ -114,11 +114,23 @@ function poolKeyParts(row: PoolKeyCols): PoolKeyParts {
   };
 }
 const QUOTES_SQL = `select id, address, symbol, name, decimals, usd_price, usd_updated_at, aggregator from market.quotes order by id`;
-const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('market', 'nightly')`;
+// "chain", not "market" (Task 6): the chain reader's sync_state row is what health now watches for lastOkAgeSec/lastError.
+const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('chain', 'nightly')`;
 const QUOTE_AGES_SQL = `select id, usd_updated_at, aggregator from market.quotes where usd_updated_at is not null order by id`;
 
+export type DbBackendOpts = {
+  /** Re-pulls one token's top holders on a stale read (spec 5.4). Absent by default (Task 6: Envio is gone) —
+   * the holders endpoint then always serves the stored rows and never fails on their account. */
+  topHolders?: (tokenId: string, limit: number) => Promise<BalanceRec[]>;
+  /** The node's own current block height, for health's `lag` (node head minus the chain cursor, in blocks).
+   * Absent by default, which reports `lag: null` rather than guessing at a vendor's number. */
+  chainHead?: () => Promise<number>;
+  now?: () => number;
+};
+
 /** SQL readers with M1's semantics (spec section 8). `now` is injectable for the tests. */
-export function createDbBackend(db: Db, source: EnvioSource, now: () => number = nowSec): MarketBackend {
+export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend {
+  const now = opts.now ?? nowSec;
   async function shapeRows(rows: PairRow[], at: number) {
     if (rows.length === 0) return [];
     const win = await db.query<WindowRow>(WINDOW_SQL, [rows.map((r) => r.pool_id), windowSince(at)]);
@@ -161,10 +173,12 @@ export function createDbBackend(db: Db, source: EnvioSource, now: () => number =
       if (!token) return { holders: [], count: 0 };
       const at = now();
       const refreshedAt = (await db.query<{ refreshed_at: number }>(REFRESH_SQL, [id]))[0]?.refreshed_at ?? null;
-      if (refreshedAt === null || at - refreshedAt > HOLDER_REFRESH_SEC) {
+      // Task 6: the read-through refresh is optional and absent by default, so this endpoint serves the
+      // stored rows and never fails on Envio's account — there is no Envio to fail on anymore.
+      if (opts.topHolders && (refreshedAt === null || at - refreshedAt > HOLDER_REFRESH_SEC)) {
         let fresh: BalanceRec[] | undefined;
         try {
-          fresh = await source.topHolders(id, HOLDERS_PULLED);
+          fresh = await opts.topHolders(id, HOLDERS_PULLED);
         } catch (err) {
           console.warn(`holders refresh failed for ${id}: ${message(err)}`); // the stored rows still serve
         }
@@ -196,21 +210,23 @@ export function createDbBackend(db: Db, source: EnvioSource, now: () => number =
         return { ok: false, backend: "db", lag: null, quotes: [], error: "database unavailable" };
       }
       const latencyMs = Date.now() - t0;
-      const market = states.find((s) => s.job === "market");
+      const chain = states.find((s) => s.job === "chain");
       const nightly = states.find((s) => s.job === "nightly");
       const ages = await db.query<{ id: string; usd_updated_at: number; aggregator: string | null }>(QUOTE_AGES_SQL);
       const quotes = ages.map((q) => ({ id: q.id, ageSec: at - q.usd_updated_at, stale: isStale({ updatedAt: q.usd_updated_at, aggregator: q.aggregator ?? "" }, at) }));
+      // Task 6: lag is the node's own head minus the chain cursor, in blocks — never a vendor's number
+      // (spec's failure-handling table). Optional and absent by default; see DbBackendOpts.chainHead.
       let lag: number | null = null;
-      try {
-        const m = await source.chainMeta();
-        lag = m.blockHeight - m.latestProcessedBlock;
-      } catch (err) {
-        console.warn(`indexer lag unavailable: ${message(err)}`); // informational: the store still serves
+      if (opts.chainHead) {
+        try {
+          lag = (await opts.chainHead()) - (chain?.cursor ?? 0);
+        } catch (err) {
+          console.warn(`chain head unavailable: ${message(err)}`); // informational: the store still serves
+        }
       }
       const sync = {
-        lastOkAgeSec: market?.last_ok_at != null ? at - market.last_ok_at : null,
-        cursorAgeSec: market && market.cursor > 0 ? at - market.cursor : null,
-        lastError: shortError("market", market?.last_error ?? null),
+        lastOkAgeSec: chain?.last_ok_at != null ? at - chain.last_ok_at : null,
+        lastError: shortError("chain", chain?.last_error ?? null),
       };
       const night = {
         lastOkAgeSec: nightly?.last_ok_at != null ? at - nightly.last_ok_at : null,

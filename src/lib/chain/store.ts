@@ -3,6 +3,7 @@ import { bucketStart, INTERVALS } from "@/lib/sync/ids";
 import { readState, saveCursors } from "@/lib/sync/state";
 import type { PoolRec } from "@/lib/sync/source";
 import { dedupe, recomputeListedPools, upsertPools } from "@/lib/sync/writers";
+import type { TokenMetadataReading } from "./onchain";
 import type { CandleInterval, CandleState, ChainEvent, FoldResult, FoldState, PoolState, QuoteState, TokenState, TradeRow } from "./types";
 
 /** market.sync_state job name for this reader; see src/lib/sync/state.ts (SyncJob). */
@@ -296,4 +297,50 @@ export async function applyFold(
     await recomputeListedPools(t, tokenIds);
     await saveCursors(t, CHAIN_JOB, { cursor: cursorBlock });
   });
+}
+
+/**
+ * Up to `limit` token ids (addresses) due for a metadata retry — `metadata_loaded = false` and
+ * `metadata_retry_at <= now` — oldest retry first then id (Task 6, run.ts's metadata retry sweep). The
+ * queue starts tiny: 21 of 132,004 rows carry `metadata_loaded = false` (Task 6 brief, measurement 3), so
+ * this is always a small, bounded read, never a scan of the whole table.
+ */
+export async function dueForMetadata(db: Db, now: number, limit: number): Promise<string[]> {
+  const rows = await db.query<{ id: string }>(
+    `select id from market.tokens where metadata_loaded = false and metadata_retry_at <= $1::int
+     order by metadata_retry_at, id limit $2::int`,
+    [now, limit],
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Applies one readTokenMetadata sweep to the metadata retry queue (Task 6, run.ts's step 5, paired with
+ * dueForMetadata above): an `ok` reading loads the token for good — symbol, name, decimals,
+ * metadata_loaded = true, metadata_retry_at reset to 0, and total_supply when the reading carries one (the
+ * indexer's own `readTotalSupply` can fail independently of `ok`; when it did, `total_supply` is left alone
+ * rather than overwritten with a fallback). A failed reading only pushes metadata_retry_at an hour out
+ * (`now + 3600`, the indexer's own hourly retry cadence, ported), touching nothing else — the fallback
+ * metadata already stored (symbol/name/decimals) survives untouched, as does the token's row generally. As
+ * with every other write in this file, holders_count is never mentioned and so never written.
+ */
+export async function refreshTokenMetadata(db: Db, readings: ReadonlyMap<string, TokenMetadataReading>, now: number): Promise<void> {
+  const ok = [...readings.entries()].filter(([, r]) => r.ok);
+  const failedIds = [...readings.entries()].filter(([, r]) => !r.ok).map(([id]) => id);
+
+  for (const c of chunk(ok)) {
+    await db.query(
+      `update market.tokens t set symbol = u.symbol, name = u.name, decimals = u.decimals,
+         metadata_loaded = true, metadata_retry_at = 0, total_supply = coalesce(u.total_supply::numeric, t.total_supply)
+       from unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::text[]) as u(id, symbol, name, decimals, total_supply)
+       where t.id = u.id`,
+      [
+        c.map(([id]) => id), c.map(([, r]) => r.symbol), c.map(([, r]) => r.name), c.map(([, r]) => r.decimals),
+        c.map(([, r]) => (r.totalSupply === null ? null : r.totalSupply.toString())),
+      ],
+    );
+  }
+  for (const c of chunk(failedIds)) {
+    await db.query("update market.tokens set metadata_retry_at = $2::int where id = any($1::text[])", [c, now + 3600]);
+  }
 }

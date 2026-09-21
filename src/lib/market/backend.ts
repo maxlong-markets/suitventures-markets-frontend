@@ -2,17 +2,15 @@ import type { PairsScope } from "@/lib/envio/pairs";
 import type { IndexerInterval } from "@/lib/sync/ids";
 import type { Candle, Holder, QuoteAsset, TokenPair, Trade } from "@/lib/types";
 import { getDb } from "@/lib/db/client";
-import { createEnvioSource } from "@/lib/sync/envioSource";
 import { createDbBackend } from "./dbBackend";
-import { createEnvioBackend } from "./envioBackend";
 import type { PoolKeyRow } from "./poolKey";
 
 export type HealthReport = {
   ok: boolean; backend: "db" | "envio";
-  lag: number | null; // indexer block lag as in M1
+  lag: number | null; // node head minus the chain cursor, in blocks (Task 6); null without a chainHead callback
   quotes: { id: string; ageSec: number; stale: boolean }[];
   db?: { latencyMs: number };
-  sync?: { lastOkAgeSec: number | null; cursorAgeSec: number | null; lastError: string | null };
+  sync?: { lastOkAgeSec: number | null; lastError: string | null };
   nightly?: { lastOkAgeSec: number | null; lastError: string | null; phase: string }; // phase "" is a finished re-pull
   error?: string;
 };
@@ -51,12 +49,15 @@ export interface MarketBackend {
 
 let instance: MarketBackend | null = null;
 
-/** `envio` when MARKET_DATA_BACKEND === "envio" or no DATABASE_URL; otherwise `db`. Memoised per process. */
+/**
+ * Always the db backend now (Task 6: Envio was decommissioned 21 Sep 2026, and `MARKET_DATA_BACKEND` is no
+ * longer read anywhere — there is nothing left to roll back to). No `topHolders` or `chainHead` callback is
+ * wired in yet: the holders endpoint serves the stored rows, and health's `lag` reports null rather than a
+ * guess (see dbBackend.ts's DbBackendOpts). Memoised per process.
+ */
 export function getBackend(): MarketBackend {
   if (instance) return instance;
-  const envio = process.env.MARKET_DATA_BACKEND === "envio" || !process.env.DATABASE_URL;
-  // No retry on the read path: a holders refresh or a health probe answers now; stored rows are the fallback.
-  instance = envio ? createEnvioBackend() : createDbBackend(getDb(), createEnvioSource({ retry: false }));
+  instance = createDbBackend(getDb());
   return instance;
 }
 

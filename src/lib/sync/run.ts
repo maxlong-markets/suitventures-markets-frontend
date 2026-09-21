@@ -25,22 +25,29 @@ export const PROBE_UNREACHABLE = "probe: quoter unreachable";
 
 const sec = (ms: number) => Math.floor(ms / 1000);
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-const rowsOf = (r: CycleResult | NightlyResult) =>
-  "done" in r ? r.tokens + r.pools + r.listed : r.pools + r.swaps + r.candles + r.tokens + r.newPools;
+/** "done" only appears on a NightlyResult (Task 6 dropped its tokens/pools counts along with the phases that produced them). */
+const rowsOf = (r: CycleResult | NightlyResult) => ("done" in r ? r.listed + r.pruned : r.pools + r.swaps + r.candles + r.tokens + r.newPools);
 /** True exactly when a nightly result's probe phase ran against candidates and got zero verdicts back — every one
  * skipped (I2b). Always false for a market CycleResult, which carries none of these fields. */
 const probeUnreachable = (r: CycleResult | NightlyResult) => "routable" in r && r.routable === 0 && r.unroutable === 0 && r.skipped > 0;
 
 /**
  * Takes the lease (or reports skipped: "lease"); market: yields (skipped: "nightly") while the nightly holds its
- * lease; probes the indexer's head block once and skips ("indexer", with last_error set) while it is below the
- * store's mark, raising the mark otherwise; market: runs cycles until
- * windowSec has elapsed, sleeping so cycles start intervalSec apart, sharing one queryBudget across the invocation
- * (the head-block probe counts); nightly: one runNightly. Every cycle ends with finishRun (ok or error); the first
- * thrown error, the head-block probe's included, ends the invocation. A nightly cycle whose own routable-pool
- * probe phase got zero verdicts back is a different case (I2b): it is not thrown, so the cycle's result and
- * cursor stand, but finishRun still records it as an error (PROBE_UNREACHABLE) rather than a clean run. Always
- * releases the lease.
+ * lease, then probes the indexer's head block once and skips ("indexer", with last_error set) while it is below
+ * the store's mark, raising the mark otherwise. That yield and head-block guard are both Envio-only and market-only
+ * (Task 6): the nightly carries no Envio phases anymore, so it no longer waits for the market or gets probed
+ * against an indexer head, and runs straight into its cycle. market: runs cycles until windowSec has elapsed,
+ * sleeping so cycles start intervalSec apart, sharing one queryBudget across the invocation (the head-block probe
+ * counts); nightly: one runNightly. Every cycle ends with finishRun (ok or error); the first thrown error, the
+ * head-block probe's included, ends the invocation. A nightly cycle whose own routable-pool probe phase got zero
+ * verdicts back is a different case (I2b): it is not thrown, so the cycle's result and cursor stand, but finishRun
+ * still records it as an error (PROBE_UNREACHABLE) rather than a clean run. Always releases the lease.
+ *
+ * The market job has no production caller left — src/app/api/internal/sync/route.ts runs the chain job
+ * (src/lib/chain/run.ts) instead since Task 6 — and survives here only because it costs nothing to: nothing
+ * builds a real EnvioSource for it anymore (src/lib/sync/deps.ts), so keeping this branch does not put Envio
+ * back on a production path, and it keeps this function's generic lease/budget/cycle machinery under test via
+ * a FakeSource (run.test.ts) without duplicating that coverage against the nightly job alone.
  */
 export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promise<RunReport> {
   const report: RunReport = { job: opts.job, skipped: null, cycles: 0, results: [], error: null };
@@ -54,24 +61,26 @@ export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promi
     await finishRun(db, opts.job, { now: sec(opts.now()), ok: false, error, rows: 0, queries: source.queries - since });
   };
   try {
-    // The two jobs never run together (spec 5.1): the market invocation yields while the nightly holds its lease, so
-    // their requests never add up against the endpoint's cap. The nightly's own window bounds the delay.
-    if (opts.job === "market" && (await readState(db, "nightly")).leaseUntil > sec(startMs)) return { ...report, skipped: "nightly" };
-    // Head-block guard (spec 5.3a): a replaying indexer reports a block below the highest one ever seen; nothing from
-    // its state may reach the store, so the invocation records the skip and does nothing else.
-    let head: number;
-    try {
-      head = (await source.chainMeta()).latestProcessedBlock;
-    } catch (err) {
-      await fail(message(err), invocationStart);
-      return report;
+    if (opts.job === "market") {
+      // The two jobs never run together (spec 5.1): the market invocation yields while the nightly holds its
+      // lease, so their requests never add up against the endpoint's cap. The nightly's own window bounds the delay.
+      if ((await readState(db, "nightly")).leaseUntil > sec(startMs)) return { ...report, skipped: "nightly" };
+      // Head-block guard (spec 5.3a): a replaying indexer reports a block below the highest one ever seen; nothing
+      // from its state may reach the store, so the invocation records the skip and does nothing else.
+      let head: number;
+      try {
+        head = (await source.chainMeta()).latestProcessedBlock;
+      } catch (err) {
+        await fail(message(err), invocationStart);
+        return report;
+      }
+      if (head < (await readHeadBlock(db))) {
+        await fail(INDEXER_BEHIND, invocationStart);
+        return { ...report, skipped: "indexer" };
+      }
+      await raiseHeadBlock(db, head);
     }
-    if (head < (await readHeadBlock(db))) {
-      await fail(INDEXER_BEHIND, invocationStart);
-      return { ...report, skipped: "indexer" };
-    }
-    await raiseHeadBlock(db, head);
-    // The probe's request comes out of the budget and is charged to the first cycle's finishRun.
+    // The probe's request (market only) comes out of the budget and is charged to the first cycle's finishRun.
     let pending = source.queries - invocationStart;
     let budget = opts.queryBudget - pending;
     for (;;) {
@@ -81,7 +90,7 @@ export async function runSync(db: Db, source: EnvioSource, opts: RunOpts): Promi
       const cycleOpts = { now: sec(cycleStartMs), queryBudget: budget, deadlineMs: Date.now() + Math.max(0, endMs - cycleStartMs), quoter: opts.quoter };
       let result: CycleResult | NightlyResult;
       try {
-        result = opts.job === "market" ? await runMarketCycle(db, source, cycleOpts) : await runNightly(db, source, cycleOpts);
+        result = opts.job === "market" ? await runMarketCycle(db, source, cycleOpts) : await runNightly(db, cycleOpts);
       } catch (err) {
         await fail(message(err), before - pending);
         break;

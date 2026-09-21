@@ -1,31 +1,38 @@
 import type { Db } from "@/lib/db/client";
 import type { Quoter } from "@/lib/quote/quoter";
-import { PAGE_LIMIT, type CycleOpts } from "./market";
+import type { CycleOpts } from "./market";
 import { probePools } from "./probe";
 import { pruneSwaps } from "./retention";
-import type { EnvioSource } from "./source";
 import { readState, saveCursors } from "./state";
-import { recomputeListedPools, upsertPools, upsertTokens } from "./writers";
+import { recomputeListedPools } from "./writers";
 
 export type NightlyResult = {
-  done: boolean; phase: string; tokens: number; pools: number; listed: number;
+  done: boolean; phase: string; listed: number;
   /** probed counts every candidate the probe phase attempted, skips included; routable/unroutable/skipped (I4) split it three ways. */
   probed: number; routable: number; unroutable: number; skipped: number;
   /** Swaps the prune phase deleted for being outside the retention window (retention.ts); every run, quoter or not. */
   pruned: number; queries: number;
 };
 
-const PHASES = ["tokens", "pools", "listed", "probe", "prune"] as const;
+const PHASES = ["listed", "probe", "prune"] as const;
 type Phase = (typeof PHASES)[number];
 
 /**
- * Phases in order, persisted in sync_state.nightly.phase with cursor_text = last id of the completed page:
- * "tokens" (tokensPage walk, upsertTokens), "pools" (poolsPage walk, upsertPools), "listed" (recomputeListedPools
- * "all"), "probe" (probePools over pools active in the last PROBE_ACTIVE_SEC, cursor_text = its lastId, saved
- * after every page it processes rather than once at the end — I3), "prune" (pruneSwaps over market.swaps,
- * retention.ts — no Envio request, so it runs whether or not opts.quoter was supplied, and carries no cursor of
- * its own since ts < retentionCutoff(now) already says what is left to delete), then phase "" and done = true.
- * Resumes from the stored phase and cursor; stops early (done = false) at the budget or deadline.
+ * Phases in order, persisted in sync_state.nightly.phase: "listed" (recomputeListedPools "all"), "probe"
+ * (probePools over pools active in the last PROBE_ACTIVE_SEC, cursor_text = its lastId, saved after every
+ * page it processes rather than once at the end — I3), "prune" (pruneSwaps over market.swaps, retention.ts
+ * — no request of its own, so it runs whether or not opts.quoter was supplied), then phase "" and
+ * done = true. Resumes from the stored phase and cursor; stops early (done = false) at the deadline.
+ *
+ * Before Task 6 (`.superpowers/sdd/2026-09-21-chain-reader/task-6-brief.md`) this job opened with two more
+ * phases, "tokens" and "pools", that re-copied market.tokens/market.pools from Envio's GraphQL API. Envio was
+ * decommissioned 21 Sep 2026; the chain reader (src/lib/chain/run.ts) is now the only writer of those two
+ * tables, fed straight from the chain, so re-running those phases against nothing would overwrite good data
+ * with nothing — they and the EnvioSource parameter they existed for are gone. A stored phase of "tokens" or
+ * "pools" left over from before that cutover resumes at "listed" instead of crashing (the `phase` fallback
+ * below), and `queries` stays in the result shape at 0: nothing this job does costs a request anymore, but
+ * removing the field would ripple into every caller that still reads a NightlyResult next to a CycleResult
+ * (src/lib/sync/run.ts's rowsOf, in particular) for no benefit.
  *
  * `opts.quoter` is deliberately not folded into CycleOpts (market.ts): runMarketCycle has no use for one, and
  * widening a type both cycle functions share for the sake of this phase alone would be the wrong home for it.
@@ -33,48 +40,21 @@ type Phase = (typeof PHASES)[number];
  * nightly job. Without it (as in every other phase's own tests) probing is a no-op — pruning still runs — and
  * the run still finishes.
  */
-export async function runNightly(db: Db, source: EnvioSource, opts: CycleOpts & { quoter?: Quoter }): Promise<NightlyResult> {
-  const start = source.queries;
+export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }): Promise<NightlyResult> {
   const state = await readState(db, "nightly");
-  const r: NightlyResult = { done: false, phase: state.phase, tokens: 0, pools: 0, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, queries: 0 };
-  const canQuery = () => source.queries - start < opts.queryBudget && Date.now() < opts.deadlineMs;
+  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, queries: 0 };
   const finish = (done: boolean, phase: string) => {
     r.done = done;
     r.phase = phase;
-    r.queries = source.queries - start;
     return r;
   };
-  // "" is a finished run, so the next one starts over; a known phase resumes after the last id it stored.
-  let phase: Phase = (PHASES as readonly string[]).includes(state.phase) ? (state.phase as Phase) : "tokens";
+  // "" is a finished run, so the next one starts over; a known current phase resumes after its stored cursor;
+  // a phase from before Task 6 ("tokens"/"pools") is unknown to the new PHASES list and also lands here.
+  let phase: Phase = (PHASES as readonly string[]).includes(state.phase) ? (state.phase as Phase) : "listed";
   let afterId = phase === state.phase ? state.cursorText : "";
 
-  /** One id-ordered walk to the end of a table, persisting the last id after every page. False when the budget ran out. */
-  const walk = async <T extends { id: string }>(name: "tokens" | "pools", page: (after: string) => Promise<T[]>, write: (rows: T[]) => Promise<number>) => {
-    for (;;) {
-      if (!canQuery()) return false;
-      const rows = await page(afterId);
-      if (rows.length > 0) {
-        r[name] += await write(rows);
-        afterId = rows[rows.length - 1].id;
-        await saveCursors(db, "nightly", { phase: name, cursorText: afterId });
-      }
-      if (rows.length < PAGE_LIMIT) return true;
-    }
-  };
-
-  if (phase === "tokens") {
-    if (!(await walk("tokens", (a) => source.tokensPage(a, PAGE_LIMIT), (rows) => upsertTokens(db, rows, opts.now)))) return finish(false, "tokens");
-    phase = "pools";
-    afterId = "";
-    await saveCursors(db, "nightly", { phase, cursorText: "" });
-  }
-  if (phase === "pools") {
-    if (!(await walk("pools", (a) => source.poolsPage(a, PAGE_LIMIT), (rows) => upsertPools(db, rows, opts.now)))) return finish(false, "pools");
-    phase = "listed";
-    await saveCursors(db, "nightly", { phase, cursorText: "" });
-  }
   if (phase === "listed") {
-    // No Envio request in this phase, so no budget check: one statement over the whole table.
+    // No request of its own, so no deadline check: one statement over the whole table.
     r.listed = await recomputeListedPools(db, "all");
     phase = "probe";
     afterId = "";
@@ -82,10 +62,9 @@ export async function runNightly(db: Db, source: EnvioSource, opts: CycleOpts & 
   }
   if (phase === "probe") {
     if (opts.quoter) {
-      // Local eth_calls against the chain, not Envio requests: canQuery (indexer budget) does not apply here,
-      // only the deadline — which probePools itself checks throughout its own paging and concurrency batching.
-      // One call is the whole phase's work for this invocation; it pages, batches and stops on its own, persisting
-      // the cursor itself after every page (onPage, I3) rather than once when the whole call returns, so a crash
+      // Local eth_calls against the chain: probePools stops on its own deadline, one call is the whole
+      // phase's work for this invocation; it pages, batches and stops on its own, persisting the cursor
+      // itself after every page (onPage, I3) rather than once when the whole call returns, so a crash
       // mid-walk loses at most one page's progress instead of the run's entire probe budget.
       const probe = await probePools(db, opts.quoter, {
         now: opts.now, deadlineMs: opts.deadlineMs, afterId,
@@ -105,8 +84,8 @@ export async function runNightly(db: Db, source: EnvioSource, opts: CycleOpts & 
     await saveCursors(db, "nightly", { phase, cursorText: "" });
   }
   if (phase === "prune") {
-    // No Envio request and no indexer budget spent; no cursor of its own either (retention.ts) — a deadline stop
-    // just leaves rows for the next run's `ts < retentionCutoff(now)` scan to find again.
+    // No request and no cursor of its own (retention.ts) — a deadline stop just leaves rows for the next
+    // run's `ts < retentionCutoff(now)` scan to find again.
     const prune = await pruneSwaps(db, { now: opts.now, deadlineMs: opts.deadlineMs });
     r.pruned = prune.deleted;
     if (!prune.done) return finish(false, "prune");

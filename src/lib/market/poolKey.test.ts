@@ -2,7 +2,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { Db } from "@/lib/db/client";
 import { gql } from "@/lib/envio/client";
 import { POOL_KEY_QUERY, type PoolKeyPoolRow } from "@/lib/envio/queries";
-import { FakeSource } from "@/lib/sync/fakeSource";
 import type { PoolRec, QuoteRec, TokenRec } from "@/lib/sync/source";
 import { upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
 import { testDb } from "@/test/db";
@@ -173,7 +172,9 @@ describe("poolKey parity: db and envio agree on the trading pool for the same da
   });
 
   it("feeds the same token/pool data to both backends and gets the same poolId back, in all three scenarios", async () => {
-    const db_ = createDbBackend(db, new FakeSource({}), () => NOW);
+    // Task 6: createDbBackend no longer takes an EnvioSource (dbBackend.ts); this parity test never
+    // exercised holders()/health(), the only methods that ever used one, so only the call shape changes.
+    const db_ = createDbBackend(db, { now: () => NOW });
     const envio = createEnvioBackend();
     for (const s of scenarios) {
       gqlMock.mockImplementation(async (query) => {
