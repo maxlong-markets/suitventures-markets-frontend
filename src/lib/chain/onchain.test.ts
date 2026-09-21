@@ -143,6 +143,55 @@ describe("readTokenMetadata", () => {
     expect(calls.some((c) => abiReturnsBytes32(c.abi, c.functionName))).toBe(true);
   });
 
+  it("falls back to the synthetic metadata when the bytes32 retry itself throws, without affecting the rest of the batch", async () => {
+    const transportError = new HttpRequestError({ url: "https://rpc.example" });
+    const client: Pick<PublicClient, "readContract"> = {
+      readContract: (async (args: { address: string; abi: Abi; functionName: string }) => {
+        const addr = args.address.toLowerCase();
+        if (addr === TOKEN) {
+          // symbol/name are bytes32-shaped, so the string-ABI attempt genuinely throws
+          // (IntegerOutOfRangeError) and triggers the bytes32 retry — which then throws too,
+          // simulating a transport failure on the retry itself rather than a bad decode.
+          if (abiReturnsBytes32(args.abi, args.functionName)) {
+            throw transportError;
+          }
+          const raw: Partial<Record<FieldName, `0x${string}`>> = {
+            symbol: encodeBytes32("MKR"),
+            name: encodeBytes32("Maker"),
+            decimals: encodeDecimals(18),
+            totalSupply: encodeSupply(1n),
+          };
+          const data = raw[args.functionName as FieldName];
+          if (data === undefined) throw new Error(`test setup: no canned data for ${args.functionName}`);
+          return decodeFunctionResult({
+            abi: args.abi,
+            functionName: args.functionName,
+            data,
+          } as Parameters<typeof decodeFunctionResult>[0]);
+        }
+        if (addr === TOKEN_2) {
+          switch (args.functionName) {
+            case "symbol":
+              return "AI";
+            case "name":
+              return "AI Token";
+            case "decimals":
+              return 18;
+            case "totalSupply":
+              return 1n;
+            default:
+              throw new Error(`unexpected functionName ${args.functionName}`);
+          }
+        }
+        throw new Error(`unexpected address ${addr}`);
+      }) as unknown as PublicClient["readContract"],
+    };
+
+    const result = await readTokenMetadata(client, [TOKEN, TOKEN_2]);
+    expect(result.get(TOKEN)).toEqual({ ...FALLBACK, ok: false, totalSupply: 1n });
+    expect(result.get(TOKEN_2)).toEqual({ ok: true, symbol: "AI", name: "AI Token", decimals: 18, totalSupply: 1n });
+  });
+
   it("falls back to the indexer's synthetic metadata when every read fails, with totalSupply null", async () => {
     const { client } = makeFakeClient(
       {},
@@ -336,6 +385,30 @@ describe("readQuotePrices", () => {
     const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
     const result = await readQuotePrices(client, quotes, 1_700_000_999);
     expect(result[0]?.updatedAt).toBe(1_700_000_999);
+  });
+
+  it("falls back to `now` when updatedAt overflows Number.MAX_SAFE_INTEGER", async () => {
+    // A "sane positive value" has an upper bound too, not just a lower one: a corrupt or
+    // adversarial feed returning a huge updatedAt must not be passed through as-is.
+    const hugeUpdatedAt = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    const client = makeQuoteClient({ [PROXY_A]: [1n, 22_440_000_000n, 1_700_000_000n, hugeUpdatedAt, 1n] });
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result[0]?.updatedAt).toBe(1_700_000_999);
+  });
+
+  // All the other fixtures in this file use 8 decimals (Chainlink's usual USD-feed width), which
+  // would let a `10 ** 8` hardcoded straight into readQuotePrices pass every other test here.
+  it("scales the answer by whatever chainlinkDecimals a quote declares, not a hardcoded 8", async () => {
+    const proxy = "0xfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed";
+    const quoteAddr = "0xc0fec0fec0fec0fec0fec0fec0fec0fec0fec0fe";
+    const client = makeQuoteClient({
+      [proxy]: [1n, 2_500n * 10n ** 18n, 1_700_000_000n, 1_700_000_005n, 1n],
+    });
+    const quotes: QuoteFeedConfig[] = [{ address: quoteAddr, chainlinkProxy: proxy, chainlinkDecimals: 18 }];
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.usdPrice).toBeCloseTo(2500, 6);
   });
 
   it("keeps good feeds and the USDG pin when another feed in the same batch reverts", async () => {
