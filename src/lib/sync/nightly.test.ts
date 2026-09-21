@@ -150,4 +150,20 @@ describe("runNightly", () => {
     expect(await nightly()).toEqual({ done: true, phase: "", listed: 2, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 1, prunedCandles: 0, queries: 0 });
     expect(await db.query("select tx_hash from market.swaps")).toEqual([]);
   });
+
+  it("reports the phase not done when the swap prune runs out of time, leaving the candle prune with none either", async () => {
+    await seedTokensAndPools();
+    const cutoff = retentionCutoff(T0 + 1000);
+    const candleStale = candleCutoff("m1", T0 + 1000);
+    await insertSwaps(db, [swapRec({ txHash: txHash(0xe4), timestamp: cutoff - 10 })]);
+    await upsertCandles(db, [candleRec({ interval: "m1", t: candleStale - 10 })]);
+    // Already past by the time the prune phase is reached: pruneSwaps's own first deadline check bails
+    // immediately (deleted 0, done false), and pruneCandles — called right after, sharing the same deadline —
+    // bails the same way on its own first check. Neither row is touched; the phase itself must not read done.
+    const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() - 1 });
+    expect(result).toMatchObject({ done: false, phase: "prune", pruned: 0, prunedCandles: 0 });
+    expect(await db.query("select tx_hash from market.swaps")).toEqual([{ tx_hash: txHash(0xe4) }]);
+    expect(await db.query("select t from market.candles")).toEqual([{ t: candleStale - 10 }]);
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "prune" });
+  });
 });

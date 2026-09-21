@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import { candleCutoff, pruneCandles, pruneSwaps, retentionCutoff, SWAP_RETENTION_SEC } from "./retention";
@@ -13,6 +13,11 @@ let db: Db;
 beforeAll(async () => { db = await testDb(); });
 afterAll(async () => { await db.end(); });
 beforeEach(() => db.exec("delete from market.swaps; delete from market.candles"));
+// pruneSwaps's and pruneCandles's own "loops across batches" tests spy on db.query; without restoring, that
+// spy silently keeps recording every later test's query calls too (proved while debugging this exact file —
+// a later spy on an already-spied method inherits the earlier one's accumulated call history rather than
+// starting fresh), which is exactly the kind of cross-test leakage nightly.test.ts already guards against.
+afterEach(() => vi.restoreAllMocks());
 
 const txHashes = async () => (await db.query<{ tx_hash: string }>("select tx_hash from market.swaps order by tx_hash")).map((r) => r.tx_hash);
 
@@ -77,6 +82,19 @@ describe("pruneCandles", () => {
     expect(await candleKeys()).toEqual([`h1:${t}`]);
     expect(await pruneCandles(db, { now: NOW, deadlineMs: FAR_FUTURE() })).toEqual({ deleted: 1, done: true });
     expect(await candleKeys()).toEqual([]);
+  });
+
+  it("loops across batches until a batch deletes nothing", async () => {
+    const stale = m1Cutoff - 100;
+    await upsertCandles(db, [0, 1, 2, 3, 4].map((i) => candleRec({ interval: "m1", t: stale - i })));
+    const spy = vi.spyOn(db, "query");
+    expect(await pruneCandles(db, { now: NOW, deadlineMs: FAR_FUTURE(), batch: 2 })).toEqual({ deleted: 5, done: true });
+    expect(await candleKeys()).toEqual([]);
+    // 5 stale m1 rows at 2 a batch: two full batches, one of the last row, one empty batch that finds m1 done —
+    // 4 delete calls — plus one more empty-result delete for each of the other four intervals, which have
+    // nothing to find and so make exactly one call each: 8 in total.
+    const deletes = spy.mock.calls.filter(([text]) => typeof text === "string" && text.includes("delete from market.candles"));
+    expect(deletes).toHaveLength(8);
   });
 
   it("an empty table is { deleted: 0, done: true }", async () => {

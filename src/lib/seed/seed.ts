@@ -71,7 +71,7 @@ async function upsertBalances(db: Db, rows: readonly BalanceRec[]): Promise<numb
  * Runs the phases from checkpoint.phase, saving the checkpoint at each phase start; a phase already listed in
  * checkpoint.done is skipped outright, however early checkpoint.phase itself is. Big tables walk
  * `idRanges(workers)` concurrently with COPY per page and save the last id per range after each page; the swaps
- * phase writes only rows with timestamp >= retentionCutoff(cp.startedAt) (the store's 10-day trade window,
+ * phase writes only rows with timestamp >= retentionCutoff(cp.startedAt) (the store's 5-day trade window,
  * retention.ts) and the candles phase writes only rows with t >= candleCutoff(itsInterval, cp.startedAt) (each
  * interval's own window, retention.ts) — pagination, `after` and the checkpoint still walk every row, unfiltered,
  * so a page of entirely dropped rows still advances the cursor and still ends the range when it comes back short;

@@ -129,10 +129,11 @@ src/components     UI, one file per handoff component group
 src/context        Providers (wagmi, query, RainbowKit theme), AppState, DataSource
 src/hooks          breakpoint, data queries, balances
 src/lib            types, formatting, market filters, chain, wagmi, SVRouter swap, quote math
+src/lib/chain      the reader: HyperSync log source, decode, fold, onchain metadata and Chainlink prices, store writes
 src/lib/data       seed data, mock source, Envio source, local watch store
 src/lib/db         Db interface (postgres driver, PGlite in tests), migrations
-src/lib/sync       Envio source boundary, writers, cursor state, market cycle, nightly
-src/lib/market     MarketBackend: the store implementation and the M1 Envio one
+src/lib/sync       writers, cursor/lease state, the job runner, retention, nightly
+src/lib/market     MarketBackend: the store implementation (the only one now)
 src/lib/seed       the resumable one-off loader
 scripts            migrate, smoke, seed, parity (laptop, session pooler)
 supabase           migrations for the market schema

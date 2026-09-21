@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 const TTL = 60;
-/** The board's window. Well inside the store's 10-day trade retention (D39, amended 18 Sep 2026). */
+/** The board's window. Well inside the store's 5-day trade retention (D39, amended 18 Sep 2026; window changed to 5 days, Task 8, 21 Sep 2026). */
 const WINDOW_SEC = 86_400;
 const LIMIT = 50;
 
