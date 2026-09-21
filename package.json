@@ -13,6 +13,8 @@
     "db:smoke": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/smoke.mts",
     "db:parity": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/db/parity.mts",
     "seed": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/seed/seed.mts",
+    "chain:catchup": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/chain/catchup.mts",
+    "chain:gapfill": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/chain/gapfill-candles.mts",
     "fork:anvil": "bash scripts/fork/anvil.sh",
     "fork:deploy": "node --env-file-if-exists=.env.local --conditions=react-server --import tsx scripts/fork/deploy-local.mts",
     "fork:e2e": "node --env-file-if-exists=.env.local --env-file-if-exists=.env.fork --conditions=react-server --import tsx scripts/fork/swap-e2e.mts"
