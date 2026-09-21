@@ -109,7 +109,7 @@ import { earliestRebuildableFromTs, findBlockAtOrAfter, flooredToUtcMidnight, se
 import { runChainSync, type ChainRunOpts } from "@/lib/chain/run";
 import { readChainCursor } from "@/lib/chain/store";
 import { createDb, type Db } from "@/lib/db/client";
-import { chainDeps } from "@/lib/sync/deps";
+import { chainSourceDeps } from "@/lib/sync/deps";
 import { readState, releaseLease, renewLease } from "@/lib/sync/state";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -323,17 +323,19 @@ function installSignalHandlers(db: Db, owner: string): void {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const deps = chainDeps(); // the real HyperSync source, chain client and quote config — exactly as the cron builds them.
+  // chainSourceDeps(), not chainDeps(): the real HyperSync source, chain client and quote config exactly as the
+  // cron builds them, but WITHOUT its Db. chainDeps()'s eager getDb() would make DATABASE_URL mandatory for a
+  // run that never touches it — this script opens its own connection below — and a machine holding only
+  // DATABASE_URL_DIRECT could not start the catch-up at all.
+  const deps = chainSourceDeps();
   const { source } = deps;
 
   // Final review MAJOR: this is a multi-hour bulk job (2-4 hours measured), not the cron's 300 s invocation
-  // chainDeps() is built for. deps.db is the process singleton over DATABASE_URL, the transaction-mode pooler
+  // chainDeps() is built for. The process singleton sits on DATABASE_URL, the transaction-mode pooler
   // (port 6543) that enforces a two-minute statement_timeout and is not meant to hold one logical session for
   // hours. Build a dedicated connection instead, exactly like gapfill-candles.mts's own DATABASE_URL_DIRECT
   // (session port 5432, one connection: max 1) — falling back to DATABASE_URL, with a printed warning, only
-  // when DATABASE_URL_DIRECT is absent (chainDeps() above already needed DATABASE_URL to succeed at all, so
-  // that fallback can only be reached when it is in fact set). chainDeps() stays the source of
-  // source/client/quotes below; only the Db this script reads and writes through changes.
+  // when DATABASE_URL_DIRECT is absent.
   const directUrl = process.env.DATABASE_URL_DIRECT;
   if (!directUrl) {
     console.warn(

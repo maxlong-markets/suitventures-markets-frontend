@@ -86,6 +86,20 @@ export function chainDeps(): ChainDeps {
   if (chainOverride) return chainOverride();
   return { db: getDb(), source: createHyperSyncSource(), client: createChainClient(), quotes: CHAIN_QUOTES };
 }
+
+/**
+ * Everything chainDeps() builds EXCEPT the Db, for a caller that supplies its own — scripts/chain/catchup.mts
+ * opens a dedicated session connection over DATABASE_URL_DIRECT for its multi-hour run rather than sitting on
+ * the pooler. Kept here so the source, client and quote wiring has exactly one definition; without it that
+ * script had to call chainDeps(), whose eager getDb() made DATABASE_URL mandatory for a run that never uses it.
+ */
+export function chainSourceDeps(): Omit<ChainDeps, "db"> {
+  const { db: _db, ...rest } = chainOverride
+    ? chainOverride()
+    : { db: null, source: createHyperSyncSource(), client: createChainClient(), quotes: CHAIN_QUOTES };
+  void _db;
+  return rest;
+}
 /** Tests only: substitute PGlite, a fake LogSource and a fake chain client; null restores the default. */
 export function setChainDeps(factory: ChainFactory | null): void {
   chainOverride = factory;
