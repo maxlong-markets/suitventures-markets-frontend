@@ -26,10 +26,21 @@ export async function GET(req: Request) {
   try {
     const { db, source, client, quotes } = chainDeps();
     // 50 s: the last cycle's tail (its last request and write) ends before the next minute's lease attempt.
+    // leaseSec 300, matching maxDuration (review fix round 1, item 3): the lease must outlive any invocation
+    // that can possibly still be running, and Vercel will not let one exceed maxDuration, so setting the two
+    // equal makes an overlapping second writer structurally impossible rather than merely improbable. At the
+    // old 120 s, a slow chain of HyperSync retries (five attempts, backoff capped at 30 s each) can outlive
+    // the lease while a fetch is still in flight, and the next minute's cron would then acquire it and fold
+    // an overlapping block range against the same un-advanced cursor — candle volume and pool running totals
+    // accumulate on a re-fold (trade rows alone are conflict-safe), so that overlap is a real double-count,
+    // not just wasted work. The cost of the wider lease is a hard-killed invocation (a deploy, a crash) now
+    // stalls the job for up to 5 minutes instead of 2 — the reader recovers that in about two cycles once the
+    // lease expires, since the cursor itself was never at risk (it only ever moves inside applyFold's own
+    // transaction).
     const report = await runChainSync(
       db,
       { source, client, quotes },
-      { owner: randomUUID(), now: Date.now, sleep, windowSec: 50, intervalSec: intervalSec(), leaseSec: 120 },
+      { owner: randomUUID(), now: Date.now, sleep, windowSec: 50, intervalSec: intervalSec(), leaseSec: 300 },
     );
     return NextResponse.json(report, { headers: NO_STORE });
   } catch (err) {

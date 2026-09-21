@@ -166,6 +166,17 @@ describe("runChainSync: lease and cursor guards", () => {
     expect((await readState(db, "chain")).leaseOwner).toBe("other");
   });
 
+  it("reports the real stored cursor on a lease skip, not the zeroed report's default (review fix round 1, item 5)", async () => {
+    await seedCursor(db, 6500); // a real, already-advanced cursor — distinct from "never initialised"
+    await acquireLease(db, "chain", "other", 1_789_000_000, 120);
+    const source = new FakeLogSource({ head: 1000 });
+    const report = await runChainSync(db, chainDeps({ source }), baseOpts());
+    // 0 here would read exactly like the genesis refusal (a different, thrown condition entirely) rather
+    // than a routine overlap with another invocation.
+    expect(report).toMatchObject({ skipped: "lease", cursor: 6500 });
+    expect(source.requests).toBe(0); // still touches nothing on the source itself
+  });
+
   it("refuses a never-initialised cursor (0) rather than fold from genesis, and still releases the lease", async () => {
     const source = new FakeLogSource({ head: 1000 });
     await expect(runChainSync(db, chainDeps({ source }), baseOpts())).rejects.toThrow(
@@ -199,17 +210,29 @@ describe("runChainSync: the fetch/fold/apply loop", () => {
     expect(opts.slept).toEqual([]); // never idle: always real work to do
   });
 
-  it("does nothing and sleeps, instead of fetching, when the fetch target is not past the cursor", async () => {
+  it("does nothing and sleeps, instead of fetching, when the fetch target is not past the cursor — clamped to what is left of the window (review fix round 1, item 2)", async () => {
     await seedCursor(db, 500);
     const source = new FakeLogSource({ head: 500 }); // target (safetyBlocks 0) == cursor: nothing to do
-    const opts = baseOpts({ windowSec: 5, intervalSec: 10 }); // one sleep of 10s already passes the 5s window
+    // intervalSec (10s) alone would sleep past the 5s window; the clamp caps it at what's left (5s) instead,
+    // so the very next top-of-loop check ends the invocation on the window rather than overrunning it.
+    const opts = baseOpts({ windowSec: 5, intervalSec: 10 });
     const report = await runChainSync(db, chainDeps({ source }), opts);
 
     expect(report.cycles).toBe(0);
     expect(report.cursor).toBe(500);
-    expect(opts.slept).toEqual([10_000]);
+    expect(opts.slept).toEqual([5_000]);
     expect(source.requests).toBe(1); // head() only, never fetch()
     expect(await readChainCursor(db)).toBe(500);
+  });
+
+  it("does not clamp the idle sleep when the window has plenty of room left", async () => {
+    await seedCursor(db, 700);
+    const source = new FakeLogSource({ head: 700 });
+    // A budget of 1 stops the loop right after the single head() this idle pass costs (checked at the top of
+    // the next iteration), so this exercises exactly one sleep without the test waiting out a 60 s window.
+    const opts = baseOpts({ windowSec: 60, intervalSec: 10, maxRequests: 1 });
+    await runChainSync(db, chainDeps({ source }), opts);
+    expect(opts.slept).toEqual([10_000]); // the full intervalSec: 50 s was left, well more than 10 s
   });
 
   it("stops fetching once the request budget is spent, short of the chain head", async () => {
@@ -324,6 +347,10 @@ describe("runChainSync: metadata retry sweep", () => {
 
     expect(report.error).toBeNull();
     expect(report.cycles).toBe(0);
+    // Review fix round 1, item 4: proves stopWhenCaughtUp actually broke the loop rather than idling it away —
+    // without this, a mutation that ignored the flag would still land on cycles: 0 (twelve 5 s sleeps inside
+    // the 60 s window looks identical from that field alone) and this test would not catch it.
+    expect(opts.slept).toEqual([]);
     expect(report.metadataRetried).toBe(1);
     expect(report.metadataFailed).toBe(1);
 

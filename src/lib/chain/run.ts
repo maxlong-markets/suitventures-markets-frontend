@@ -109,19 +109,24 @@ function emptyReport(): ChainRunReport {
  * quote prices at most once per `quoteRefreshSec`, and sweeps the metadata retry queue once, all under one
  * `chain` lease. See the module doc comment for the sizing this is built against.
  *
- * Order of operations (brief, exact): acquire the lease (`{ skipped: "lease" }` and nothing else touched if
- * held); read the cursor, throwing if it is 0 (starting from genesis by accident must be impossible — run the
- * catch-up script first); loop fetch/fold/apply cycles against the chain head minus `safetyBlocks`, calling
- * `finishRun` after every real cycle; refresh quotes and sweep metadata retries once the loop ends; release
- * the lease in a `finally` no matter what happened above. The first thrown error (from a cycle, the quote
- * refresh or the metadata sweep) ends the invocation: it is recorded through `finishRun` with `ok: false`, its
- * message lands in the report's `error`, and nothing after it runs.
+ * Order of operations (brief, exact, with two review fix-round-1 amendments noted inline below): acquire the
+ * lease (`{ skipped: "lease" }` and the cursor read back for the report — fix round 1, item 5 — but nothing
+ * else touched, if held); read the cursor, throwing if it is 0 (starting from genesis by accident must be
+ * impossible — run the catch-up script first); loop fetch/fold/apply cycles against the chain head minus
+ * `safetyBlocks`, sleeping at most until the window ends when there is nothing to do (fix round 1, item 2),
+ * calling `finishRun` after every real cycle; refresh quotes and sweep metadata retries once the loop ends;
+ * release the lease in a `finally` no matter what happened above. The first thrown error (from a cycle, the
+ * quote refresh or the metadata sweep) ends the invocation: it is recorded through `finishRun` with
+ * `ok: false`, its message lands in the report's `error`, and nothing after it runs.
  */
 export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpts): Promise<ChainRunReport> {
   const report = emptyReport();
   const startMs = opts.now();
   if (!(await acquireLease(db, CHAIN_JOB, opts.owner, sec(startMs), opts.leaseSec))) {
-    return { ...report, skipped: "lease" };
+    // Fix round 1, item 5: report the cursor as it actually stands, not the zeroed template's default — 0
+    // here would read exactly like step 2's genesis refusal to anyone watching this report, and a lease skip
+    // is a routine overlap, not that. One extra read, only on this rare path.
+    return { ...report, skipped: "lease", cursor: await readChainCursor(db) };
   }
 
   const safetyBlocks = opts.safetyBlocks ?? DEFAULT_SAFETY_BLOCKS;
@@ -153,7 +158,11 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
         const target = (await deps.source.head()) - safetyBlocks;
         if (target <= cursor) {
           if (opts.stopWhenCaughtUp) break;
-          await opts.sleep(opts.intervalSec * 1000);
+          // Fix round 1, item 2: clamped to what is left of the window, not a bare intervalSec — a full
+          // intervalSec sleep near the window's end overruns it (e.g. two 30 s idle sleeps inside a 50 s
+          // window run to ~68 s of wall clock), and the lease (leaseSec) can still be held when the next
+          // minute's cron fires, which then returns skipped: "lease" and does nothing that minute.
+          await opts.sleep(Math.max(0, Math.min(opts.intervalSec * 1000, endMs - opts.now())));
           continue; // re-checks the window/budget at the top before asking the head again
         }
 

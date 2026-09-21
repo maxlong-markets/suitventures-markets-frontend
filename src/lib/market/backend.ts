@@ -1,3 +1,5 @@
+import type { PublicClient } from "viem";
+import { createChainClient } from "@/lib/chain/onchain";
 import type { PairsScope } from "@/lib/envio/pairs";
 import type { IndexerInterval } from "@/lib/sync/ids";
 import type { Candle, Holder, QuoteAsset, TokenPair, Trade } from "@/lib/types";
@@ -50,14 +52,29 @@ export interface MarketBackend {
 let instance: MarketBackend | null = null;
 
 /**
+ * Turns a chain RPC client's own head into the `chainHead` callback `createDbBackend`'s `health()` wants
+ * (Task 6 review, MAJOR-1): the node's own block number, never a vendor's — the spec's failure-handling table
+ * is explicit that health reports blocks behind the node's own head. `getBlockNumber()` resolves a `bigint`;
+ * `HealthReport.lag` is a plain `number` of blocks, so this is the one place that conversion happens. A named,
+ * exported function so the conversion is unit-testable without a live RPC (see backend.test.ts).
+ */
+export function chainHeadFrom(client: Pick<PublicClient, "getBlockNumber">): () => Promise<number> {
+  return async () => Number(await client.getBlockNumber());
+}
+
+/**
  * Always the db backend now (Task 6: Envio was decommissioned 21 Sep 2026, and `MARKET_DATA_BACKEND` is no
- * longer read anywhere — there is nothing left to roll back to). No `topHolders` or `chainHead` callback is
- * wired in yet: the holders endpoint serves the stored rows, and health's `lag` reports null rather than a
- * guess (see dbBackend.ts's DbBackendOpts). Memoised per process.
+ * longer read anywhere — there is nothing left to roll back to). Wires a live `chainHead` (Task 6 review,
+ * MAJOR-1) from the chain RPC client, so health's `lag` is real rather than always null: at most one
+ * `eth_blockNumber` call every 5 s (health/route.ts's `ttlCache` TTL), and `dbBackend.ts`'s `health()` already
+ * catches a throw from this callback and degrades to `lag: null`, so a flaky public RPC never fails the whole
+ * health check — it only loses the one signal. No `topHolders` callback is wired in yet: the holders endpoint
+ * still serves the stored rows only (see the task-6 report's "Concerns" for why). Memoised per process, the
+ * chain client included — `getBackend()` builds at most one of each.
  */
 export function getBackend(): MarketBackend {
   if (instance) return instance;
-  instance = createDbBackend(getDb());
+  instance = createDbBackend(getDb(), { chainHead: chainHeadFrom(createChainClient()) });
   return instance;
 }
 
