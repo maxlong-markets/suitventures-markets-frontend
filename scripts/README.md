@@ -42,10 +42,30 @@ Two one-off scripts around the chain reader (`src/lib/chain`, Task 6):
 `scripts/chain/gapfill-candles.mts` and `scripts/chain/catchup.mts`. Run the gap-fill first, over the trades
 already in `market.swaps`, then the catch-up.
 
+Run the gap-fill first, then the catch-up, and give the gap-fill a `--before` at or below the
+timestamp the catch-up will start from. A bucket the gap-fill writes above that line is one the
+replay later adds its trades onto a second time, inflating that candle's volume and trade count.
+Both take the same `chain` lease the cron takes, so neither can run beside the other or beside the
+cron. Run both while `CRON_SECRET` is unset, so nothing else is writing.
+
 | Command | What it does |
 |---|---|
-| `npm run chain:gapfill` | Gap-fills candles from the trades already stored in `market.swaps`. |
-| `npm run chain:catchup` | Runs the chain reader through to the chain's current head in one pass, rather than the one-minute cron's rolling window. |
+| `npm run chain:gapfill -- --before <unix> [--interval h1\|d1]` | Builds `h1` and `d1` candles from the trades already in `market.swaps`, for the pools whose candles the frozen indexer's copy never reached. Fills only buckets lying wholly inside the stored trade window and wholly before `--before`, so no candle is ever built from partial data, and inserts on-conflict-do-nothing so a copied candle is never overwritten. Safe to re-run. Needs `DATABASE_URL_DIRECT`. |
+| `npm run chain:catchup -- --from-ts <unix> [--force-rewind] [--max-span <n>] [--max-requests <n>] [--dry-run]` | Seeds the `chain` cursor and replays the PoolManager's events to the chain's head in one pass, instead of the cron's rolling 50-second window. Deletes the candles at or after the start first, because the replay rebuilds them exactly. Safe to stop and restart: the cursor only moves inside a committed transaction, and a restart resumes rather than rewinding. |
+| `npm run chain:catchup -- --release-lease [--yes]` | Reports who holds the `chain` lease and until when. Clears it outright if it is already expired; needs `--yes` to force-clear a live one. The escape hatch for a run that died without releasing it. |
+
+`--from-ts` is floored to the UTC midnight at or before it, which is a bucket boundary for all five
+candle intervals at once, so no half-counted bucket survives the delete. It is never accepted
+earlier than the earliest real pool baseline, and no flag on the command line lifts that bound:
+daily candles reach back further than the five-day trade window, so replaying from before the
+baseline would delete history that only a full replay from the chain's start could rebuild. A
+deliberate full rebuild means editing the script, not passing a flag.
+
+`--force-rewind` only lowers an already-advanced cursor and redoes the candle delete on a re-run.
+`--dry-run` reports the start block it found, how many candles the delete would remove and what the
+cursor would become, then exits having written nothing; it re-reads both before exiting and fails if
+either moved. Expect roughly 3.9 million blocks, about 1,900 requests and three to five hours for a
+catch-up from 17 September 2026, dominated by per-request latency rather than the rate limit.
 
 ## Fork scripts (M2 trading)
 
