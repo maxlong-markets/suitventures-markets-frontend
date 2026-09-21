@@ -102,4 +102,26 @@ describe("seedCursor", () => {
     expect(await seedCursor(db, 8_000, { forceRewind: true })).toEqual({ from: 1_000, to: 8_000, rewound: false });
     expect(await readChainCursor(db)).toBe(8_000);
   });
+
+  // Fix round 1 (task-7-report.md): --dry-run must change nothing, so seedCursor needs a mode that
+  // reports what it would do without writing.
+  describe("dryRun", () => {
+    it("reports what a raise would become, but writes nothing", async () => {
+      await saveCursors(db, "chain", { cursor: 2_000 });
+      expect(await seedCursor(db, 9_000, { dryRun: true })).toEqual({ from: 2_000, to: 9_000, rewound: false });
+      expect(await readChainCursor(db)).toBe(2_000); // unchanged
+    });
+
+    it("reports what a forced rewind would become, but writes nothing", async () => {
+      await saveCursors(db, "chain", { cursor: 5_000 });
+      expect(await seedCursor(db, 3_000, { forceRewind: true, dryRun: true })).toEqual({ from: 5_000, to: 3_000, rewound: true });
+      expect(await readChainCursor(db)).toBe(5_000); // unchanged
+    });
+
+    it("reports a higher stored cursor would be left alone, and writes nothing (redundant either way, but proves dryRun does not change the resume rule itself)", async () => {
+      await saveCursors(db, "chain", { cursor: 5_000 });
+      expect(await seedCursor(db, 3_000, { dryRun: true })).toEqual({ from: 5_000, to: 5_000, rewound: false });
+      expect(await readChainCursor(db)).toBe(5_000);
+    });
+  });
 });

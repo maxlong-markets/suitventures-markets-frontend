@@ -55,16 +55,20 @@ export async function findBlockAtOrAfter(
  * Returns the cursor as it stood before this call (`from`), what it holds after (`to` — equal to
  * `from` when the resume rule left it untouched), and whether this call actually lowered it
  * (`rewound`, i.e. `to < from`).
+ *
+ * `opts.dryRun` (fix round 1, task-7-report.md): computes and returns exactly the same `{ from, to,
+ * rewound }` a real call would, but never issues the `update` — for `scripts/chain/catchup.mts`'s
+ * `--dry-run`, which must report what it would do without changing anything.
  */
 export async function seedCursor(
   db: Db,
   block: number,
-  opts?: { forceRewind?: boolean },
+  opts?: { forceRewind?: boolean; dryRun?: boolean },
 ): Promise<{ from: number; to: number; rewound: boolean }> {
   const forceRewind = opts?.forceRewind ?? false;
   const from = await readChainCursor(db);
   const to = forceRewind || from === 0 || from < block ? block : from;
-  if (to !== from) {
+  if (to !== from && !opts?.dryRun) {
     await db.query("update market.sync_state set cursor = $2::int where job = $1", [CHAIN_JOB, to]);
   }
   return { from, to, rewound: to < from };
