@@ -3,7 +3,7 @@ import type { Db } from "@/lib/db/client";
 import { bucketStart } from "@/lib/sync/ids";
 import { testDb } from "@/test/db";
 import { applyFold, loadFoldState, readChainCursor } from "./store";
-import type { CandleInterval, CandleState, FoldResult, PoolState, SwapEvent, TokenState, TradeRow } from "./types";
+import type { CandleInterval, CandleState, FoldResult, InitializeEvent, PoolState, SwapEvent, TokenState, TradeRow } from "./types";
 
 let db: Db;
 beforeAll(async () => {
@@ -67,6 +67,13 @@ function swapEvent(o: Partial<SwapEvent> = {}): SwapEvent {
   return {
     kind: "swap", block: 100, logIndex: 0, timestamp: T0 + 500, txHash: txHash(1), txFrom: WALLET,
     poolId: POOL_A, amount0: -1000n, amount1: 866n, sqrtPriceX96: 123n, liquidity: 1n, tick: 0, fee: 3000, ...o,
+  };
+}
+function initEvent(o: Partial<InitializeEvent> = {}): InitializeEvent {
+  return {
+    kind: "initialize", block: 200, logIndex: 0, timestamp: T0 + 2000, txHash: txHash(50), txFrom: WALLET,
+    poolId: poolId(0x14), currency0: TOKEN_A, currency1: QUOTE, fee: 3000, tickSpacing: 60, hooks: addr(0),
+    sqrtPriceX96: 111n, tick: 0, ...o,
   };
 }
 function result(o: Partial<FoldResult> = {}): FoldResult {
@@ -172,6 +179,27 @@ describe("loadFoldState", () => {
     expect(state.candles.get(`${POOL_B}-h1-${bucketStart(T0 + 500, "h1")}`)).toBeDefined();
     expect(state.candles.get(`${poolC}-d1-${bucketStart(T0 + 500, "d1")}`)).toBeDefined();
   });
+
+  it("discovers an existing token and its sibling pools from an Initialize naming only a brand-new pool id", async () => {
+    // Two existing, already-traded pools under one token with real metadata — as if copied from the old indexer.
+    await applyFold(db, result({ pools: [pool(), pool({ id: POOL_B })], tokens: [token({ poolCount: 2 })], candles: [], trades: [] }), 100, T0);
+
+    // poolC does not exist in market.pools yet: the pool-named query alone finds nothing and would miss the token.
+    const poolC = poolId(0x14);
+    const state = await loadFoldState(db, [initEvent({ poolId: poolC, currency0: TOKEN_A, currency1: QUOTE })]);
+    expect(state.tokens.get(TOKEN_A)).toEqual(token({ poolCount: 2 }));
+    expect(new Set(state.poolsByToken.get(TOKEN_A))).toEqual(new Set([POOL_A, POOL_B]));
+    expect(state.pools.get(POOL_A)).toEqual(pool());
+    expect(state.pools.get(POOL_B)).toEqual(pool({ id: POOL_B }));
+  });
+
+  it("an Initialize currency that is a quote, or a genuinely new token, matches no row: harmless", async () => {
+    await insertQuote();
+    const state = await loadFoldState(db, [initEvent({ currency0: addr(0x99), currency1: QUOTE })]);
+    expect(state.tokens.size).toBe(0);
+    expect(state.pools.size).toBe(0);
+    expect(state.quotes.get(QUOTE)?.usdPrice).toBe(182.5);
+  });
 });
 
 describe("applyFold", () => {
@@ -264,7 +292,50 @@ describe("applyFold", () => {
     expect(typeof p?.sqrtPriceX96).toBe("bigint");
   });
 
+  it("recomputes listed_pool_id for a pool's token even when the fold returns no token for it", async () => {
+    // A never-traded pool: created but swap_count 0, so listed_pool_id starts null.
+    await applyFold(db, result({ pools: [pool({ swapCount: 0, lastSwapAt: null, volumeQuoteAllTime: 0 })] }), 100, T0);
+    expect((await db.query<{ listed_pool_id: string | null }>("select listed_pool_id from market.tokens where id = $1", [TOKEN_A]))[0].listed_pool_id).toBeNull();
+
+    // The pool's first swap: a single-pool token's primary does not change on a swap (Task 3, plan line 80),
+    // so the fold would not return TOKEN_A here — only the pool row changes.
+    await applyFold(db, result({ pools: [pool({ swapCount: 1, priceQuote: 0.001, lastSwapAt: T0 + 999 })], tokens: [] }), 150, T0 + 999);
+
+    expect((await db.query<{ listed_pool_id: string | null }>("select listed_pool_id from market.tokens where id = $1", [TOKEN_A]))[0].listed_pool_id).toBe(POOL_A);
+  });
+
+  describe("opts.newTokenSupply", () => {
+    it("uses the map's value, exactly, for a brand-new token's total_supply", async () => {
+      const supply = 123456789012345678901234567890123456789n; // far beyond 2^63
+      await applyFold(db, result(), 100, T0, { newTokenSupply: new Map([[TOKEN_A, supply]]) });
+      const row = (await db.query<{ total_supply: string }>("select total_supply from market.tokens where id = $1", [TOKEN_A]))[0];
+      expect(row.total_supply).toBe(supply.toString());
+    });
+
+    it("defaults to 0 for a brand-new token absent from the map", async () => {
+      await applyFold(db, result(), 100, T0, { newTokenSupply: new Map([[TOKEN_B, 999n]]) });
+      const row = (await db.query<{ total_supply: string }>("select total_supply from market.tokens where id = $1", [TOKEN_A]))[0];
+      expect(row.total_supply).toBe("0");
+    });
+
+    it("leaves an existing token's stored supply alone even when the map names its id", async () => {
+      await applyFold(db, result(), 100, T0);
+      await db.query("update market.tokens set total_supply = $1 where id = $2", ["777777777777777777777777777777", TOKEN_A]);
+      // The map now names TOKEN_A, as if the runner passed a supply for an id that already exists: the update
+      // path never reads this map, so it must have no effect.
+      await applyFold(db, result({ tokens: [token({ symbol: "NEW" })] }), 200, T0 + 1000, { newTokenSupply: new Map([[TOKEN_A, 5n]]) });
+      const row = (await db.query<{ total_supply: string; symbol: string }>("select total_supply, symbol from market.tokens where id = $1", [TOKEN_A]))[0];
+      expect(row).toEqual({ total_supply: "777777777777777777777777777777", symbol: "NEW" });
+    });
+  });
+
   describe("protected columns", () => {
+    it("adds metadata_retry_at defaulting to 0, which this task's statements never mention", async () => {
+      await applyFold(db, result(), 100, T0);
+      const row = (await db.query<{ metadata_retry_at: number }>("select metadata_retry_at from market.tokens where id = $1", [TOKEN_A]))[0];
+      expect(row.metadata_retry_at).toBe(0);
+    });
+
     it("never writes baseline_at, defaults it to 0 for a pool it creates, and leaves an existing value alone", async () => {
       await applyFold(db, result(), 100, T0);
       expect((await db.query<{ baseline_at: number }>("select baseline_at from market.pools where id = $1", [POOL_A]))[0].baseline_at).toBe(0);

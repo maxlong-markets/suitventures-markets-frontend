@@ -109,9 +109,17 @@ async function loadCandles(db: Db, events: readonly ChainEvent[]): Promise<Map<s
  * (a small table, always loaded whole), poolsByToken for every token loaded — including sibling pools no
  * event named, since choosePrimaryPool ranks a token's pools against each other — and the candle buckets the
  * batch's swaps will touch. Every hop is one query batched over keys: never one query per pool or candle key.
+ *
+ * Token discovery is not only "the tokens of the pools events name": an `initialize` for a pool that does
+ * not exist yet (a new pool of an already-tracked token) names no stored pool, so its currencies are unioned
+ * in too — one of them is the fold's `classify` decision away from being that token, and `classify` cannot
+ * run here. A currency that turns out to be a quote, or a genuinely new token, simply matches no row in
+ * either table below: harmless. Skipping this widening would make the pool-by-token query below miss the
+ * token's siblings entirely, and the fold would then treat a live, already-tracked token as brand new.
  */
 export async function loadFoldState(db: Db, events: readonly ChainEvent[]): Promise<FoldState> {
   const poolIds = [...new Set(events.map((e) => e.poolId))];
+  const initCurrencies = events.flatMap((e) => (e.kind === "initialize" ? [e.currency0, e.currency1] : []));
 
   const [tokenIdRows, quoteRows, candles] = await Promise.all([
     poolIds.length === 0
@@ -120,7 +128,7 @@ export async function loadFoldState(db: Db, events: readonly ChainEvent[]): Prom
     db.query<QuoteRow>("select id, decimals, usd_price from market.quotes"),
     loadCandles(db, events),
   ]);
-  const tokenIds = [...new Set(tokenIdRows.map((r) => r.token_id))];
+  const tokenIds = [...new Set([...tokenIdRows.map((r) => r.token_id), ...initCurrencies])];
 
   const [tokenRows, poolRows] = await Promise.all([
     tokenIds.length === 0
@@ -167,25 +175,29 @@ function poolStateToRec(p: PoolState): PoolRec {
 /**
  * Tokens are never a plain upsert: total_supply and holders_count are maintained elsewhere (a holder refresh
  * this reader does not do) and must survive every write here. A brand new id is inserted with the indexer's
- * own fallback for a fresh token (0 and 0 — port of the old indexer's src/handlers/shared.ts newToken) and
- * then left alone forever by `on conflict do nothing`. Every token in the batch, new or old, gets its other
- * columns applied by a second, separate statement that never mentions total_supply or holders_count.
+ * own fallback for a fresh token (holders_count 0 — port of the old indexer's src/handlers/shared.ts
+ * newToken) and then left alone forever by `on conflict do nothing`. total_supply on that same insert uses
+ * `newTokenSupply`'s value for the id when the runner already read it from the chain this cycle (Task 6:
+ * readTokenMetadata for FoldResult.newTokens, in the same cycle that creates the row), else 0, same as the
+ * indexer's own fallback. Every token in the batch, new or old, gets its other columns applied by a second,
+ * separate statement that never mentions total_supply or holders_count, so an existing token's stored supply
+ * survives even when `newTokenSupply` happens to name its id too (the update path never reads that map).
  */
-async function upsertTokensFromFold(db: Db, tokens: readonly TokenState[], now: number): Promise<void> {
+async function upsertTokensFromFold(db: Db, tokens: readonly TokenState[], now: number, newTokenSupply?: ReadonlyMap<string, bigint>): Promise<void> {
   const rows = dedupe(tokens, (t) => t.id);
   for (const c of chunk(rows)) {
     await db.query(
       `insert into market.tokens (id, address, symbol, name, decimals, total_supply, holders_count, pool_count, origin,
          primary_pool_id, created_at, metadata_loaded, synced_at)
-       select id, address, symbol, name, decimals, 0::numeric, 0::int, pool_count, origin, primary_pool_id, created_at,
-         metadata_loaded::boolean, $11::int
-       from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::int[], $6::int[], $7::text[], $8::text[], $9::int[], $10::text[])
-         as u(id, address, symbol, name, decimals, pool_count, origin, primary_pool_id, created_at, metadata_loaded)
+       select id, address, symbol, name, decimals, total_supply::numeric, 0::int, pool_count, origin, primary_pool_id,
+         created_at, metadata_loaded::boolean, $12::int
+       from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::int[], $6::text[], $7::int[], $8::text[], $9::text[], $10::int[], $11::text[])
+         as u(id, address, symbol, name, decimals, total_supply, pool_count, origin, primary_pool_id, created_at, metadata_loaded)
        on conflict (id) do nothing`,
       [
         c.map((x) => x.id), c.map((x) => x.address), c.map((x) => x.symbol), c.map((x) => x.name), c.map((x) => x.decimals),
-        c.map((x) => x.poolCount), c.map((x) => x.origin), c.map((x) => x.primaryPoolId), c.map((x) => x.createdAt),
-        c.map((x) => bool(x.metadataLoaded)), now,
+        c.map((x) => (newTokenSupply?.get(x.id) ?? 0n).toString()), c.map((x) => x.poolCount), c.map((x) => x.origin),
+        c.map((x) => x.primaryPoolId), c.map((x) => x.createdAt), c.map((x) => bool(x.metadataLoaded)), now,
       ],
     );
     await db.query(
@@ -254,17 +266,33 @@ async function upsertCandlesFromFold(db: Db, candles: readonly CandleState[]): P
  * Everything a batch changed, written with its cursor in ONE transaction: a failure leaves rows and the
  * cursor untouched. Reuses upsertPools as-is (its column set is exactly PoolState minus baseline_at, which it
  * never mentions, so an existing pool's baseline_at survives the update and a new pool gets the migration's
- * default of 0) and recomputeListedPools/saveCursors from the sync module unchanged. Tokens, trades and
- * candles get reader-specific statements — see upsertTokensFromFold, insertTrades and upsertCandlesFromFold
- * for why each does not reuse its sync/writers.ts counterpart.
+ * default of 0) and saveCursors from the sync module unchanged. Tokens, trades and candles get reader-specific
+ * statements — see upsertTokensFromFold, insertTrades and upsertCandlesFromFold for why each does not reuse
+ * its sync/writers.ts counterpart.
+ *
+ * recomputeListedPools runs over the union of result.tokens' ids and every result.pools' tokenId, not
+ * result.tokens alone: listing depends on a pool's swap_count/price_quote/last_swap_at (src/lib/sync/writers.ts's
+ * LISTED_POOL), and the fold only returns a token when *it* changed (a new pool, a primary-pool re-pick) —
+ * not on every swap of a single-pool token, or a swap that leaves the primary choice alone. Without the
+ * union, a token's first trade would never flip its listed_pool_id off null and it would stay invisible.
+ *
+ * opts.newTokenSupply carries total_supply for a brand-new token the runner already read from the chain this
+ * same cycle (Task 6: readTokenMetadata for FoldResult.newTokens), so it doesn't show a supply of 0 until the
+ * next nightly; see upsertTokensFromFold for how it's used and what it can never affect.
  */
-export async function applyFold(db: Db, result: FoldResult, cursorBlock: number, now: number): Promise<void> {
+export async function applyFold(
+  db: Db,
+  result: FoldResult,
+  cursorBlock: number,
+  now: number,
+  opts?: { newTokenSupply?: ReadonlyMap<string, bigint> },
+): Promise<void> {
   await db.tx(async (t) => {
     await upsertPools(t, result.pools.map(poolStateToRec), now);
-    await upsertTokensFromFold(t, result.tokens, now);
+    await upsertTokensFromFold(t, result.tokens, now, opts?.newTokenSupply);
     await insertTrades(t, result.trades);
     await upsertCandlesFromFold(t, result.candles);
-    const tokenIds = [...new Set(result.tokens.map((tok) => tok.id))];
+    const tokenIds = [...new Set([...result.tokens.map((tok) => tok.id), ...result.pools.map((p) => p.tokenId)])];
     await recomputeListedPools(t, tokenIds);
     await saveCursors(t, CHAIN_JOB, { cursor: cursorBlock });
   });

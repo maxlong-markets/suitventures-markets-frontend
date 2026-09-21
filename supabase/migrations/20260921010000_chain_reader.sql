@@ -9,3 +9,9 @@
 -- migration sets it.
 alter table market.pools add column baseline_at int not null default 0;
 update market.pools set baseline_at = synced_at;
+
+-- The runner (Task 6) retries a token whose metadata could not be read from the chain (readTokenMetadata
+-- failed for it) once an hour rather than every cycle; metadata_retry_at is the next unix-second timestamp
+-- it may try again, 0 meaning "never tried, try now". Nothing in this task writes it — it exists so the
+-- runner can.
+alter table market.tokens add column metadata_retry_at int not null default 0;
