@@ -1,0 +1,404 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  HttpRequestError,
+  decodeFunctionResult,
+  encodeAbiParameters,
+  getAddress,
+  http,
+  stringToHex,
+  type Abi,
+  type PublicClient,
+} from "viem";
+import { robinhoodChain } from "@/lib/chain";
+import { createChainClient, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
+
+// Spies on viem's `http` (delegating to the real implementation) so createChainClient's tests
+// below can assert on the exact transport config it passes — batchSize/wait aren't observable
+// any other way; they're consumed inside http()'s closure and never attached to the client it
+// returns. Nothing else in this file calls http(): readTokenMetadata/readQuotePrices are always
+// exercised against hand-written fake clients, never a real transport.
+vi.mock("viem", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("viem")>();
+  return { ...actual, http: vi.fn(actual.http) };
+});
+
+const TOKEN_MIXED = "0x2E8c31162b855A2ffa90F6F8634643Ad6F111e18";
+const TOKEN = TOKEN_MIXED.toLowerCase();
+const TOKEN_2 = "0x86923f96303d656e4aa86d9d42d1e57ad2023fdc"; // AMD, from the indexer's config/quotes.json
+
+const QUOTE_A = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"; // AAPL
+const PROXY_A = "0x6b22a786baa607d76728168703a39ea9c99f2cd0";
+const QUOTE_A_MIXED = getAddress(QUOTE_A);
+const PROXY_A_MIXED = getAddress(PROXY_A);
+const QUOTE_NO_FEED = "0x05a3d1cd21d0c88145e82600e62e7e496e0f222b"; // AMC: no chainlinkProxy in config
+const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+
+// ---------------------------------------------------------------------------
+// readTokenMetadata
+// ---------------------------------------------------------------------------
+
+type FieldName = "symbol" | "name" | "decimals" | "totalSupply";
+type RecordedCall = { functionName: string; abi: Abi };
+
+// Structural check (not reference equality), matching the indexer's own test helper: works
+// regardless of which module's parseAbi([...]) call produced the ABI array onchain.ts actually
+// passed to readContract.
+function abiReturnsBytes32(abi: Abi, functionName: string): boolean {
+  const item = abi.find(
+    (entry) =>
+      typeof entry === "object" &&
+      entry !== null &&
+      "type" in entry &&
+      entry.type === "function" &&
+      "name" in entry &&
+      entry.name === functionName,
+  ) as { outputs?: readonly { type?: string }[] } | undefined;
+  return item?.outputs?.[0]?.type === "bytes32";
+}
+
+function encodeString(value: string): `0x${string}` {
+  return encodeAbiParameters([{ type: "string" }], [value]);
+}
+function encodeBytes32(value: string): `0x${string}` {
+  return encodeAbiParameters([{ type: "bytes32" }], [stringToHex(value, { size: 32 })]);
+}
+function encodeDecimals(value: number): `0x${string}` {
+  return encodeAbiParameters([{ type: "uint8" }], [value]);
+}
+function encodeOutOfRangeDecimals(value: bigint): `0x${string}` {
+  return encodeAbiParameters([{ type: "uint256" }], [value]);
+}
+function encodeSupply(value: bigint): `0x${string}` {
+  return encodeAbiParameters([{ type: "uint256" }], [value]);
+}
+
+/**
+ * A fake `readContract` for one token's symbol/name/decimals/totalSupply, decoding canned
+ * ABI-encoded return data with whatever ABI the code under test passes in — so onchain.ts, not
+ * the test, decides whether a call is decoded as `string` or `bytes32`. Mirrors the indexer's
+ * src/effects/tokenMetadata.test.ts fake, extended with a totalSupply field/throw.
+ */
+function makeFakeClient(
+  raw: Partial<Record<FieldName, `0x${string}`>>,
+  opts: { throwOnce?: unknown; throwOnBytes32?: unknown; throwOnSupply?: unknown } = {},
+): { client: Pick<PublicClient, "readContract">; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = [];
+  let hasThrownOnce = false;
+  let hasThrownBytes32 = false;
+  const fakeClient = {
+    readContract: async (args: { abi: Abi; functionName: string }) => {
+      const { abi, functionName } = args;
+      calls.push({ abi, functionName });
+      if (functionName === "totalSupply") {
+        if (opts.throwOnSupply !== undefined) throw opts.throwOnSupply;
+      } else {
+        if (opts.throwOnce !== undefined && !hasThrownOnce) {
+          hasThrownOnce = true;
+          throw opts.throwOnce;
+        }
+        if (opts.throwOnBytes32 !== undefined && !hasThrownBytes32 && abiReturnsBytes32(abi, functionName)) {
+          hasThrownBytes32 = true;
+          throw opts.throwOnBytes32;
+        }
+      }
+      const data = raw[functionName as FieldName];
+      if (data === undefined) throw new Error(`test setup: no canned data for ${functionName}`);
+      return decodeFunctionResult({ abi, functionName, data } as Parameters<typeof decodeFunctionResult>[0]);
+    },
+  };
+  return { client: fakeClient as unknown as Pick<PublicClient, "readContract">, calls };
+}
+
+const FALLBACK = { symbol: TOKEN.slice(0, 6), name: TOKEN, decimals: 18 };
+
+describe("readTokenMetadata", () => {
+  it("decodes standard string returns plus totalSupply, keyed by lowercase address", async () => {
+    const { client } = makeFakeClient({
+      symbol: encodeString("AI"),
+      name: encodeString("AI Token"),
+      decimals: encodeDecimals(18),
+      totalSupply: encodeSupply(1_000_000n * 10n ** 18n),
+    });
+    const result = await readTokenMetadata(client, [TOKEN_MIXED]);
+    expect(result.get(TOKEN)).toEqual({
+      ok: true,
+      symbol: "AI",
+      name: "AI Token",
+      decimals: 18,
+      totalSupply: 1_000_000n * 10n ** 18n,
+    });
+    expect(result.has(TOKEN_MIXED)).toBe(false);
+    expect([...result.keys()]).toEqual([TOKEN]);
+  });
+
+  it("retries with the bytes32 ABI and decodes MKR-style returns", async () => {
+    const { client, calls } = makeFakeClient({
+      symbol: encodeBytes32("MKR"),
+      name: encodeBytes32("Maker"),
+      decimals: encodeDecimals(18),
+      totalSupply: encodeSupply(500n),
+    });
+    const result = await readTokenMetadata(client, [TOKEN]);
+    expect(result.get(TOKEN)).toEqual({ ok: true, symbol: "MKR", name: "Maker", decimals: 18, totalSupply: 500n });
+    expect(calls.some((c) => abiReturnsBytes32(c.abi, c.functionName))).toBe(true);
+  });
+
+  it("falls back to the indexer's synthetic metadata when every read fails, with totalSupply null", async () => {
+    const { client } = makeFakeClient(
+      {},
+      { throwOnce: new HttpRequestError({ url: "https://rpc.example" }), throwOnSupply: new Error("revert") },
+    );
+    const result = await readTokenMetadata(client, [TOKEN]);
+    expect(result.get(TOKEN)).toEqual({ ...FALLBACK, ok: false, totalSupply: null });
+  });
+
+  it("treats a bytes32 symbol that decodes blank as a failed read", async () => {
+    const { client } = makeFakeClient({
+      symbol: encodeBytes32(" "),
+      name: encodeBytes32("Maker"),
+      decimals: encodeDecimals(18),
+      totalSupply: encodeSupply(1n),
+    });
+    const result = await readTokenMetadata(client, [TOKEN]);
+    // totalSupply still reads fine independently of the metadata fallback.
+    expect(result.get(TOKEN)).toEqual({ ...FALLBACK, ok: false, totalSupply: 1n });
+  });
+
+  it("cleans NUL padding and surrounding space from a symbol", async () => {
+    const NUL = String.fromCharCode(0);
+    const { client } = makeFakeClient({
+      symbol: encodeString(`  AI${NUL}${NUL}  `),
+      name: encodeString("AI Token"),
+      decimals: encodeDecimals(18),
+      totalSupply: encodeSupply(0n),
+    });
+    const result = await readTokenMetadata(client, [TOKEN]);
+    expect(result.get(TOKEN)).toEqual({ ok: true, symbol: "AI", name: "AI Token", decimals: 18, totalSupply: 0n });
+  });
+
+  it("caps an overlong name at 128 characters", async () => {
+    const longName = "A".repeat(200);
+    const { client } = makeFakeClient({
+      symbol: encodeString("AI"),
+      name: encodeString(longName),
+      decimals: encodeDecimals(18),
+      totalSupply: encodeSupply(1n),
+    });
+    const result = await readTokenMetadata(client, [TOKEN]);
+    expect(result.get(TOKEN)?.name).toBe(longName.slice(0, 128));
+  });
+
+  it("rejects an out-of-range decimals value", async () => {
+    const { client } = makeFakeClient({
+      symbol: encodeString("AI"),
+      name: encodeString("AI Token"),
+      decimals: encodeOutOfRangeDecimals(1000n),
+      totalSupply: encodeSupply(1n),
+    });
+    const result = await readTokenMetadata(client, [TOKEN]);
+    expect(result.get(TOKEN)).toEqual({ ...FALLBACK, ok: false, totalSupply: 1n });
+  });
+
+  it("keeps ok:true metadata when only the totalSupply read fails", async () => {
+    const { client } = makeFakeClient(
+      { symbol: encodeString("AI"), name: encodeString("AI Token"), decimals: encodeDecimals(18) },
+      { throwOnSupply: new Error("revert") },
+    );
+    const result = await readTokenMetadata(client, [TOKEN]);
+    expect(result.get(TOKEN)).toEqual({ ok: true, symbol: "AI", name: "AI Token", decimals: 18, totalSupply: null });
+  });
+
+  it("never lets one reverting token fail the rest of the batch", async () => {
+    const perAddress: Record<
+      string,
+      "revert" | { symbol: string; name: string; decimals: number; totalSupply: bigint }
+    > = {
+      [TOKEN]: { symbol: "AI", name: "AI Token", decimals: 18, totalSupply: 1n },
+      [TOKEN_2]: "revert",
+    };
+    const client: Pick<PublicClient, "readContract"> = {
+      readContract: (async (args: { address: string; functionName: string }) => {
+        const addr = args.address.toLowerCase();
+        const entry = perAddress[addr];
+        if (!entry || entry === "revert") throw new Error(`revert: ${addr}`);
+        switch (args.functionName) {
+          case "symbol":
+            return entry.symbol;
+          case "name":
+            return entry.name;
+          case "decimals":
+            return entry.decimals;
+          case "totalSupply":
+            return entry.totalSupply;
+          default:
+            throw new Error(`unexpected functionName ${args.functionName}`);
+        }
+      }) as unknown as PublicClient["readContract"],
+    };
+    const result = await readTokenMetadata(client, [TOKEN, TOKEN_2]);
+    expect(result.get(TOKEN)).toEqual({ ok: true, symbol: "AI", name: "AI Token", decimals: 18, totalSupply: 1n });
+    expect(result.get(TOKEN_2)).toEqual({
+      ok: false,
+      symbol: TOKEN_2.slice(0, 6),
+      name: TOKEN_2,
+      decimals: 18,
+      totalSupply: null,
+    });
+  });
+
+  it("returns an empty map for an empty address list", async () => {
+    const { client } = makeFakeClient({});
+    const result = await readTokenMetadata(client, []);
+    expect(result.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readQuotePrices
+// ---------------------------------------------------------------------------
+
+type RoundData = readonly [bigint, bigint, bigint, bigint, bigint]; // roundId, answer, startedAt, updatedAt, answeredInRound
+
+function makeQuoteClient(byProxy: Record<string, RoundData | "revert">): Pick<PublicClient, "readContract"> {
+  return {
+    readContract: (async (args: { address: string; functionName: string }) => {
+      const proxy = args.address.toLowerCase();
+      const entry = byProxy[proxy];
+      if (!entry || entry === "revert") throw new Error(`revert: ${proxy}`);
+      if (args.functionName !== "latestRoundData") {
+        throw new Error(`unexpected functionName ${args.functionName}`);
+      }
+      return entry;
+    }) as unknown as PublicClient["readContract"],
+  };
+}
+
+describe("readQuotePrices", () => {
+  it("reads latestRoundData on the proxy and scales the answer by chainlinkDecimals", async () => {
+    const client = makeQuoteClient({ [PROXY_A]: [1n, 22_440_000_000n, 1_700_000_000n, 1_700_000_005n, 1n] });
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe(QUOTE_A);
+    expect(result[0]?.usdPrice).toBeCloseTo(224.4, 6);
+    expect(result[0]?.updatedAt).toBe(1_700_000_005);
+    expect(result[0]?.aggregator).toBe(PROXY_A);
+  });
+
+  it("lowercases id and aggregator for mixed-case input", async () => {
+    const client = makeQuoteClient({ [PROXY_A]: [1n, 22_440_000_000n, 1_700_000_000n, 1_700_000_005n, 1n] });
+    const quotes: QuoteFeedConfig[] = [
+      { address: QUOTE_A_MIXED, chainlinkProxy: PROXY_A_MIXED, chainlinkDecimals: 8 },
+    ];
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result[0]?.id).toBe(QUOTE_A);
+    expect(result[0]?.aggregator).toBe(PROXY_A);
+  });
+
+  it("skips a zero answer", async () => {
+    const client = makeQuoteClient({ [PROXY_A]: [1n, 0n, 1_700_000_000n, 1_700_000_005n, 1n] });
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
+    expect(await readQuotePrices(client, quotes, 1_700_000_999)).toEqual([]);
+  });
+
+  it("skips a negative answer", async () => {
+    const client = makeQuoteClient({ [PROXY_A]: [1n, -5n, 1_700_000_000n, 1_700_000_005n, 1n] });
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
+    expect(await readQuotePrices(client, quotes, 1_700_000_999)).toEqual([]);
+  });
+
+  it("skips a feed whose read throws, without failing the batch", async () => {
+    const client = makeQuoteClient({ [PROXY_A]: "revert" });
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
+    expect(await readQuotePrices(client, quotes, 1_700_000_999)).toEqual([]);
+  });
+
+  it("skips a quote with no configured Chainlink feed, without calling the client", async () => {
+    const readContract = vi.fn();
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_NO_FEED, chainlinkProxy: null, chainlinkDecimals: null }];
+    const client = { readContract } as unknown as Pick<PublicClient, "readContract">;
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result).toEqual([]);
+    expect(readContract).not.toHaveBeenCalled();
+  });
+
+  it('pins USDG at 1 with aggregator "pinned", without calling the client', async () => {
+    const readContract = vi.fn();
+    const quotes: QuoteFeedConfig[] = [{ address: USDG, chainlinkProxy: null, chainlinkDecimals: null }];
+    const client = { readContract } as unknown as Pick<PublicClient, "readContract">;
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result).toEqual([{ id: USDG, usdPrice: 1, updatedAt: 1_700_000_999, aggregator: "pinned" }]);
+    expect(readContract).not.toHaveBeenCalled();
+  });
+
+  it("falls back to `now` when updatedAt is not a sane positive value", async () => {
+    const client = makeQuoteClient({ [PROXY_A]: [1n, 22_440_000_000n, 1_700_000_000n, 0n, 1n] });
+    const quotes: QuoteFeedConfig[] = [{ address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 }];
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result[0]?.updatedAt).toBe(1_700_000_999);
+  });
+
+  it("keeps good feeds and the USDG pin when another feed in the same batch reverts", async () => {
+    const badProxy = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead";
+    const client = makeQuoteClient({ [PROXY_A]: [1n, 22_440_000_000n, 1_700_000_000n, 1_700_000_005n, 1n] });
+    const quotes: QuoteFeedConfig[] = [
+      { address: QUOTE_A, chainlinkProxy: PROXY_A, chainlinkDecimals: 8 },
+      { address: "0xbadbadbadbadbadbadbadbadbadbadbadbadbad", chainlinkProxy: badProxy, chainlinkDecimals: 8 },
+      { address: USDG, chainlinkProxy: null, chainlinkDecimals: null },
+    ];
+    const result = await readQuotePrices(client, quotes, 1_700_000_999);
+    expect(result.map((r) => r.id)).toEqual([QUOTE_A, USDG]);
+  });
+
+  it("returns an empty array when there are no quotes", async () => {
+    const readContract = vi.fn();
+    const client = { readContract } as unknown as Pick<PublicClient, "readContract">;
+    expect(await readQuotePrices(client, [], 1_700_000_999)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createChainClient
+// ---------------------------------------------------------------------------
+
+describe("createChainClient", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.mocked(http).mockClear();
+  });
+
+  it("builds a client on Robinhood Chain (4663)", () => {
+    const client = createChainClient();
+    expect(client.chain?.id).toBe(4663);
+  });
+
+  it("retries three times", () => {
+    const client = createChainClient();
+    expect(client.transport.retryCount).toBe(3);
+  });
+
+  it("falls back to the chain's own default RPC when nothing is configured", () => {
+    const client = createChainClient();
+    expect(client.transport.url).toBe(robinhoodChain.rpcUrls.default.http[0]);
+  });
+
+  it("uses CHAIN_RPC_URL when no explicit URL is passed", () => {
+    vi.stubEnv("CHAIN_RPC_URL", "https://chain-rpc.example");
+    const client = createChainClient();
+    expect(client.transport.url).toBe("https://chain-rpc.example");
+  });
+
+  it("prefers an explicit rpcUrl over CHAIN_RPC_URL", () => {
+    vi.stubEnv("CHAIN_RPC_URL", "https://chain-rpc.example");
+    const client = createChainClient("https://explicit.example");
+    expect(client.transport.url).toBe("https://explicit.example");
+  });
+
+  it("configures the http transport with the 100-call/16ms batch window and three retries the public RPC's rate limit requires", () => {
+    createChainClient("https://batch.example");
+    expect(http).toHaveBeenCalledWith("https://batch.example", {
+      batch: { batchSize: 100, wait: 16 },
+      retryCount: 3,
+    });
+  });
+});
