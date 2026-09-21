@@ -77,7 +77,7 @@ function initEvent(o: Partial<InitializeEvent> = {}): InitializeEvent {
   };
 }
 function result(o: Partial<FoldResult> = {}): FoldResult {
-  return { pools: [pool()], tokens: [token()], candles: [candle()], trades: [trade()], newTokens: [], ignoredPools: 0, ...o };
+  return { pools: [pool()], tokens: [token()], candles: [candle()], trades: [trade()], newTokens: [], ignoredPools: 0, skippedLiquidity: 0, ...o };
 }
 async function insertQuote(o: { id?: string; usdPrice?: number | null } = {}) {
   const id = o.id ?? QUOTE;
