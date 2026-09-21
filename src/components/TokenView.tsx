@@ -39,8 +39,19 @@ function TokenSkeleton() {
 
 export default function TokenView({ address }: { address: string }) {
   const { pair, isPending, dataUpdatedAt } = usePair(address);
-  const [interval, setChartInterval] = useState<Interval>("15m");
+  // null: no tab clicked yet for the current token, so CandleChart opens on the finest interval
+  // that actually has data (useChartCandles) instead of a fixed default.
+  const [selectedInterval, setSelectedInterval] = useState<Interval | null>(null);
   const [tab, setTab] = useState<ActivityTab>("trades");
+  // A client-side navigation between two /t/[address] pages can reuse this component instance —
+  // Next does not remount it just because the dynamic segment changed — so an explicit interval
+  // pick for the last token must not leak into the next one's default. Adjusting state during
+  // render (not in an effect) avoids painting the previous token's pick for even one frame.
+  const [intervalForId, setIntervalForId] = useState(pair?.id);
+  if (pair?.id !== intervalForId) {
+    setIntervalForId(pair?.id);
+    setSelectedInterval(null);
+  }
 
   if (isPending) {
     return (
@@ -71,7 +82,7 @@ export default function TokenView({ address }: { address: string }) {
       <TokenHeader pair={pair} />
       <div className="mt-5 flex flex-col gap-6 twocol:flex-row twocol:items-start twocol:gap-8">
         <div className="order-2 w-full min-w-0 flex-1 twocol:order-1">
-          <CandleChart pair={pair} interval={interval} onIntervalChange={setChartInterval} />
+          <CandleChart pair={pair} selectedInterval={selectedInterval} onIntervalChange={setSelectedInterval} />
           <ActivityTabs pair={pair} now={dataUpdatedAt} tab={tab} onTabChange={setTab} />
         </div>
         <div className="order-1 w-full flex-none twocol:order-2 twocol:w-[360px]">

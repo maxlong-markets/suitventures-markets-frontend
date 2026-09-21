@@ -3,7 +3,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useDataSource } from "@/context/DataSource";
 import { StoreUnavailableError } from "@/lib/data/envio";
-import type { Denom, Interval, Side, TokenPair, TradersBy } from "@/lib/types";
+import type { Candle, Denom, Interval, Side, TokenPair, TradersBy } from "@/lib/types";
 
 export const keys = {
   pairs: ["pairs"] as const,
@@ -49,13 +49,79 @@ export function useQuotes() {
   return useQuery({ queryKey: keys.quotes, queryFn: () => ds.quotes() });
 }
 
-export function useCandles(id: string, interval: Interval) {
+/** `enabled` defaults to true; callers that need to hold a query back (useChartCandles's cascade
+ * below) pass false and flip it once it should run. */
+export function useCandles(id: string, interval: Interval, enabled: boolean = true) {
   const ds = useDataSource();
   return useQuery({
     queryKey: keys.candles(id, interval),
     queryFn: () => ds.candles(id, interval),
     staleTime: 60_000,
+    enabled,
   });
+}
+
+interface CandleQueryState {
+  isSuccess: boolean;
+  isError: boolean;
+  data: Candle[] | undefined;
+}
+const isEmptyResult = (q: CandleQueryState) => q.isError || (q.isSuccess && (q.data?.length ?? 0) === 0);
+const hasRows = (q: CandleQueryState) => q.isSuccess && (q.data?.length ?? 0) > 0;
+
+export interface ChartCandles {
+  /** The interval to show — or, while a fallback probe is still in flight, the one currently
+   * being tried. Always `selected` once the caller has one. */
+  interval: Interval;
+  /** This interval's candles; undefined while it hasn't settled yet. */
+  candles: Candle[] | undefined;
+  /** True once there is a final answer: candles were found, or (with no `selected`) every
+   * interval in the 15m -> 1h -> 1d fallback order came back empty or errored. */
+  settled: boolean;
+  /** Settled, and nothing was found at any interval that was tried. */
+  empty: boolean;
+}
+
+/**
+ * Candle data for the token chart, with the retention-aware fallback the chart opens on.
+ * `selected` null — no tab clicked yet for this token — probes 15m, then 1h, then 1d, stopping at
+ * the first one with rows: a token that traded inside its own 15m retention window
+ * (src/lib/sync/retention.ts) resolves on the first query, exactly as before candle pruning
+ * shipped, and never fetches 1h or 1d. A dormant token falls through to whichever interval still
+ * has data, or, if none of the three do, settles `empty: true` rather than hanging. `1m` and `5m`
+ * are never tried — retention.ts keeps them for less time than 15m (1 and 2 days against 15m's
+ * 4), so a 15m miss already means they would miss too.
+ *
+ * `selected` non-null — the user picked a tab — fetches exactly that interval and nothing else,
+ * even when it comes back empty: once used, the switcher is left alone.
+ */
+export function useChartCandles(id: string, selected: Interval | null): ChartCandles {
+  const auto = selected === null;
+  const m15 = useCandles(id, "15m", auto);
+  const tryH1 = auto && isEmptyResult(m15);
+  const h1 = useCandles(id, "1h", tryH1);
+  const tryD1 = tryH1 && isEmptyResult(h1);
+  const d1 = useCandles(id, "1d", tryD1);
+  // Only fetched outside auto mode (enabled mirrors `!auto` exactly). `selected` is only null
+  // when `auto` is true, so the `?? "15m"` never actually matters — it exists so this call always
+  // gets a concrete Interval, keeping every render's hook calls the same shape.
+  const direct = useCandles(id, selected ?? "15m", !auto);
+
+  if (selected !== null) {
+    return {
+      interval: selected,
+      candles: direct.data,
+      settled: direct.isSuccess || direct.isError,
+      empty: direct.isSuccess && (direct.data?.length ?? 0) === 0,
+    };
+  }
+  if (hasRows(m15)) return { interval: "15m", candles: m15.data, settled: true, empty: false };
+  if (!isEmptyResult(m15)) return { interval: "15m", candles: undefined, settled: false, empty: false };
+  if (hasRows(h1)) return { interval: "1h", candles: h1.data, settled: true, empty: false };
+  if (!isEmptyResult(h1)) return { interval: "1h", candles: undefined, settled: false, empty: false };
+  if (hasRows(d1)) return { interval: "1d", candles: d1.data, settled: true, empty: false };
+  if (!isEmptyResult(d1)) return { interval: "1d", candles: undefined, settled: false, empty: false };
+  return { interval: "1d", candles: [], settled: true, empty: true };
 }
 
 export function useTrades(id: string) {

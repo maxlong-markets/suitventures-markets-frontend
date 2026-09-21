@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useState } from "react";
-import { useCandles } from "@/hooks/useMarketsData";
+import { useChartCandles } from "@/hooks/useMarketsData";
 import type { Candle, Interval, TokenPair } from "@/lib/types";
 import { MINUS, fmtPct, fmtPlainPrice, fmtUsd } from "@/lib/format";
 
@@ -15,7 +15,9 @@ const INTERVALS: readonly Interval[] = ["1m", "5m", "15m", "1h", "1d"];
 
 interface Props {
   pair: TokenPair;
-  interval: Interval;
+  /** The user's explicit tab pick, or null before they have made one for this token — the chart
+   * then opens on whichever of 15m/1h/1d actually has data (useChartCandles). */
+  selectedInterval: Interval | null;
   onIntervalChange(interval: Interval): void;
 }
 
@@ -59,8 +61,8 @@ function ChartLegend({
   );
 }
 
-export default function CandleChart({ pair, interval, onIntervalChange }: Props) {
-  const { data: candles } = useCandles(pair.id, interval);
+export default function CandleChart({ pair, selectedInterval, onIntervalChange }: Props) {
+  const { interval, candles, settled, empty } = useChartCandles(pair.id, selectedInterval);
   const [hover, setHover] = useState<Candle | null>(null);
   const pairLabel = `${pair.ticker} / ${pair.quote}`;
   const shown = hover ?? (candles && candles.length ? candles[candles.length - 1] : null);
@@ -93,6 +95,10 @@ export default function CandleChart({ pair, interval, onIntervalChange }: Props)
         {pair.stale ? (
           <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center px-4 text-center font-mono text-[11px] text-ink-50">
             No USD price feed for {pair.quote}: chart unavailable
+          </div>
+        ) : settled && empty ? (
+          <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center px-4 text-center font-mono text-[11px] text-ink-50">
+            No trades yet for {pair.ticker}. The chart fills in once it does.
           </div>
         ) : null}
         <CandleChartInner

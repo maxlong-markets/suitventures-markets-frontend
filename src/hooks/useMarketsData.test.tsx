@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StoreUnavailableError } from "@/lib/data/envio";
-import type { Address, TraderRow } from "@/lib/types";
+import type { Address, Candle, Interval, TraderRow } from "@/lib/types";
 import { queryHarness, renderHook, waitFor } from "@/test/dom";
-import { keys, useTraders, useVotes, useWatchlist } from "./useMarketsData";
+import { keys, useChartCandles, useTraders, useVotes, useWatchlist } from "./useMarketsData";
 
 const ROW: TraderRow = {
   wallet: "0x1111111111111111111111111111111111111111" as Address,
@@ -11,21 +11,31 @@ const ROW: TraderRow = {
   tokens: 1,
 };
 
+const CANDLE: Candle = { t: 1_700_000_000_000, o: 1, h: 1.1, l: 0.9, c: 1.05, v: 100 };
+const TOKEN = "0x000000000000000000000000000000000000000a";
+
 const h = vi.hoisted(() => ({
   ds: {
     traders: vi.fn<(by: string) => Promise<TraderRow[]>>(),
     watchlist: vi.fn<() => Promise<string[]>>(),
     votes: vi.fn<() => Promise<Record<string, never>>>(),
+    candles: vi.fn<(id: string, interval: Interval) => Promise<Candle[]>>(),
   },
 }));
 
 vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
+
+/** Every interval empty unless a test's own `mockImplementation` says otherwise. */
+function candlesAt(rows: Partial<Record<Interval, Candle[]>>) {
+  h.ds.candles.mockImplementation((_id, interval) => Promise.resolve(rows[interval] ?? []));
+}
 
 describe("useMarketsData", () => {
   beforeEach(() => {
     h.ds.traders.mockReset().mockResolvedValue([ROW]);
     h.ds.watchlist.mockReset().mockResolvedValue([]);
     h.ds.votes.mockReset().mockResolvedValue({});
+    h.ds.candles.mockReset();
   });
 
   it("keys the traders board by its ordering and asks the source for that ordering", async () => {
@@ -62,5 +72,75 @@ describe("useMarketsData", () => {
     expect(h.ds.watchlist).toHaveBeenCalledTimes(1);
     expect(keys.watchlist).toEqual(["watchlist"]);
     expect(keys.votes).toEqual(["votes"]);
+  });
+});
+
+describe("useChartCandles", () => {
+  beforeEach(() => {
+    h.ds.candles.mockReset();
+  });
+
+  it("opens on 15m when the token has 15-minute data, and asks for nothing else", async () => {
+    candlesAt({ "15m": [CANDLE] });
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => useChartCandles(TOKEN, null), { wrapper });
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current).toEqual({ interval: "15m", candles: [CANDLE], settled: true, empty: false });
+    expect(h.ds.candles).toHaveBeenCalledTimes(1);
+    expect(h.ds.candles).toHaveBeenCalledWith(TOKEN, "15m");
+  });
+
+  it("falls back to 1h when 15m is empty but 1h has data, still asking for nothing past 1h", async () => {
+    candlesAt({ "1h": [CANDLE] });
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => useChartCandles(TOKEN, null), { wrapper });
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current).toEqual({ interval: "1h", candles: [CANDLE], settled: true, empty: false });
+    expect(h.ds.candles).toHaveBeenCalledTimes(2);
+    expect(h.ds.candles).toHaveBeenCalledWith(TOKEN, "15m");
+    expect(h.ds.candles).toHaveBeenCalledWith(TOKEN, "1h");
+    expect(h.ds.candles).not.toHaveBeenCalledWith(TOKEN, "1d");
+  });
+
+  it("falls back to 1d when 15m and 1h are both empty but 1d has data", async () => {
+    candlesAt({ "1d": [CANDLE] });
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => useChartCandles(TOKEN, null), { wrapper });
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current).toEqual({ interval: "1d", candles: [CANDLE], settled: true, empty: false });
+    expect(h.ds.candles).toHaveBeenCalledTimes(3);
+    for (const iv of ["15m", "1h", "1d"] as const) expect(h.ds.candles).toHaveBeenCalledWith(TOKEN, iv);
+    // 1m and 5m have even shorter retention than 15m (retention.ts), so an empty 15m already
+    // implies they would be empty too — the cascade must never reach for them.
+    expect(h.ds.candles).not.toHaveBeenCalledWith(TOKEN, "1m");
+    expect(h.ds.candles).not.toHaveBeenCalledWith(TOKEN, "5m");
+  });
+
+  it("settles empty, not stuck loading, when nothing exists at any interval that was tried", async () => {
+    candlesAt({});
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => useChartCandles(TOKEN, null), { wrapper });
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current).toEqual({ interval: "1d", candles: [], settled: true, empty: true });
+    expect(h.ds.candles).toHaveBeenCalledTimes(3);
+  });
+
+  it("leaves an explicit pick alone even when it is empty, and never probes the fallback order for it", async () => {
+    candlesAt({ "15m": [CANDLE], "1h": [CANDLE], "1d": [CANDLE] }); // every fallback interval has data
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => useChartCandles(TOKEN, "5m"), { wrapper }); // but 5m, explicitly picked, does not
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current).toEqual({ interval: "5m", candles: [], settled: true, empty: true });
+    expect(h.ds.candles).toHaveBeenCalledTimes(1);
+    expect(h.ds.candles).toHaveBeenCalledWith(TOKEN, "5m");
+  });
+
+  it("shows an explicit pick's own data directly, with no cascade at all", async () => {
+    candlesAt({ "1h": [CANDLE, CANDLE] });
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => useChartCandles(TOKEN, "1h"), { wrapper });
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current).toEqual({ interval: "1h", candles: [CANDLE, CANDLE], settled: true, empty: false });
+    expect(h.ds.candles).toHaveBeenCalledTimes(1);
   });
 });
