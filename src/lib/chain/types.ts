@@ -165,6 +165,11 @@ export type FoldResult = {
   /**
    * Events naming a pool nothing tracks: a Swap or a ModifyLiquidity whose pool id is not in
    * state.pools and no Initialize in this batch created — a health signal the runner reports.
+   * Also counts a Swap or a ModifyLiquidity whose pool IS tracked but whose token has no entry
+   * in state.tokens at all (Fix round 4: a torn-read gap in the original snapshot copy — see
+   * loadFoldState's synthesized fallback in store.ts, which should make this unreachable in
+   * practice): the event is skipped rather than thrown, so one bad row can never wedge the whole
+   * batch's transaction.
    * Does NOT include ModifyLiquidity's null-TVL guard: that pool is tracked, just without TVL
    * history, which is a different (and unremarkable) condition.
    */

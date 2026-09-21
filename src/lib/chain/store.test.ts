@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { bucketStart } from "@/lib/sync/ids";
 import { testDb } from "@/test/db";
+import { foldEvents, newTokenCandidates } from "./fold";
 import type { TokenMetadataReading } from "./onchain";
 import { applyFold, dueForMetadata, loadFoldState, readChainCursor, refreshTokenMetadata } from "./store";
 import type { CandleInterval, CandleState, FoldResult, InitializeEvent, PoolState, SwapEvent, TokenState, TradeRow } from "./types";
@@ -248,6 +249,78 @@ describe("loadFoldState", () => {
     expect(new Set(after.poolsByToken.get(tokenNew))).toEqual(new Set([poolE, poolF]));
     expect(after.pools.get(poolE)).toEqual(pool({ id: poolE, tokenId: tokenNew }));
     expect(after.pools.get(poolF)).toEqual(pool({ id: poolF, tokenId: tokenNew }));
+  });
+
+  // Production incident: .superpowers/sdd/2026-09-21-chain-reader/missing-token-report.md. A
+  // torn read in the original snapshot copy left one pool row with no matching market.tokens
+  // row at all — there are no foreign keys, so nothing caught it. Simulated here by applying a
+  // fold that writes only the pool, never its token.
+  it("synthesizes a fallback TokenState for a pool whose token row is missing (a torn snapshot read)", async () => {
+    await applyFold(db, result({ pools: [pool({ id: POOL_A, tokenId: TOKEN_B })], tokens: [], candles: [], trades: [] }), 100, T0);
+    expect(await db.query("select id from market.tokens where id = $1", [TOKEN_B])).toEqual([]);
+
+    const state = await loadFoldState(db, [swapEvent({ poolId: POOL_A })]);
+
+    // The pool itself loads normally...
+    expect(state.pools.get(POOL_A)).toEqual(pool({ id: POOL_A, tokenId: TOKEN_B }));
+    expect(state.poolsByToken.get(TOKEN_B)).toEqual([POOL_A]);
+    // ...and the gap in the map is healed with the old indexer's own never-seen-token fallback
+    // (the same shape handleInitialize uses), not left empty.
+    expect(state.tokens.get(TOKEN_B)).toEqual({
+      id: TOKEN_B,
+      address: TOKEN_B,
+      symbol: TOKEN_B.slice(0, 6),
+      name: TOKEN_B,
+      decimals: 18,
+      poolCount: 1, // the number of TOKEN_B's pools this load found
+      origin: "LONG", // from the pool
+      primaryPoolId: null,
+      createdAt: T0, // from the pool
+      metadataLoaded: false,
+    });
+  });
+
+  it("never synthesizes a token for an id no loaded pool references (an Initialize currency alone doesn't count)", async () => {
+    // Same shape as the "matches no row: harmless" test above, but pinned specifically against
+    // the new synthesis loop: TOKEN_B is named only by initCurrencies, no pool row loads it.
+    const state = await loadFoldState(db, [initEvent({ currency0: TOKEN_B, currency1: QUOTE })]);
+    expect(state.pools.size).toBe(0);
+    expect(state.tokens.has(TOKEN_B)).toBe(false);
+  });
+
+  // The full self-healing chain the fix relies on: loadFoldState's synthesized fallback is
+  // exactly the shape newTokenCandidates already looks for (metadataLoaded: false), so the
+  // runner's normal newTokenCandidates -> read real metadata -> foldEvents -> applyFold path
+  // closes the gap with no manual SQL. See missing-token-report.md for the full chain.
+  it("heals end to end: synthesized fallback -> newTokenCandidates -> real metadata prices the same-batch swap -> applyFold writes the token row for real", async () => {
+    await applyFold(db, result({ pools: [pool({ id: POOL_A, tokenId: TOKEN_B })], tokens: [], candles: [], trades: [] }), 100, T0);
+
+    const event = swapEvent({ poolId: POOL_A, amount0: -2_000_000n });
+    const state = await loadFoldState(db, [event]);
+    expect(state.tokens.get(TOKEN_B)?.metadataLoaded).toBe(false);
+
+    // Step 2: the runner asks newTokenCandidates who needs a metadata read before folding.
+    expect(newTokenCandidates([event], state)).toEqual([TOKEN_B]);
+
+    // Step 3: the runner reads real metadata from the chain and supplies it to the fold.
+    const tokenMetadata = new Map([[TOKEN_B, { symbol: "PAWS", name: "Paws Of Cat", decimals: 6 }]]);
+    const folded = foldEvents([event], state, { tokenMetadata });
+
+    // The same-batch swap is priced at the REAL decimals, not the 18-decimals fallback:
+    // -2_000_000n raw is 2 tokens at 6 decimals (2e-12 at 18).
+    expect(folded.trades[0]!.amountToken).toBeCloseTo(2, 9);
+    const repaired = state.tokens.get(TOKEN_B)!;
+    expect(repaired.decimals).toBe(6);
+    expect(repaired.metadataLoaded).toBe(true);
+
+    // Step 4: applyFold's token insert is `on conflict do nothing` — since TOKEN_B never had a
+    // row, this insert is a real, first-time write, not a no-op.
+    await applyFold(db, folded, event.block, T0);
+    const row = (await db.query<{ symbol: string; decimals: number; metadata_loaded: boolean }>(
+      "select symbol, decimals, metadata_loaded from market.tokens where id = $1",
+      [TOKEN_B],
+    ))[0]!;
+    expect(row).toEqual({ symbol: "PAWS", decimals: 6, metadata_loaded: true });
   });
 });
 

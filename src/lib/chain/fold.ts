@@ -57,6 +57,18 @@
  *     `amountsForLiquidityDelta` directly, outside any try/catch, so a throw there (a bad tick
  *     range — a decoder bug, not stale legacy data) still propagates instead of being silently
  *     counted as `skippedLiquidity`. See the function's own doc comment for the full reasoning.
+ *
+ * Fix round 4, from the production incident at
+ * .superpowers/sdd/2026-09-21-chain-reader/missing-token-report.md: a torn read in the original
+ * snapshot copy left exactly one pool row with no matching market.tokens row, and
+ * `handleModifyLiquidity`/`handleSwap` threw on it — inside `applyFold`'s one transaction, so the
+ * throw rolled back the whole batch and wedged the catch-up on that block forever. `loadFoldState`
+ * (store.ts) now synthesizes a fallback `TokenState` for any pool it loads whose token has no row,
+ * which should make this unreachable via the normal `newTokenCandidates` -> real-metadata-read ->
+ * `applyFold` path. Both handlers no longer throw on a still-missing token regardless: they skip
+ * the event and count it in `FoldResult.ignoredPools`, exactly like the "pool itself missing" case
+ * they already handle — one bad row must never be able to stop the whole reader. Every other throw
+ * in this file is untouched.
  */
 
 import type {
@@ -448,8 +460,13 @@ function handleSwap(event: SwapEvent, state: FoldState, ctx: FoldContext): void 
 
   const rawToken = state.tokens.get(pool.tokenId);
   if (!rawToken) {
-    // Should never happen: every PoolState in a consistent FoldState names a real token.
-    throw new Error(`fold: swap on pool ${pool.id} references missing token ${pool.tokenId}`);
+    // Fix round 4: should be unreachable now that loadFoldState synthesizes a fallback
+    // TokenState for every pool it loads (store.ts) — but applyFold writes rows and the cursor
+    // in one transaction, so a throw here would roll back the whole batch and wedge the cron on
+    // this block forever over a single bad row. Skip the event and count it in the same
+    // ignoredPools the pool-missing check above already uses.
+    ctx.ignoredPools += 1;
+    return;
   }
   // MAJOR-1 (round-2 review): repair before pricing, so a swap that is this batch's only
   // chance to fix a metadata-failed token also prices ITSELF with the corrected decimals.
@@ -581,8 +598,13 @@ function handleModifyLiquidity(event: ModifyLiquidityEvent, state: FoldState, ct
 
   const rawToken = state.tokens.get(pool.tokenId);
   if (!rawToken) {
-    // Should never happen: every PoolState in a consistent FoldState names a real token.
-    throw new Error(`fold: modifyLiquidity on pool ${pool.id} references missing token ${pool.tokenId}`);
+    // Fix round 4: should be unreachable now that loadFoldState synthesizes a fallback
+    // TokenState for every pool it loads (store.ts) — but applyFold writes rows and the cursor
+    // in one transaction, so a throw here would roll back the whole batch and wedge the cron on
+    // this block forever over a single bad row. Skip the event and count it in the same
+    // ignoredPools the pool-missing check above already uses.
+    ctx.ignoredPools += 1;
+    return;
   }
   // MAJOR-1 (round-2 review): repair before deriving, same reasoning as handleSwap above.
   const token = repairTokenMetadata(state, ctx, rawToken);

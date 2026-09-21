@@ -754,13 +754,19 @@ describe("skippedLiquidity: a legacy pool with an underivable price never wedges
     expect(result.pools).toEqual([]);
   });
 
-  it("still throws for a reason unrelated to the price derivation (a missing token is a different kind of problem)", () => {
+  // Fix round 4 (.superpowers/sdd/2026-09-21-chain-reader/missing-token-report.md): a missing
+  // token used to throw here, which — since applyFold writes rows and the cursor in one
+  // transaction — would wedge the whole batch's transaction and, on a replay, the cron/catch-up
+  // permanently. It is now a different kind of "ignored" from an underivable legacy price: still
+  // distinguished from skippedLiquidity (NIT-D's original concern — a regression that miscounts
+  // it there would hide a real signal), but skipped rather than thrown either way.
+  it("skips rather than throws when the pool's token is missing, counting it as ignoredPools, not skippedLiquidity", () => {
     const state = seededState({ sqrtPriceX96: null, priceQuote: 3.40256786836388e50 });
     state.tokens.delete(AI); // break the pool -> token invariant on purpose
-    // NIT-D (round-3 re-review): a bare .toThrow() passes for ANY throw, not specifically this
-    // one — match the message so a future regression that throws for some other reason (or
-    // stops throwing and gets miscounted as skippedLiquidity instead) cannot hide behind it.
-    expect(() => foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state)).toThrow(/missing token/);
+    const result = foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state);
+    expect(result.ignoredPools).toBe(1);
+    expect(result.skippedLiquidity).toBe(0);
+    expect(result.pools).toEqual([]);
   });
 
   // Round-3 re-review, MINOR-A: the catch in tryDeriveLiquidityAmounts must apply ONLY when the
@@ -773,6 +779,35 @@ describe("skippedLiquidity: a legacy pool with an underivable price never wedges
     const state = seededState({ sqrtPriceX96: Q96, tvlToken: 0n, tvlQuote: 0n }); // real sqrt, not derived
     const invertedTicks = modifyLiquidityEvent(POOL, 10n ** 18n, 1, { tickLower: 100, tickUpper: -100 });
     expect(() => foldEvents([invertedTicks], state)).toThrow(/tickLower must be less than tickUpper/);
+  });
+});
+
+// Fix round 4, production incident: .superpowers/sdd/2026-09-21-chain-reader/missing-token-report.md.
+// A torn read in the original snapshot copy left one pool with no matching token row at all — not
+// merely unloaded metadata, an absent map entry. loadFoldState (store.ts) now closes this gap by
+// synthesizing a fallback TokenState (see store.test.ts), which should make the branch below
+// unreachable in practice; it stays as a defensive skip (never a throw) precisely so one future bad
+// row, of any origin, can never wedge applyFold's one-transaction batch and stop the whole reader.
+describe("a pool whose token is entirely missing from state (defensive: should be unreachable after loadFoldState's fix)", () => {
+  it("skips a Swap and counts it in ignoredPools rather than throwing", () => {
+    const state = seededState();
+    state.tokens.delete(AI); // break the pool -> token invariant on purpose
+    const result = foldEvents([swapEvent(1000n * 10n ** 18n, -(10n ** 18n), 2n * Q96, 1)], state);
+    expect(result.ignoredPools).toBe(1);
+    expect(result.trades).toHaveLength(0);
+    expect(result.pools).toEqual([]); // the pool itself is untouched: the event never priced it
+    const pool = state.pools.get(POOL)!;
+    expect(pool.swapCount).toBe(0);
+  });
+
+  it("skips a ModifyLiquidity and counts it in ignoredPools rather than throwing", () => {
+    const state = seededState();
+    state.tokens.delete(AI); // break the pool -> token invariant on purpose
+    const result = foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state);
+    expect(result.ignoredPools).toBe(1);
+    expect(result.pools).toEqual([]); // the pool itself is untouched
+    const pool = state.pools.get(POOL)!;
+    expect(pool.tvlToken).toBe(0n); // seededState/poolFixture default: unchanged
   });
 });
 

@@ -117,6 +117,13 @@ async function loadCandles(db: Db, events: readonly ChainEvent[]): Promise<Map<s
  * run here. A currency that turns out to be a quote, or a genuinely new token, simply matches no row in
  * either table below: harmless. Skipping this widening would make the pool-by-token query below miss the
  * token's siblings entirely, and the fold would then treat a live, already-tracked token as brand new.
+ *
+ * A loaded pool's token can be missing from market.tokens entirely — not merely unloaded, absent — when a
+ * torn read in the original snapshot copy left the pool row without its token row (see
+ * .superpowers/sdd/2026-09-21-chain-reader/missing-token-report.md; there are no foreign keys, so nothing
+ * catches it). Below, such an id is synthesized with the same fallback shape handleInitialize already uses
+ * for a token it has never seen, `metadataLoaded: false`, so the fold sees a token to repair rather than a
+ * gap its handlers would otherwise have to guard against.
  */
 export async function loadFoldState(db: Db, events: readonly ChainEvent[]): Promise<FoldState> {
   const poolIds = [...new Set(events.map((e) => e.poolId))];
@@ -155,6 +162,29 @@ export async function loadFoldState(db: Db, events: readonly ChainEvent[]): Prom
 
   const tokens = new Map<string, TokenState>();
   for (const r of tokenRows) tokens.set(r.id, rowToTokenState(r));
+
+  // Heal a torn-read gap (see the doc comment above): synthesize a fallback for any token id a
+  // loaded pool actually references but that has no row of its own — never for anything else.
+  // metadataLoaded: false means newTokenCandidates will offer it up, the runner reads its real
+  // metadata from the chain before folding, and applyFold's token insert (`on conflict do
+  // nothing`) writes the row for real: the gap heals itself through the normal path, no manual
+  // SQL required.
+  for (const [tokenId, tokenPoolIds] of poolsByToken) {
+    if (tokens.has(tokenId)) continue;
+    const pool = pools.get(tokenPoolIds[0]!)!;
+    tokens.set(tokenId, {
+      id: tokenId,
+      address: tokenId,
+      symbol: tokenId.slice(0, 6),
+      name: tokenId,
+      decimals: 18,
+      poolCount: tokenPoolIds.length,
+      origin: pool.origin,
+      primaryPoolId: null,
+      createdAt: pool.createdAt,
+      metadataLoaded: false,
+    });
+  }
 
   const quotes = new Map<string, QuoteState>();
   for (const r of quoteRows) quotes.set(r.id, { id: r.id, decimals: r.decimals, usdPrice: r.usd_price });
