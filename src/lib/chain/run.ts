@@ -1,6 +1,6 @@
 import type { PublicClient } from "viem";
 import type { Db } from "@/lib/db/client";
-import { acquireLease, finishRun, releaseLease } from "@/lib/sync/state";
+import { acquireLease, finishRun, readState, releaseLease } from "@/lib/sync/state";
 import { upsertQuotes } from "@/lib/sync/writers";
 import { foldEvents, newTokenCandidates } from "./fold";
 import { readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
@@ -69,7 +69,7 @@ export type ChainRunOpts = {
 };
 
 export type ChainRunReport = {
-  skipped: "lease" | null;
+  skipped: "lease" | "nightly" | null;
   cycles: number;
   blocks: number;
   events: number;
@@ -109,9 +109,11 @@ function emptyReport(): ChainRunReport {
  * quote prices at most once per `quoteRefreshSec`, and sweeps the metadata retry queue once, all under one
  * `chain` lease. See the module doc comment for the sizing this is built against.
  *
- * Order of operations (brief, exact, with two review fix-round-1 amendments noted inline below): acquire the
- * lease (`{ skipped: "lease" }` and the cursor read back for the report — fix round 1, item 5 — but nothing
- * else touched, if held); read the cursor, throwing if it is 0 (starting from genesis by accident must be
+ * Order of operations (brief, exact, with two review fix-round-1 amendments and one final-review amendment
+ * noted inline below): acquire the lease (`{ skipped: "lease" }` and the cursor read back for the report —
+ * fix round 1, item 5 — but nothing else touched, if held); yield to the nightly while its own lease is live
+ * (`{ skipped: "nightly" }`, this chain lease released first — final review MAJOR, mirroring the old market
+ * job's spec-5.1 guard); read the cursor, throwing if it is 0 (starting from genesis by accident must be
  * impossible — run the catch-up script first); loop fetch/fold/apply cycles against the chain head minus
  * `safetyBlocks`, sleeping at most until the window ends when there is nothing to do (fix round 1, item 2),
  * calling `finishRun` after every real cycle; refresh quotes and sweep metadata retries once the loop ends;
@@ -127,6 +129,18 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
     // here would read exactly like step 2's genesis refusal to anyone watching this report, and a lease skip
     // is a routine overlap, not that. One extra read, only on this rare path.
     return { ...report, skipped: "lease", cursor: await readChainCursor(db) };
+  }
+
+  // Final review MAJOR: mirrors the old market job's yield to the nightly (src/lib/sync/run.ts's
+  // `opts.job === "market"` check, spec 5.1) — Task 6 replaced that job with this one without carrying the
+  // guard over. The nightly's "listed" phase is a single unbatched full-table UPDATE of market.tokens
+  // (writers.ts's recomputeListedPools) and its "prune" phase deletes from market.candles; applyFold's own
+  // token and candle writes against either while both run is a real deadlock cycle, not just contention. Give
+  // up the lease just taken and let the nightly's own window (up to 280 s) bound the delay — this reader
+  // recovers the lost minute in a cycle or two once it is free again.
+  if ((await readState(db, "nightly")).leaseUntil > sec(startMs)) {
+    await releaseLease(db, CHAIN_JOB, opts.owner);
+    return { ...report, skipped: "nightly", cursor: await readChainCursor(db) };
   }
 
   const safetyBlocks = opts.safetyBlocks ?? DEFAULT_SAFETY_BLOCKS;

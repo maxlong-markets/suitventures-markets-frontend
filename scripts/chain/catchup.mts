@@ -108,7 +108,7 @@ import type { PublicClient } from "viem";
 import { earliestRebuildableFromTs, findBlockAtOrAfter, flooredToUtcMidnight, seedCursor } from "@/lib/chain/catchup";
 import { runChainSync, type ChainRunOpts } from "@/lib/chain/run";
 import { readChainCursor } from "@/lib/chain/store";
-import type { Db } from "@/lib/db/client";
+import { createDb, type Db } from "@/lib/db/client";
 import { chainDeps } from "@/lib/sync/deps";
 import { readState, releaseLease, renewLease } from "@/lib/sync/state";
 
@@ -324,7 +324,27 @@ function installSignalHandlers(db: Db, owner: string): void {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const deps = chainDeps(); // the real HyperSync source, chain client and quote config — exactly as the cron builds them.
-  const { db, source } = deps;
+  const { source } = deps;
+
+  // Final review MAJOR: this is a multi-hour bulk job (2-4 hours measured), not the cron's 300 s invocation
+  // chainDeps() is built for. deps.db is the process singleton over DATABASE_URL, the transaction-mode pooler
+  // (port 6543) that enforces a two-minute statement_timeout and is not meant to hold one logical session for
+  // hours. Build a dedicated connection instead, exactly like gapfill-candles.mts's own DATABASE_URL_DIRECT
+  // (session port 5432, one connection: max 1) — falling back to DATABASE_URL, with a printed warning, only
+  // when DATABASE_URL_DIRECT is absent (chainDeps() above already needed DATABASE_URL to succeed at all, so
+  // that fallback can only be reached when it is in fact set). chainDeps() stays the source of
+  // source/client/quotes below; only the Db this script reads and writes through changes.
+  const directUrl = process.env.DATABASE_URL_DIRECT;
+  if (!directUrl) {
+    console.warn(
+      "[chain:catchup] DATABASE_URL_DIRECT is not set; falling back to DATABASE_URL (the pooler). A multi-hour " +
+        "run on the pooler risks its two-minute statement_timeout. Set DATABASE_URL_DIRECT (see .env.example) to avoid this.",
+    );
+  }
+  const url = directUrl ?? process.env.DATABASE_URL;
+  if (!url) fail("neither DATABASE_URL_DIRECT nor DATABASE_URL is set (see .env.example).");
+  const db = createDb(url, { max: 1 });
+
   const owner = `catchup-${process.pid}`;
   installSignalHandlers(db, owner);
 

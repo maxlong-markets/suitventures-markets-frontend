@@ -186,6 +186,35 @@ describe("runChainSync: lease and cursor guards", () => {
   });
 });
 
+describe("runChainSync: yields to the nightly (final review MAJOR)", () => {
+  it('returns { skipped: "nightly" } and touches nothing else while the nightly holds its lease, releasing its own lease again', async () => {
+    await seedCursor(db, 1000);
+    const nowSec = Math.floor(NOW_MS / 1000);
+    await acquireLease(db, "nightly", "night", nowSec, 300); // leaseUntil = nowSec + 300, well past startMs
+    const source = new FakeLogSource({ head: 1030 });
+    const report = await runChainSync(db, chainDeps({ source }), baseOpts());
+    expect(report).toEqual({
+      skipped: "nightly", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0,
+      skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 1000, error: null,
+    });
+    expect(source.requests).toBe(0); // never asked the source for anything, not even head()
+    // Its own chain lease was taken and then given straight back, not left held for the nightly's duration.
+    expect((await readState(db, "chain")).leaseOwner).toBeNull();
+    expect((await readState(db, "nightly")).leaseOwner).toBe("night"); // untouched
+  });
+
+  it("does not yield once the nightly's lease has lapsed: it acquires normally and asks the source", async () => {
+    await seedCursor(db, 1000);
+    const nowSec = Math.floor(NOW_MS / 1000);
+    await acquireLease(db, "nightly", "night", nowSec - 1000, 300); // leaseUntil = nowSec - 700, already expired
+    const source = new FakeLogSource({ head: 1000 }); // caught up either way; only the yield-or-not is under test
+    const report = await runChainSync(db, chainDeps({ source }), baseOpts({ maxRequests: 1 }));
+    expect(report.skipped).toBeNull();
+    expect(source.requests).toBe(1); // proceeded to call head(), proving it did not yield
+    expect((await readState(db, "chain")).leaseOwner).toBeNull(); // released normally at the end
+  });
+});
+
 describe("runChainSync: the fetch/fold/apply loop", () => {
   it("runs a clean multi-cycle invocation, advancing the cursor exactly to nextBlock - 1 each time (including a response that covers fewer blocks than asked)", async () => {
     await seedCursor(db, 1000);

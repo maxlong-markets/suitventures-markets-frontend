@@ -300,14 +300,22 @@ export async function applyFold(
 }
 
 /**
- * Up to `limit` token ids (addresses) due for a metadata retry — `metadata_loaded = false` and
- * `metadata_retry_at <= now` — oldest retry first then id (Task 6, run.ts's metadata retry sweep). The
- * queue starts tiny: 21 of 132,004 rows carry `metadata_loaded = false` (Task 6 brief, measurement 3), so
- * this is always a small, bounded read, never a scan of the whole table.
+ * Up to `limit` token ids (addresses) due for a metadata retry — `metadata_retry_at <= now` and either
+ * `metadata_loaded = false` (the original case, Task 6) or `metadata_loaded = true and total_supply = 0`
+ * (final review, MAJOR "narrow half": a token whose symbol/name/decimals read succeeded — so run.ts marked
+ * it loaded — but whose independent `totalSupply()` call failed is inserted with `total_supply = 0` and,
+ * without this second predicate, never revisited by anything: upsertTokensFromFold's update path never
+ * mentions total_supply, and the original `metadata_loaded = false` predicate alone can never see a row that
+ * is already loaded) — oldest retry first then id (run.ts's metadata retry sweep). Both cases share the same
+ * `metadata_retry_at` gate and the same caller-supplied `limit`, so the hourly-retry pacing and bound that
+ * already protected the unloaded case apply to the zero-supply case exactly the same way. The queue starts
+ * tiny: 21 of 132,004 rows carried `metadata_loaded = false` at Task 6 (measurement 3); the zero-supply set
+ * is a similarly small, bounded read, never a scan of the whole table.
  */
 export async function dueForMetadata(db: Db, now: number, limit: number): Promise<string[]> {
   const rows = await db.query<{ id: string }>(
-    `select id from market.tokens where metadata_loaded = false and metadata_retry_at <= $1::int
+    `select id from market.tokens
+     where metadata_retry_at <= $1::int and (metadata_loaded = false or total_supply = 0)
      order by metadata_retry_at, id limit $2::int`,
     [now, limit],
   );
@@ -319,7 +327,12 @@ export async function dueForMetadata(db: Db, now: number, limit: number): Promis
  * dueForMetadata above): an `ok` reading loads the token for good — symbol, name, decimals,
  * metadata_loaded = true, metadata_retry_at reset to 0, and total_supply when the reading carries one (the
  * indexer's own `readTotalSupply` can fail independently of `ok`; when it did, `total_supply` is left alone
- * rather than overwritten with a fallback). A failed reading only pushes metadata_retry_at an hour out
+ * rather than overwritten with a fallback). This same branch is what repairs a token dueForMetadata returns
+ * under its newer predicate — `metadata_loaded = true and total_supply = 0` (final review, MAJOR "narrow
+ * half") — the moment a retry's totalSupply() call finally succeeds; no separate code path was needed, since
+ * an `ok` reading with a non-null totalSupply always overwrites whatever total_supply currently holds,
+ * loaded-already-true token or not. holders_count is still never written, here or on the newly-repaired
+ * total_supply write. A failed reading only pushes metadata_retry_at an hour out
  * (`now + 3600`, the indexer's own hourly retry cadence, ported), touching nothing else — the fallback
  * metadata already stored (symbol/name/decimals) survives untouched, as does the token's row generally. As
  * with every other write in this file, holders_count is never mentioned and so never written.

@@ -2,7 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { bucketStart } from "@/lib/sync/ids";
 import { testDb } from "@/test/db";
-import { applyFold, loadFoldState, readChainCursor } from "./store";
+import type { TokenMetadataReading } from "./onchain";
+import { applyFold, dueForMetadata, loadFoldState, readChainCursor, refreshTokenMetadata } from "./store";
 import type { CandleInterval, CandleState, FoldResult, InitializeEvent, PoolState, SwapEvent, TokenState, TradeRow } from "./types";
 
 let db: Db;
@@ -436,5 +437,61 @@ describe("applyFold", () => {
       const updated = (await db.query<{ pool_count: number; symbol: string }>("select pool_count, symbol from market.tokens where id = $1", [TOKEN_A]))[0];
       expect(updated).toEqual({ pool_count: 3, symbol: "NEW" }); // other columns still update
     });
+  });
+});
+
+describe("dueForMetadata", () => {
+  it("returns a loaded token whose total_supply is 0 (final review, MAJOR narrow half)", async () => {
+    // token()'s default is metadataLoaded: true; result()'s bare applyFold gives it total_supply "0" (no
+    // newTokenSupply map) — exactly the stuck-at-zero shape the review describes.
+    await applyFold(db, result(), 100, T0);
+    expect(await dueForMetadata(db, T0 + 1000, 10)).toEqual([TOKEN_A]);
+  });
+
+  it("does not return a loaded token that already carries a real total_supply", async () => {
+    await applyFold(db, result(), 100, T0, { newTokenSupply: new Map([[TOKEN_A, 123n]]) });
+    expect(await dueForMetadata(db, T0 + 1000, 10)).toEqual([]);
+  });
+
+  it("still returns a token with metadata_loaded = false regardless of its total_supply (the original Task 6 predicate)", async () => {
+    await applyFold(db, result({ tokens: [token({ metadataLoaded: false })] }), 100, T0, { newTokenSupply: new Map([[TOKEN_A, 999n]]) });
+    expect(await dueForMetadata(db, T0 + 1000, 10)).toEqual([TOKEN_A]);
+  });
+
+  it("gates the zero-supply case by metadata_retry_at <= now, exactly like the unloaded case", async () => {
+    await applyFold(db, result(), 100, T0);
+    await db.query("update market.tokens set metadata_retry_at = $1 where id = $2", [T0 + 3600, TOKEN_A]);
+    expect(await dueForMetadata(db, T0 + 1000, 10)).toEqual([]); // not due yet
+    expect(await dueForMetadata(db, T0 + 3600, 10)).toEqual([TOKEN_A]); // due now
+  });
+});
+
+describe("refreshTokenMetadata: repairing a zero-supply loaded token", () => {
+  it("writes the real total_supply once a retry's reading succeeds, drops it from dueForMetadata, and never writes holders_count", async () => {
+    await applyFold(db, result(), 100, T0); // TOKEN_A: metadata_loaded true, total_supply "0"
+    await db.query("update market.tokens set holders_count = $1 where id = $2", [42, TOKEN_A]);
+    expect(await dueForMetadata(db, T0 + 1000, 10)).toEqual([TOKEN_A]);
+
+    const reading: TokenMetadataReading = { ok: true, symbol: "AI", name: "Artificial Inu", decimals: 18, totalSupply: 777_000_000n };
+    await refreshTokenMetadata(db, new Map([[TOKEN_A, reading]]), T0 + 1000);
+
+    const row = (await db.query<{ total_supply: string; metadata_loaded: boolean; metadata_retry_at: number; holders_count: number }>(
+      "select total_supply, metadata_loaded, metadata_retry_at, holders_count from market.tokens where id = $1",
+      [TOKEN_A],
+    ))[0]!;
+    expect(row).toEqual({ total_supply: "777000000", metadata_loaded: true, metadata_retry_at: 0, holders_count: 42 }); // holders_count untouched
+
+    expect(await dueForMetadata(db, T0 + 2000, 10)).toEqual([]); // repaired: no longer due
+  });
+
+  it("leaves total_supply at 0 (still due) when the retry's totalSupply() call fails again, even though the rest of the reading is ok", async () => {
+    await applyFold(db, result(), 100, T0);
+    // ok: true (symbol/name/decimals succeeded, exactly why the token is metadata_loaded already) but
+    // totalSupply null (the independent call failed again) — store.ts's own coalesce leaves total_supply
+    // alone rather than overwriting it with a fallback.
+    const reading: TokenMetadataReading = { ok: true, symbol: "AI", name: "Artificial Inu", decimals: 18, totalSupply: null };
+    await refreshTokenMetadata(db, new Map([[TOKEN_A, reading]]), T0 + 1000);
+    const row = (await db.query<{ total_supply: string }>("select total_supply from market.tokens where id = $1", [TOKEN_A]))[0]!;
+    expect(row.total_supply).toBe("0");
   });
 });
