@@ -160,8 +160,13 @@ export type FoldResult = {
   tokens: TokenState[];
   candles: CandleState[];
   trades: TradeRow[];
-  /** Token ids created in this batch whose symbol, name and decimals still have to be read from the chain. */
+  /** Token ids created in this batch (the runner records their supply and metadata retry state from it). */
   newTokens: string[];
-  /** Pool ids the batch referenced that the state did not hold and no Initialize in the batch created: untracked pools, ignored. */
+  /**
+   * Events naming a pool nothing tracks: a Swap or a ModifyLiquidity whose pool id is not in
+   * state.pools and no Initialize in this batch created — a health signal the runner reports.
+   * Does NOT include ModifyLiquidity's null-TVL guard: that pool is tracked, just without TVL
+   * history, which is a different (and unremarkable) condition.
+   */
   ignoredPools: number;
 };

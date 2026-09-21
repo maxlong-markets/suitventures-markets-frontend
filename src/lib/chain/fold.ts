@@ -12,8 +12,9 @@
  * Deliberately NOT ported (see docs/superpowers/plans/2026-09-21-chain-reader.md, Task 3,
  * "What the plan cannot tell you"):
  *   - the transfer-history replay at Initialize (getTransferHistory/applyTransfer/historyLoaded)
- *   - the token metadata effect call and its retry throttling (metadataRetryAt) — the fold only
- *     lists new token ids in `newTokens`; the caller reads metadata
+ *   - the token metadata effect call itself and its retry throttling (metadataRetryAt) — the
+ *     fold never touches the network. It reads metadata from `opts.tokenMetadata` when the
+ *     caller supplies it (see below); `newTokens` lists every id created in this batch either way.
  *   - ensureQuote's quote-row seeding — quotes already exist in the store; decimals fall back to
  *     the ported quotes.ts config when a pool's quote id is not (yet) in `state.quotes`
  *   - candleWindowAllows / env-gated candle windows — all five intervals always update
@@ -22,6 +23,15 @@
  * always writes its trade row, price, sqrtPriceX96, candles and the `lastSwapAt` max; it only
  * skips swapCount/volumeQuoteAllTime/tvlToken/tvlQuote when `event.timestamp <= pool.baselineAt`.
  * A ModifyLiquidity at or before the baseline is ignored entirely.
+ *
+ * Also new (Fix round 1, on top of the first version of this file): metadata now arrives
+ * BEFORE the fold, not after. The old indexer read a new token's metadata synchronously
+ * inside its Initialize handler, before any Swap on that token could be processed — so a
+ * token created and traded in the same batch was always priced with its real decimals. A
+ * "read metadata after the fold" design would price that same-batch trade (and all five of
+ * its candles) with the `decimals = 18` fallback instead, which is silently wrong forever for
+ * any token that isn't 18 decimals. `newTokenCandidates` lets the runner read metadata for a
+ * batch's new tokens BEFORE calling `foldEvents`, and pass it back in via `opts.tokenMetadata`.
  */
 
 import type {
@@ -45,6 +55,16 @@ import { amountsForLiquidityDelta } from "./math/liquidity";
 import { choosePrimaryPool, type PoolRank } from "./math/primaryPool";
 import { ZERO_ADDRESS } from "./math/constants";
 
+/** A new token's real metadata, read from the chain before the fold runs (see newTokenCandidates). */
+export type TokenMetadata = { symbol: string; name: string; decimals: number };
+
+export type FoldOptions = {
+  /** Keyed by the lowercase token address, for every id newTokenCandidates returned that the
+   * caller managed to read. A token this batch creates with no entry here keeps the fallback
+   * metadata (symbol = address.slice(0,6), name = address, decimals = 18, metadataLoaded = false). */
+  tokenMetadata?: ReadonlyMap<string, TokenMetadata>;
+};
+
 /** Accumulates what one foldEvents call touched, so the same id is reported once. */
 type FoldContext = {
   touchedPools: Set<string>;
@@ -53,14 +73,19 @@ type FoldContext = {
   trades: TradeRow[];
   newTokenIds: string[];
   ignoredPools: number;
+  tokenMetadata: ReadonlyMap<string, TokenMetadata> | undefined;
 };
 
 /**
  * foldEvents mutates `state` in place and returns the FINAL state of everything this batch
  * touched (never deltas), so applying the same FoldResult twice is harmless. Events are folded
  * strictly in the order given; callers are responsible for (block, logIndex) ordering.
+ *
+ * `opts.tokenMetadata` supplies real symbol/name/decimals for tokens this batch is about to
+ * create (see `newTokenCandidates`, called before this). A created token with no entry there
+ * keeps the fallback metadata, exactly as if `opts` were omitted.
  */
-export function foldEvents(events: readonly ChainEvent[], state: FoldState): FoldResult {
+export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts?: FoldOptions): FoldResult {
   const ctx: FoldContext = {
     touchedPools: new Set(),
     touchedTokens: new Set(),
@@ -68,6 +93,7 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState): Fol
     trades: [],
     newTokenIds: [],
     ignoredPools: 0,
+    tokenMetadata: opts?.tokenMetadata,
   };
 
   for (const event of events) {
@@ -92,6 +118,34 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState): Fol
     newTokens: ctx.newTokenIds,
     ignoredPools: ctx.ignoredPools,
   };
+}
+
+/**
+ * The lowercase token addresses the Initialize events in `events` would create: classified
+ * exactly as `foldEvents` classifies them (the same `classify` function — same quote/denylist/
+ * native rules, same choice of which side is the token), excluding ids already in
+ * `state.tokens`, deduplicated, in first-seen order. Call this BEFORE `foldEvents`, read
+ * metadata for the result from the chain, and pass it back in as `opts.tokenMetadata` — a
+ * token created and traded within the same batch must be priced with its real decimals, not
+ * the 18-decimals fallback (see the module doc comment, "Fix round 1").
+ *
+ * Pure: does not mutate `state`, and does not itself decide replay safety beyond "is this
+ * token already known" — a replayed Initialize's pool is always already in `state.pools`,
+ * and under a consistent FoldState that pool's token is therefore already in `state.tokens`
+ * too, so it is excluded by the same check as any other already-known token.
+ */
+export function newTokenCandidates(events: readonly ChainEvent[], state: FoldState): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const event of events) {
+    if (event.kind !== "initialize") continue;
+    const c = classify(event.currency0, event.currency1);
+    if (!c) continue;
+    if (state.tokens.has(c.token) || seen.has(c.token)) continue;
+    seen.add(c.token);
+    result.push(c.token);
+  }
+  return result;
 }
 
 /**
@@ -177,19 +231,22 @@ function handleInitialize(event: InitializeEvent, state: FoldState, ctx: FoldCon
 
   let token = state.tokens.get(c.token);
   if (!token) {
-    // Fallback metadata until the caller reads the real symbol/name/decimals from chain
-    // for every id in FoldResult.newTokens.
+    // Real metadata when the caller read it up front (see newTokenCandidates) and supplied
+    // it via opts.tokenMetadata — so a token created and traded within this very batch still
+    // prices its pool, trades and candles with real decimals, not the 18-decimals fallback.
+    // Otherwise the same fallback the old indexer used while a read was pending.
+    const meta = ctx.tokenMetadata?.get(c.token);
     token = {
       id: c.token,
       address: c.token,
-      symbol: c.token.slice(0, 6),
-      name: c.token,
-      decimals: 18,
+      symbol: meta?.symbol ?? c.token.slice(0, 6),
+      name: meta?.name ?? c.token,
+      decimals: meta?.decimals ?? 18,
       poolCount: 0,
       origin: "Other",
       primaryPoolId: null,
       createdAt: ts,
-      metadataLoaded: false,
+      metadataLoaded: meta !== undefined,
     };
     ctx.newTokenIds.push(c.token);
   }
@@ -372,10 +429,17 @@ function handleSwap(event: SwapEvent, state: FoldState, ctx: FoldContext): void 
 
 function handleModifyLiquidity(event: ModifyLiquidityEvent, state: FoldState, ctx: FoldContext): void {
   const pool = state.pools.get(event.poolId);
-  if (!pool) return; // untracked pool
+  if (!pool) {
+    // Ruling (Fix round 1): ignoredPools counts every event naming a pool nothing tracks,
+    // not just Swap's — see FoldResult.ignoredPools's doc comment in types.ts.
+    ctx.ignoredPools += 1;
+    return;
+  }
   const tvlToken = pool.tvlToken;
   const tvlQuote = pool.tvlQuote;
-  if (tvlToken === null || tvlQuote === null) return; // tvl never tracked for this pool
+  // A known pool whose TVL was never tracked is a different, unremarkable condition — not
+  // counted as ignoredPools.
+  if (tvlToken === null || tvlQuote === null) return;
   if (event.timestamp <= pool.baselineAt) return; // baselineAt gating (new)
 
   const token = state.tokens.get(pool.tokenId);

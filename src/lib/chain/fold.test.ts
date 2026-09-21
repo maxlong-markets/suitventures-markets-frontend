@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { foldEvents } from "./fold";
+import { foldEvents, newTokenCandidates } from "./fold";
 import type {
   FoldState,
   InitializeEvent,
@@ -436,16 +436,23 @@ describe("ModifyLiquidity", () => {
     expect(afterRemove.tvlQuote).toBe(1n);
   });
 
-  it("ignores ModifyLiquidity on an untracked pool", () => {
+  // Ruling (Fix round 1): ignoredPools counts an unknown pool for ModifyLiquidity too, since
+  // the field means "events naming a pool nothing tracks" and the runner reports it as a
+  // health signal — not just Swap's unknown-pool case.
+  it("ignores ModifyLiquidity on an untracked pool and counts it in ignoredPools", () => {
     const state = emptyState();
     const result = foldEvents([modifyLiquidityEvent("0x" + "aa".repeat(32), 10n ** 18n, 5)], state);
     expect(result.pools).toEqual([]);
+    expect(result.ignoredPools).toBe(1);
   });
 
-  it("ignores ModifyLiquidity when the pool's tvl was never tracked (null)", () => {
+  // The null-TVL guard is a DIFFERENT condition from an unknown pool (this pool is tracked,
+  // just without TVL history), so it must NOT feed ignoredPools.
+  it("ignores ModifyLiquidity when the pool's tvl was never tracked (null), without counting it in ignoredPools", () => {
     const state = seededState({ tvlToken: null, tvlQuote: null });
     const result = foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state);
     expect(result.pools).toEqual([]);
+    expect(result.ignoredPools).toBe(0);
     const pool = state.pools.get(POOL)!;
     expect(pool.tvlToken).toBeNull();
     expect(pool.tvlQuote).toBeNull();
@@ -542,5 +549,116 @@ describe("determinism", () => {
     const resultB = foldEvents(events, stateB);
     expect(resultA).toEqual(resultB);
     expect(stateA).toEqual(stateB);
+  });
+});
+
+// Fix round 1: the runner must read a new token's metadata BEFORE folding the batch that
+// creates it, not after — otherwise a token created and traded in the same batch prices its
+// first trade and all five of its candles with the 18-decimals fallback, permanently wrong
+// for any token that isn't actually 18 decimals.
+describe("newTokenCandidates", () => {
+  it("returns the token address an Initialize would create", () => {
+    expect(newTokenCandidates([initEvent()], emptyState())).toEqual([AI]);
+  });
+
+  it("never returns the quote side", () => {
+    expect(newTokenCandidates([initEvent()], emptyState())).not.toContain(NVDA);
+  });
+
+  it("never returns a denylisted token", () => {
+    const denylisted = denylist[0]!.address;
+    const id = "0x" + "88".repeat(32);
+    const candidates = newTokenCandidates(
+      [initEvent({ poolId: id, currency0: denylisted, currency1: USDG, hooks: ZERO })],
+      emptyState(),
+    );
+    expect(candidates).toEqual([]);
+  });
+
+  it("never returns a token already in state", () => {
+    const state = emptyState();
+    state.tokens.set(AI, tokenFixture());
+    expect(newTokenCandidates([initEvent()], state)).toEqual([]);
+  });
+
+  it("deduplicates the same token across two Initializes in one batch, in first-seen order", () => {
+    const usdgPoolId = "0x" + "55".repeat(32);
+    const candidates = newTokenCandidates(
+      [
+        initEvent({}, 100), // AI/NVDA
+        initEvent({ poolId: usdgPoolId, currency0: AI, currency1: USDG, hooks: ZERO }, 101), // AI/USDG: same token
+      ],
+      emptyState(),
+    );
+    expect(candidates).toEqual([AI]);
+  });
+
+  it("ignores a pool with both sides quotes and a native-currency pool", () => {
+    const bothQuotes = "0x" + "11".repeat(32);
+    const native = "0x" + "44".repeat(32);
+    const candidates = newTokenCandidates(
+      [
+        initEvent({ poolId: bothQuotes, currency0: USDG, currency1: NVDA }),
+        initEvent({ poolId: native, currency0: ZERO, currency1: NVDA }),
+      ],
+      emptyState(),
+    );
+    expect(candidates).toEqual([]);
+  });
+});
+
+describe("foldEvents with pre-supplied token metadata (opts.tokenMetadata)", () => {
+  it("a token created and traded in the same batch is priced with the supplied decimals, not the 18-decimals fallback", () => {
+    const events = [
+      initEvent({}, 100),
+      // raw amount0 = 2_000_000n: 2 tokens at 6 decimals, or 2e-12 tokens at the 18-decimals fallback.
+      swapEvent(2_000_000n, -(10n ** 18n), 2n * Q96, 101),
+    ];
+
+    const stateWithFallback = emptyState();
+    expect(newTokenCandidates(events, stateWithFallback)).toEqual([AI]); // what the runner would read metadata for
+    const fallbackResult = foldEvents(events, stateWithFallback);
+
+    const stateWithMetadata = emptyState();
+    const tokenMetadata = new Map([[AI, { symbol: "AI", name: "AI Token", decimals: 6 }]]);
+    const metadataResult = foldEvents(events, stateWithMetadata, { tokenMetadata });
+
+    const tokenWithMetadata = stateWithMetadata.tokens.get(AI)!;
+    expect(tokenWithMetadata.decimals).toBe(6);
+    expect(tokenWithMetadata.symbol).toBe("AI");
+    expect(tokenWithMetadata.name).toBe("AI Token");
+    expect(tokenWithMetadata.metadataLoaded).toBe(true);
+
+    const tokenWithFallback = stateWithFallback.tokens.get(AI)!;
+    expect(tokenWithFallback.decimals).toBe(18);
+    expect(tokenWithFallback.metadataLoaded).toBe(false);
+
+    // The trade amount differs by 10**12 (the gap between 6 and 18 decimals) for the identical
+    // raw on-chain amount — proof the supplied decimals, not the fallback, priced this trade.
+    expect(fallbackResult.trades[0]!.amountToken).toBeCloseTo(2e-12, 13);
+    expect(metadataResult.trades[0]!.amountToken).toBeCloseTo(2, 9);
+
+    // Same proof for the candles this same swap folds.
+    const fallbackM1 = fallbackResult.candles.find((c) => c.interval === "m1")!;
+    const metadataM1 = metadataResult.candles.find((c) => c.interval === "m1")!;
+    expect(fallbackM1.volumeToken).toBeCloseTo(2e-12, 13);
+    expect(metadataM1.volumeToken).toBeCloseTo(2, 9);
+  });
+
+  it("keeps today's fallback metadata for a created token absent from opts.tokenMetadata", () => {
+    const state = emptyState();
+    foldEvents([initEvent()], state, { tokenMetadata: new Map() });
+    const token = state.tokens.get(AI)!;
+    expect(token.decimals).toBe(18);
+    expect(token.symbol).toBe(AI.slice(0, 6));
+    expect(token.name).toBe(AI);
+    expect(token.metadataLoaded).toBe(false);
+  });
+
+  it("still lists the token id in newTokens even when metadata was supplied (newTokens now just means 'created in this batch')", () => {
+    const state = emptyState();
+    const tokenMetadata = new Map([[AI, { symbol: "AI", name: "AI Token", decimals: 6 }]]);
+    const result = foldEvents([initEvent()], state, { tokenMetadata });
+    expect(result.newTokens).toEqual([AI]);
   });
 });
