@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
-import { acquireLease, finishRun, raiseHeadBlock, readHeadBlock, readState, releaseLease, saveCursors } from "./state";
+import { acquireLease, finishRun, raiseHeadBlock, readHeadBlock, readState, releaseLease, renewLease, saveCursors } from "./state";
 
 const NOW = 1_789_000_000;
 let db: Db;
@@ -31,6 +31,20 @@ describe("sync_state", () => {
     expect(await readState(db, "market")).toMatchObject({ leaseOwner: null, leaseUntil: 0 });
     expect(await acquireLease(db, "market", "b", NOW, 120)).toBe(true);
   });
+  it("renews only while the caller still owns the lease, and never acquires or steals one", async () => {
+    // No lease held yet at all: renewLease must not act like acquireLease and take it anyway.
+    expect(await renewLease(db, "market", "a", NOW, 120)).toBe(false);
+    expect(await readState(db, "market")).toMatchObject({ leaseOwner: null, leaseUntil: 0 });
+
+    await acquireLease(db, "market", "a", NOW, 120);
+    expect(await renewLease(db, "market", "a", NOW + 60, 300)).toBe(true);
+    expect(await readState(db, "market")).toMatchObject({ leaseOwner: "a", leaseUntil: NOW + 360 });
+
+    // A different owner (never held it, or the lease moved on) cannot renew it either.
+    expect(await renewLease(db, "market", "b", NOW + 61, 120)).toBe(false);
+    expect(await readState(db, "market")).toMatchObject({ leaseOwner: "a", leaseUntil: NOW + 360 }); // untouched
+  });
+
   it("saves a partial cursor patch", async () => {
     await saveCursors(db, "nightly", { cursor: 5, phase: "tokens" });
     await saveCursors(db, "nightly", { cursorText: "0xabc" });

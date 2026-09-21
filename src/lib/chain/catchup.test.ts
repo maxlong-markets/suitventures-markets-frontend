@@ -69,6 +69,32 @@ describe("findBlockAtOrAfter", () => {
     expect(probes()).toBeGreaterThan(0);
     expect(probes()).toBeLessThanOrEqual(25);
   });
+
+  // Review round 2, NIT 15: a run of consecutive blocks sharing one timestamp — market.swaps has no
+  // block column and roughly ten blocks a second happen on this chain, so ties are the normal case,
+  // not an edge case. "At or after" must return the FIRST block of the tied run, not an arbitrary one.
+  it("returns the first block of a run sharing one timestamp, not an arbitrary one within it", async () => {
+    const head = 2000;
+    // Blocks 500..509 all share tsAt(500)'s timestamp; every other block keeps the irregular sequence.
+    const tieStart = 500;
+    const tieEnd = 509;
+    const tiedTs = tsAt(tieStart);
+    let probes = 0;
+    const timestampOf = async (block: number): Promise<number> => {
+      probes += 1;
+      return block >= tieStart && block <= tieEnd ? tiedTs : tsAt(block);
+    };
+    expect(await findBlockAtOrAfter(head, timestampOf, tiedTs)).toBe(tieStart);
+    expect(probes).toBeGreaterThan(0);
+  });
+
+  // Review round 2, NIT 14: head < 1 must fail loudly rather than return 0, which a caller could pass
+  // straight into seedCursor as block -1.
+  it("throws rather than returning 0 when head is less than 1", async () => {
+    const { timestampOf } = counted();
+    await expect(findBlockAtOrAfter(0, timestampOf, 1_700_000_000)).rejects.toThrow("head must be >= 1");
+    await expect(findBlockAtOrAfter(-5, timestampOf, 1_700_000_000)).rejects.toThrow("head must be >= 1");
+  });
 });
 
 describe("seedCursor", () => {

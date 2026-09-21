@@ -43,6 +43,26 @@ export async function releaseLease(db: Db, job: SyncJob, owner: string): Promise
 }
 
 /**
+ * Extends job's lease_until to now + ttlSec, but only while lease_owner still matches owner — this
+ * never acquires or steals a lease the caller does not already hold, unlike acquireLease. Returns
+ * whether it matched (one row updated); a false return means someone else holds the lease now (it
+ * expired and was re-acquired, or was force-cleared), and the caller must stop writing rather than
+ * assume it still owns the job.
+ *
+ * For a run that holds a lease across many cycles and outlives the lease's original ttlSec (Task 7's
+ * catch-up script, chain-reader cutover, 21 Sep 2026): runChainSync/acquireLease takes the lease once
+ * and never renews it, so a caller with its own long-running loop calls this periodically to keep the
+ * lease alive past that original window instead of letting it expire mid-run.
+ */
+export async function renewLease(db: Db, job: SyncJob, owner: string, now: number, ttlSec: number): Promise<boolean> {
+  const rows = await db.query(
+    "update market.sync_state set lease_until = $3::int where job = $1 and lease_owner = $2::text returning job",
+    [job, owner, now + ttlSec],
+  );
+  return rows.length === 1;
+}
+
+/**
  * `cursor` and `cursor2` only ever rise (`greatest` in SQL): a cycle that read them before another invocation moved
  * them on, and writes last, cannot pull them back. `cursorText` and `phase` are plain writes.
  */

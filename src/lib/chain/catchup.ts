@@ -14,15 +14,26 @@ const CHAIN_JOB = "chain";
  *
  * A plain "leftmost block whose timestamp >= ts" search: every probe is a comparison against the
  * caller-supplied timestamp, never an interpolation from an assumed block time, so the result is
- * correct on a chain with irregular block spacing. Returns `head` when even the head block's
- * timestamp is before `ts` (every block is older than `ts`); returns `1` when `ts` is at or
- * before the first block's timestamp (every block qualifies).
+ * correct on a chain with irregular block spacing — the one precondition is that block timestamps
+ * are non-decreasing (never assumed to be evenly spaced, only monotonic, which every real chain
+ * guarantees). Returns `head` when even the head block's timestamp is before `ts` (every block is
+ * older than `ts` — a caller cannot tell this apart from a legitimate answer of `head` by the return
+ * value alone; `scripts/chain/catchup.mts` disambiguates by comparing `timestampOf(head)` to `ts`
+ * itself). Returns `1` when `ts` is at or before the first block's timestamp (every block
+ * qualifies). On a run of consecutive blocks sharing one timestamp, returns the first of that run,
+ * matching "at or after" exactly.
+ *
+ * `head` must be at least 1 (`[1, head]` is the search range); this throws rather than silently
+ * returning 0, which a caller could otherwise pass straight into `seedCursor` as `-1`.
  */
 export async function findBlockAtOrAfter(
   head: number,
   timestampOf: (block: number) => Promise<number>,
   ts: number,
 ): Promise<number> {
+  if (head < 1) {
+    throw new Error(`findBlockAtOrAfter: head must be >= 1, got ${head}`);
+  }
   let lo = 1;
   let hi = head;
   let result = head; // default: no block probed so far had a timestamp >= ts

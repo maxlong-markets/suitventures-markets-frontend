@@ -7,6 +7,15 @@
  * cursor, then runs the same runChainSync the cron uses (stopWhenCaughtUp: true) until it has no more
  * work.
  *
+ * Companion script: `gapfill-candles.mts` backfills h1/d1 candles this script's replay never covers
+ * (pools the paused Envio copy never reached). Run the gap-fill FIRST, with `--before` at or below
+ * this script's floored `--from-ts` (below) — never above it. A bucket the gap-fill writes above that
+ * line is one this replay will fold trades onto a second time (the fold adds to what it loads), so
+ * running the gap-fill after, or with a later `--before`, double-counts. Both scripts take the same
+ * `chain` lease specifically so they (and the cron) can never overlap; the ordering constraint is a
+ * sequencing rule the lease alone does not enforce (stopping the catch-up, running the gap-fill, then
+ * resuming is exactly the sequence that needs it).
+ *
  * Sizing (measured 21 Sep 2026): about 2,000 blocks and 7,500 events per HyperSync request, roughly
  * 3.7 s each. A catch-up from 17 Sep 2026 00:00 UTC is about 4.1 million blocks in roughly 2,000
  * requests — at that per-request time the wall clock (a couple of hours) is dominated by request
@@ -21,39 +30,54 @@
  * so without this a Ctrl-C could strand the lease same as a hard kill.
  *
  * The one step that is NOT idempotent on its own is the candle delete: it removes every candle with
- * t >= --from-ts so the replay can rebuild each bucket exactly from the events, but a restart that
- * deleted them again would erase buckets the previous run already rebuilt (their trades are not
- * replayed a second time, since the cursor resumes past them). It is guarded: skipped whenever the
- * stored cursor is already at or past the found start block, unless --force-rewind says to redo it.
+ * t >= the floored --from-ts so the replay can rebuild each bucket exactly from the events, but a
+ * restart that deleted them again would erase buckets the previous run already rebuilt (their trades
+ * are not replayed a second time, since the cursor resumes past them). It is guarded: skipped whenever
+ * the stored cursor is already at or past the found start block, unless --force-rewind says to redo it.
  *
- * --dry-run performs no writes at all (fix round 1, task-7-report.md — the first version of this
- * script deleted candles and seeded the cursor for real even under --dry-run, which is exactly what a
- * dry run must never do): it finds the start block, COUNTS the candles a real run would delete instead
- * of deleting them, and computes what seedCursor would do instead of calling it for real, then exits.
- * A self-check re-reads the cursor and the candle count right before exiting and throws if either
- * changed, so a regression here fails loudly rather than silently mutating a live database.
+ * --dry-run performs no write that changes anything (review round 2, NIT 13 — `readChainCursor` does
+ * issue `insert … on conflict (job) do nothing` through `ensureRow`, a genuine no-op on an existing
+ * row, invisible to the self-check below): it finds the start block, COUNTS the candles a real run
+ * would delete instead of deleting them, and computes what seedCursor would do instead of calling it
+ * for real, then exits. A self-check re-reads the cursor and the candle count right before exiting and
+ * throws if either changed, so a regression here fails loudly rather than silently mutating a live
+ * database.
+ *
+ * Review round 2 (task-7-report.md, "Fix round 2") added the safety checks below `--from-ts` now goes
+ * through before anything destructive happens: it is floored to the UTC midnight at or before it (a
+ * bucket boundary for m1/m5/m15/h1/d1 all at once, so no straddling bucket survives the delete to be
+ * folded onto a second time), refused if in the future, refused if earlier than the stored data can
+ * rebuild (`min(baseline_at)`, unless --force-rewind), refused if the block search could not actually
+ * find a matching block (findBlockAtOrAfter's "not found" answer and a legitimate one share a return
+ * value), and refused if seeding the cursor would leave it at 0. The exact candle count about to be
+ * deleted and the floored start block are both printed before the delete, not just under --dry-run.
  *
  * Run: npm run chain:catchup -- --from-ts <unix> [--force-rewind] [--max-span <n>] [--max-requests <n>] [--dry-run]
- *      npm run chain:catchup -- --release-lease
- *   --from-ts <unix>     Required (unless --release-lease). Replay starts at the first block at or
- *                        after this unix timestamp.
+ *      npm run chain:catchup -- --release-lease [--yes]
+ *   --from-ts <unix>     Required (unless --release-lease). Floored to the UTC midnight at or before
+ *                        it; replay starts at the first block at or after that floored timestamp.
  *   --force-rewind       Also seed the cursor backwards if it is already past the found start block,
- *                        and redo the candle delete even on a restart. Only for a deliberate re-run.
+ *                        redo the candle delete even on a restart, and allow a --from-ts earlier than
+ *                        the stored data can rebuild. Only for a deliberate re-run.
  *   --max-span <n>       Widest block span asked per HyperSync request. Default 20_000 (comfortably
  *                        above the ~2,000-block response cap this measures against in practice, so
  *                        the source's own size cap decides the real per-request span, not this).
  *   --max-requests <n>   Stop after this many HyperSync requests. Default 0, meaning no limit.
  *   --dry-run            Find the start block, report what the candle delete and the cursor seed
- *                        would do, and exit. Writes nothing (see above).
- *   --release-lease      Force-clears the chain job's lease and exits immediately, ignoring every
- *                        other flag. The documented escape hatch for a run that died without
- *                        releasing it itself (a `kill -9`, a host crash — anything the SIGINT/SIGTERM
- *                        handlers below could not catch).
+ *                        would do, and exit. Writes nothing that changes anything (see above).
+ *   --release-lease      Prints who holds the chain lease and until when, and exits — or, if it is not
+ *                        currently live, clears it right away. Add --yes to force-clear a LIVE lease;
+ *                        without it, a live lease is left alone (running this during a healthy
+ *                        catch-up would hand the job to the very next cron tick otherwise). Ignores
+ *                        every other flag.
+ *   --yes                Only meaningful with --release-lease (above); required to clear a live lease.
  *
  * Takes the same `chain` lease the cron takes (src/lib/sync/state.ts's acquireLease), so the two can
- * never run at once: if the lease is held, this exits without doing any work rather than racing it.
- * The lease is held for up to leaseSec (below) regardless of how long the run actually takes, since
- * runChainSync acquires it once and never renews it mid-loop.
+ * never run at once: if the lease is held, this exits without doing any destructive work rather than
+ * racing it. The lease is renewed periodically from inside the replay loop (renewLease, roughly once a
+ * minute) so a run past leaseSec is not silently overtaken by the cron mid-flight — if a renewal ever
+ * finds the lease no longer belongs to this process, the run stops immediately rather than keep
+ * writing blind.
  *
  * Do NOT run this against the real database — it is for the integrator to run at cutover.
  */
@@ -63,10 +87,11 @@ import { runChainSync, type ChainRunOpts } from "@/lib/chain/run";
 import { readChainCursor } from "@/lib/chain/store";
 import type { Db } from "@/lib/db/client";
 import { chainDeps } from "@/lib/sync/deps";
-import { readState, releaseLease } from "@/lib/sync/state";
+import { readState, releaseLease, renewLease } from "@/lib/sync/state";
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const isoUtc = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
+const nowSec = () => Math.floor(Date.now() / 1000);
 
 function fail(msg: string): never {
   console.error(msg);
@@ -76,24 +101,33 @@ function fail(msg: string): never {
 /** market.sync_state job name; matches src/lib/chain/run.ts's, src/lib/chain/store.ts's and src/lib/chain/catchup.ts's own copies of the same constant. */
 const CHAIN_JOB = "chain";
 
+/** Every candle interval divides this evenly (m1 60, m5 300, m15 900, h1 3_600, d1 86_400): a UTC midnight is a bucket boundary for all five at once (review round 2, finding 1+2). */
+const DAY_SEC = 86_400;
+
 // windowSec: effectively unbounded — stopWhenCaughtUp and --max-requests are the real stop
 // conditions for the fetch/fold loop, not the window. Kept far below Number.MAX_SAFE_INTEGER so
 // windowSec * 1000 and now() + it never approach unsafe-integer arithmetic.
 const LONG_WINDOW_SEC = 60 * 60 * 24 * 365;
 
-// leaseSec (fix round 1, task-7-report.md): the lease is acquired once for the whole run — run.ts
-// never renews it mid-loop — so it has to outlive the run, but it must NOT be able to strand the
-// cron forever if this process dies without releasing it (a `kill -9`, a host crash; the
-// SIGINT/SIGTERM handlers below cover a deliberate stop, not those). A measured run takes two to
-// four hours; six hours is comfortable margin above that while bounding the worst case to six hours
-// of a stranded chain job, not the year the first version of this script used. --release-lease
-// clears it sooner by hand.
+// leaseSec: the lease is acquired once (run.ts never renews it internally) but IS renewed
+// periodically from this script's own onCycle (below), so this is a starting grant and a worst-case
+// bound, not the run's real time limit. A measured run takes two to four hours; six hours is
+// comfortable margin above that while bounding how long a run that dies WITHOUT renewing again (a
+// `kill -9`, a host crash — the SIGINT/SIGTERM handlers below cover a deliberate stop, not those) can
+// still strand the chain job. --release-lease clears it sooner by hand.
 const CATCHUP_LEASE_SEC = 21_600;
+
+// How often onCycle renews the lease (review round 2, finding 4: "say once a minute").
+const LEASE_RENEW_INTERVAL_MS = 60_000;
+
+// How long a signal handler waits for releaseLease before exiting anyway (review round 2, MINOR 10):
+// an unreachable database must not turn Ctrl-C into "nothing happens."
+const SIGNAL_RELEASE_TIMEOUT_MS = 5_000;
 
 const DEFAULT_MAX_SPAN = 20_000;
 
 type Args =
-  | { releaseLease: true }
+  | { releaseLease: true; yes: boolean }
   | { releaseLease: false; fromTs: number; forceRewind: boolean; maxSpan: number; maxRequests: number; dryRun: boolean };
 
 function parseIntArg(flag: string, raw: string | undefined): number {
@@ -110,6 +144,7 @@ function parseArgs(argv: readonly string[]): Args {
   let maxRequests = 0;
   let dryRun = false;
   let releaseLeaseFlag = false;
+  let yes = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
@@ -133,11 +168,14 @@ function parseArgs(argv: readonly string[]): Args {
       case "--release-lease":
         releaseLeaseFlag = true;
         break;
+      case "--yes":
+        yes = true;
+        break;
       default:
         fail(`unknown argument: ${arg}`);
     }
   }
-  if (releaseLeaseFlag) return { releaseLease: true };
+  if (releaseLeaseFlag) return { releaseLease: true, yes };
   if (fromTs === undefined) fail("--from-ts <unix> is required (or pass --release-lease on its own)");
   return { releaseLease: false, fromTs, forceRewind, maxSpan, maxRequests, dryRun };
 }
@@ -177,15 +215,50 @@ async function deleteStaleCandles(db: Db, fromTs: number): Promise<number> {
   return total;
 }
 
-/** Read-only twin of deleteStaleCandles, for --dry-run's report and its own after-the-fact self-check. */
+/** Read-only twin of deleteStaleCandles, for the printed count before any delete and the dry-run self-check. */
 async function countStaleCandles(db: Db, fromTs: number): Promise<number> {
   const [row] = await db.query<{ n: unknown }>("select count(*) as n from market.candles where t >= $1::int", [fromTs]);
   return Number(row?.n ?? 0);
 }
 
-/** --release-lease: force-clears the chain job's lease regardless of who (or what, or nothing) currently holds it, and prints what it cleared. */
-async function releaseLeaseCommand(db: Db): Promise<void> {
+/** Floors ts to the start of its UTC day. DAY_SEC divides every candle interval evenly, so this is always a bucket boundary for all five. */
+function flooredToUtcMidnight(ts: number): number {
+  return Math.floor(ts / DAY_SEC) * DAY_SEC;
+}
+
+/**
+ * The earliest --from-ts the stored data can actually rebuild from, floored to its own UTC midnight —
+ * or null when market.pools is empty (nothing to bound against). Review round 2, finding 1: bounds how
+ * far back a mistyped --from-ts can reach, since candle history older than this cannot be rebuilt by
+ * either the replay or the gap-fill (the trade window is a handful of days; daily candles go back
+ * months).
+ */
+async function earliestRebuildableFromTs(db: Db): Promise<number | null> {
+  const [row] = await db.query<{ min: number | null }>("select min(baseline_at) as min from market.pools");
+  return row?.min == null ? null : flooredToUtcMidnight(row.min);
+}
+
+/**
+ * --release-lease: prints the current holder and expiry and changes nothing when the lease is live
+ * and --yes was not given (review round 2, finding 5 — the previous version force-cleared
+ * unconditionally, which would hand a healthy catch-up's lease to the very next cron tick). An
+ * expired or already-empty lease is always cleared, --yes or not: there is nothing live to protect.
+ */
+async function releaseLeaseCommand(db: Db, yes: boolean): Promise<void> {
   const before = await readState(db, CHAIN_JOB);
+  const now = nowSec();
+  const isLive = before.leaseUntil > now;
+
+  if (isLive && !yes) {
+    console.log(
+      `[chain:catchup] --release-lease: the chain lease is LIVE, held by ${before.leaseOwner ?? "(unknown owner)"}, ` +
+        `due until ${isoUtc(before.leaseUntil)} / ${before.leaseUntil} (${before.leaseUntil - now}s from now). ` +
+        "Refusing to clear it without --yes — a healthy catch-up or the cron may be mid-run. " +
+        "Re-run with --yes only if you are certain the process holding it is dead.",
+    );
+    return;
+  }
+
   await db.query("update market.sync_state set lease_until = 0, lease_owner = null where job = $1", [CHAIN_JOB]);
   if (!before.leaseOwner && before.leaseUntil === 0) {
     console.log("[chain:catchup] --release-lease: the chain lease was already clear; nothing to do.");
@@ -193,7 +266,7 @@ async function releaseLeaseCommand(db: Db): Promise<void> {
   }
   console.log(
     `[chain:catchup] --release-lease: cleared the chain lease (was held by ${before.leaseOwner ?? "(unknown owner)"}, ` +
-      `lease_until ${before.leaseUntil} / ${isoUtc(before.leaseUntil)}).`,
+      `lease_until ${before.leaseUntil} / ${isoUtc(before.leaseUntil)}${isLive ? ", which was still LIVE (--yes given)" : ""}).`,
   );
 }
 
@@ -203,19 +276,23 @@ const SIGNAL_EXIT_CODE = { SIGINT: 130, SIGTERM: 143 } as const;
  * A deliberate stop (Ctrl-C, SIGTERM) must release the chain lease itself: runChainSync's own
  * try/finally only runs on a normal return or a thrown JS error, never on a raw, unhandled
  * SIGINT/SIGTERM — Node's default there kills the process immediately, before any pending finally can
- * run (fix round 1, task-7-report.md). These handlers replace that default: they attempt to release
- * the lease — a harmless no-op if this process never held it, since releaseLease's own WHERE clause
- * only matches its own owner string — then exit with the conventional 128+signal code. Installed
- * unconditionally and early (before the lease is ever acquired), since a no-op release is cheap and
- * this way there is no window where a signal is still handled by Node's own default.
+ * run. These handlers replace that default: they race releasing the lease against a
+ * SIGNAL_RELEASE_TIMEOUT_MS timer and exit with the conventional 128+signal code regardless of which
+ * one finishes first (review round 2, MINOR 10 — an unreachable database, often exactly why someone
+ * is hitting Ctrl-C, must not hang the release and leave `process.exit` never called; a harmless no-op
+ * either way if this process never held the lease, since releaseLease's own WHERE clause only matches
+ * its own owner string). Installed unconditionally and early, before the lease is ever acquired, so
+ * there is no window where a signal still falls through to Node's default behavior.
  */
 function installSignalHandlers(db: Db, owner: string): void {
   for (const signal of Object.keys(SIGNAL_EXIT_CODE) as (keyof typeof SIGNAL_EXIT_CODE)[]) {
     process.on(signal, () => {
-      console.error(`[chain:catchup] received ${signal}: releasing the chain lease before exiting.`);
-      void releaseLease(db, CHAIN_JOB, owner)
-        .catch((err) => console.error(`[chain:catchup] failed to release the chain lease: ${message(err)}`))
-        .finally(() => process.exit(SIGNAL_EXIT_CODE[signal]));
+      console.error(`[chain:catchup] received ${signal}: releasing the chain lease (up to ${SIGNAL_RELEASE_TIMEOUT_MS}ms) before exiting.`);
+      const release = releaseLease(db, CHAIN_JOB, owner).catch((err) => {
+        console.error(`[chain:catchup] failed to release the chain lease: ${message(err)}`);
+      });
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, SIGNAL_RELEASE_TIMEOUT_MS));
+      void Promise.race([release, timeout]).finally(() => process.exit(SIGNAL_EXIT_CODE[signal]));
     });
   }
 }
@@ -229,13 +306,38 @@ async function main(): Promise<void> {
 
   try {
     if (args.releaseLease) {
-      await releaseLeaseCommand(db);
+      await releaseLeaseCommand(db, args.yes);
       return;
     }
 
-    // Step 2: locate the first block at or after --from-ts. head is HyperSync's, the search's own
-    // probes go through the chain RPC client's getBlock — chainDeps().client is narrowed to
-    // ChainClient (readContract only) for runChainSync's sake, but the object it actually builds
+    // Review round 2, finding 3 (part): a --from-ts in the future is refused up front, against the
+    // RAW value and wall-clock time — before flooring, which could otherwise mask "a few hours from
+    // now, same UTC day" as a past midnight.
+    if (args.fromTs > nowSec()) {
+      fail(`--from-ts ${args.fromTs} (${isoUtc(args.fromTs)}) is in the future (now is ${nowSec()} / ${isoUtc(nowSec())}).`);
+    }
+
+    // Review round 2, findings 1+2: floor to the UTC midnight at or before --from-ts, and use that
+    // floored value for everything from here on — the search, the delete, every message.
+    const flooredFromTs = flooredToUtcMidnight(args.fromTs);
+    if (flooredFromTs !== args.fromTs) {
+      console.log(`[chain:catchup] --from-ts ${args.fromTs} (${isoUtc(args.fromTs)}) floored to the UTC midnight at or before it: ${flooredFromTs} (${isoUtc(flooredFromTs)})`);
+    }
+
+    // Review round 2, finding 1: refuse a start earlier than the stored data can rebuild, unless the
+    // operator explicitly overrides with --force-rewind.
+    const earliestFromTs = await earliestRebuildableFromTs(db);
+    if (earliestFromTs !== null && flooredFromTs < earliestFromTs && !args.forceRewind) {
+      fail(
+        `--from-ts floors to ${isoUtc(flooredFromTs)} (${flooredFromTs}), which is earlier than the earliest data this build can ` +
+          `rebuild, ${isoUtc(earliestFromTs)} (${earliestFromTs}, floored from the earliest pool's baseline_at). Candle history before ` +
+          "that cannot be rebuilt from trades or replayed. Pass --force-rewind if you are certain you want to proceed anyway.",
+      );
+    }
+
+    // Step 2: locate the first block at or after the floored --from-ts. head is HyperSync's, the
+    // search's own probes go through the chain RPC client's getBlock — chainDeps().client is narrowed
+    // to ChainClient (readContract only) for runChainSync's sake, but the object it actually builds
     // (src/lib/sync/deps.ts's chainDeps -> createChainClient) is a full viem PublicClient.
     const rpcClient = deps.client as unknown as Pick<PublicClient, "getBlock">;
     let probes = 0;
@@ -246,46 +348,69 @@ async function main(): Promise<void> {
     };
 
     const head = await source.head();
-    const startBlock = await findBlockAtOrAfter(head, timestampOf, args.fromTs);
+    const startBlock = await findBlockAtOrAfter(head, timestampOf, flooredFromTs);
     const startBlockTs = await timestampOf(startBlock);
     console.log(
-      `[chain:catchup] HyperSync head=${head}; first block at or after --from-ts ${args.fromTs} (${isoUtc(args.fromTs)}) ` +
+      `[chain:catchup] HyperSync head=${head}; first block at or after ${flooredFromTs} (${isoUtc(flooredFromTs)}) ` +
         `is ${startBlock} at ${isoUtc(startBlockTs)} (${probes} probes)`,
     );
+
+    // Review round 2, finding 3: findBlockAtOrAfter returns `head` both when it found a real match at
+    // the head AND when nothing matched at all ("every block is older than ts") — the two are the
+    // same return value. The probed timestamp disambiguates: if it is still below the target, nothing
+    // matched, and seeding the cursor from it would silently skip everything from there to the head.
+    if (startBlockTs < flooredFromTs) {
+      fail(
+        `no block at or after ${flooredFromTs} (${isoUtc(flooredFromTs)}) was found — HyperSync's head (block ${head}) has ` +
+          `timestamp ${startBlockTs} (${isoUtc(startBlockTs)}), which is still earlier. Nothing to catch up to yet.`,
+      );
+    }
 
     // Shared by both --dry-run and the real run: whether the candle delete (real or reported) would
     // even happen, given the restart guard (module doc comment).
     const priorCursor = await readChainCursor(db);
     const willDelete = args.forceRewind || priorCursor < startBlock;
 
-    if (args.dryRun) {
-      let staleCountBefore: number | null = null;
-      if (willDelete) {
-        staleCountBefore = await countStaleCandles(db, args.fromTs);
-        console.log(
-          `[chain:catchup] --dry-run: would delete ${staleCountBefore} candle row(s) with t >= ${args.fromTs} (${isoUtc(args.fromTs)})`,
-        );
-      } else {
-        console.log(
-          `[chain:catchup] --dry-run: stored cursor ${priorCursor} is already at or past start block ${startBlock}: ` +
-            `the candle delete would be skipped (restart guard) unless --force-rewind is given`,
-        );
-      }
-
-      const would = await seedCursor(db, startBlock - 1, { forceRewind: args.forceRewind, dryRun: true });
-      console.log(
-        `[chain:catchup] --dry-run: cursor is ${would.from}, would become ${would.to}${would.rewound ? " (a rewind)" : ""}`,
+    // Review round 2, finding 1 (iv): know before doing anything destructive whether seeding the
+    // cursor would actually take — a dry-run probe of seedCursor itself, not a re-derivation of its
+    // rule. `to === 0` is the one outcome that can never be valid once startBlock >= 1 unless nothing
+    // was actually written (the exact failure mode the blocker described: the table emptied, and
+    // runChainSync then refuses to start from an uninitialised cursor).
+    const wouldSeed = await seedCursor(db, startBlock - 1, { forceRewind: args.forceRewind, dryRun: true });
+    if (wouldSeed.to === 0) {
+      fail(
+        `seeding the cursor to ${startBlock - 1} would leave it at 0 (from ${wouldSeed.from}) — runChainSync refuses to start from an ` +
+          "uninitialised cursor. Refusing before touching any candles.",
       );
+    }
 
-      // Self-check: a dry run must have written nothing. Re-read the same two things and compare —
-      // this fails loudly (a thrown error, non-zero exit) rather than silently mutating a live
-      // database if a future change to this branch accidentally reintroduces a real write.
+    // Review round 2, finding 1: print what the delete WOULD remove, and the floored start block,
+    // before deleting anything — true under --dry-run (which never deletes) and now also true for a
+    // real run (which used to delete first and only find out afterwards whether it could even proceed).
+    let staleCountBefore: number | null = null;
+    if (willDelete) {
+      staleCountBefore = await countStaleCandles(db, flooredFromTs);
+      console.log(
+        `[chain:catchup] ${args.dryRun ? "would delete" : "will delete"} ${staleCountBefore} candle row(s) with t >= ${flooredFromTs} (${isoUtc(flooredFromTs)})`,
+      );
+    } else {
+      console.log(
+        `[chain:catchup] stored cursor ${priorCursor} is already at or past start block ${startBlock}: this looks like a restart, ` +
+          `so the candle delete ${args.dryRun ? "would be" : "is"} skipped (use --force-rewind to redo it anyway).`,
+      );
+    }
+    console.log(`[chain:catchup] ${args.dryRun ? "would seed" : "seeding"} cursor: ${wouldSeed.from} -> ${wouldSeed.to}${wouldSeed.rewound ? " (a rewind)" : ""}`);
+
+    if (args.dryRun) {
+      // Self-check: a dry run must have written nothing that changes anything. Re-read the same two
+      // things and compare — this fails loudly (a thrown error, non-zero exit) rather than silently
+      // mutating a live database if a future change to this branch accidentally reintroduces a write.
       const cursorAfter = await readChainCursor(db);
       if (cursorAfter !== priorCursor) {
         throw new Error(`--dry-run invariant violated: the stored cursor changed from ${priorCursor} to ${cursorAfter}`);
       }
       if (staleCountBefore !== null) {
-        const staleCountAfter = await countStaleCandles(db, args.fromTs);
+        const staleCountAfter = await countStaleCandles(db, flooredFromTs);
         if (staleCountAfter !== staleCountBefore) {
           throw new Error(`--dry-run invariant violated: the candle count changed from ${staleCountBefore} to ${staleCountAfter}`);
         }
@@ -294,15 +419,24 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Review round 2, MINOR 7: check the lease is free before doing anything destructive, rather than
+    // deleting candles and seeding the cursor only to discover at step 5 that the cron (or another
+    // run) already holds it. Not airtight on its own (the lease can still be taken in the gap between
+    // this check and runChainSync's own acquire) — that race is what the renewal loop below and
+    // runChainSync's own lease semantics still guard against — but it closes the common case cheaply
+    // and avoids the order of failure being "destroy data, then find out."
+    const leaseState = await readState(db, CHAIN_JOB);
+    if (leaseState.leaseUntil > nowSec()) {
+      throw new Error(
+        `the chain lease is currently held by ${leaseState.leaseOwner ?? "(unknown owner)"} until ${isoUtc(leaseState.leaseUntil)}; ` +
+          "refusing to delete candles or seed the cursor until it is free (see --release-lease).",
+      );
+    }
+
     // Step 3, for real: clear stale candles so the replay rebuilds them exactly from the events.
     if (willDelete) {
-      const deleted = await deleteStaleCandles(db, args.fromTs);
-      console.log(`[chain:catchup] deleted ${deleted} candle row(s) with t >= ${args.fromTs} (${isoUtc(args.fromTs)})`);
-    } else {
-      console.log(
-        `[chain:catchup] stored cursor ${priorCursor} is already at or past start block ${startBlock}: ` +
-          `this looks like a restart, so the candle delete is skipped (use --force-rewind to redo it anyway).`,
-      );
+      const deleted = await deleteStaleCandles(db, flooredFromTs);
+      console.log(`[chain:catchup] deleted ${deleted} candle row(s) with t >= ${flooredFromTs} (${isoUtc(flooredFromTs)})`);
     }
 
     // Step 4.
@@ -314,6 +448,13 @@ async function main(): Promise<void> {
     const startCursor = seeded.to;
     let cumEvents = 0;
     let cumTrades = 0;
+
+    // Review round 2, finding 4: runChainSync acquires the lease once and never renews it, so a run
+    // past leaseSec would otherwise be silently overtaken by the cron. Renewed from onCycle instead
+    // (see opts.onCycle below), throttled to roughly once a minute.
+    let lastRenewalMs: number | null = null;
+    let renewalInFlight = false;
+    let leaseLost: string | null = null;
 
     const opts: ChainRunOpts = {
       owner,
@@ -329,6 +470,11 @@ async function main(): Promise<void> {
       maxRequests: args.maxRequests === 0 ? Number.POSITIVE_INFINITY : args.maxRequests,
       stopWhenCaughtUp: true,
       onCycle: (c) => {
+        // Thrown synchronously, this lands inside runChainSync's own per-cycle try/catch (run.ts),
+        // which records it as report.error and breaks the loop — the only way to stop the loop from
+        // here, since onCycle itself is synchronous and its return value is not consulted.
+        if (leaseLost) throw new Error(leaseLost);
+
         cumEvents += c.events;
         cumTrades += c.trades;
         const elapsedSec = (Date.now() - startedAtMs) / 1000;
@@ -340,6 +486,28 @@ async function main(): Promise<void> {
           `[chain:catchup] cursor=${c.cursor} behind=${behind} blocks/s=${blocksPerSec.toFixed(1)} ` +
             `events=${cumEvents} trades=${cumTrades} requests=${c.requests} eta=${eta}`,
         );
+
+        const cycleMs = Date.now();
+        if (!renewalInFlight && (lastRenewalMs === null || cycleMs - lastRenewalMs >= LEASE_RENEW_INTERVAL_MS)) {
+          renewalInFlight = true;
+          lastRenewalMs = cycleMs;
+          void renewLease(db, CHAIN_JOB, owner, nowSec(), CATCHUP_LEASE_SEC)
+            .then((ok) => {
+              if (!ok) {
+                leaseLost = "chain lease renewal failed: another process now holds it. Stopping rather than keep writing.";
+                console.error(`[chain:catchup] ${leaseLost}`);
+              }
+            })
+            .catch((err) => {
+              // A renewal error is not proof the lease moved on, but there is no way to be sure it
+              // did not — fail safe and stop rather than keep writing blind.
+              leaseLost = `chain lease renewal errored: ${message(err)}. Stopping rather than keep writing.`;
+              console.error(`[chain:catchup] ${leaseLost}`);
+            })
+            .finally(() => {
+              renewalInFlight = false;
+            });
+        }
       },
     };
 
@@ -366,6 +534,22 @@ async function main(): Promise<void> {
         `trades=${report.trades} newTokens=${report.newTokens} ignoredPools=${report.ignoredPools} ` +
         `skippedLiquidity=${report.skippedLiquidity} requests=${report.requests}`,
     );
+
+    // Review round 2, MINOR 11: a run cut short by --max-requests (or anything else) used to print the
+    // same "done" line as a genuine catch-up and exit 0. Compare against a fresh head so the operator
+    // does not have to infer it from cursor/requests by hand.
+    try {
+      const finalHead = await source.head();
+      const behind = finalHead - report.cursor;
+      if (behind <= 0) {
+        console.log(`[chain:catchup] caught up: cursor ${report.cursor} is at or past the current HyperSync head ${finalHead}.`);
+      } else {
+        console.log(`[chain:catchup] NOT caught up: still ${behind} block(s) behind head ${finalHead} — re-run the same command to continue.`);
+      }
+    } catch (err) {
+      console.error(`[chain:catchup] could not confirm final catch-up status: ${message(err)}`);
+    }
+
     if (report.error) {
       console.error(`[chain:catchup] finished with an error: ${report.error}`);
       process.exitCode = 1;
