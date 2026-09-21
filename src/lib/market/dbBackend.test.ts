@@ -45,7 +45,7 @@ function poolRec(id: string, token: string, quote: string, over: Partial<PoolRec
   return {
     id, token_id: token, quote_id: quote, tokenIsCurrency0: true, hooks: addr("9"), fee: 3000, tickSpacing: 60, origin: "LONG",
     createdAt: NOW - 5_000_000, priceQuote: "0.000866", tvlToken: "1000000000000000000000000", tvlQuote: "10000000000000000000000",
-    swapCount: 10, lastSwapAt: NOW - 100, volumeQuoteAllTime: "1", ...over,
+    swapCount: 10, lastSwapAt: NOW - 100, volumeQuoteAllTime: "1", sqrtPriceX96: null, ...over,
   };
 }
 const pools: PoolRec[] = [

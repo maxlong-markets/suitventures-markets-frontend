@@ -58,6 +58,13 @@ describe("upsertPools", () => {
     await upsertPools(db, [poolRec({ swapCount: 9 })], T0 + 1);
     expect(await db.query("select synced_to, swap_count from market.pools")).toEqual([{ synced_to: T0 + 400, swap_count: 9 }]);
   });
+  it("round-trips sqrt_price_x96 beyond 2^63 exactly as a string, and keeps it null when absent", async () => {
+    const big = "17716389974727979989602554";
+    await upsertPools(db, [poolRec({ sqrtPriceX96: big })], T0);
+    expect(await db.query("select sqrt_price_x96 from market.pools where id = $1", [POOL_A])).toEqual([{ sqrt_price_x96: big }]);
+    await upsertPools(db, [poolRec({ id: poolId(0x12), sqrtPriceX96: null })], T0);
+    expect(await db.query("select sqrt_price_x96 from market.pools where id = $1", [poolId(0x12)])).toEqual([{ sqrt_price_x96: null }]);
+  });
 });
 
 describe("markSynced", () => {

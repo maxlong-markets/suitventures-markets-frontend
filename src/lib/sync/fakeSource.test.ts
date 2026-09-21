@@ -4,7 +4,7 @@ import type { BalanceRec, CandleRec, PoolRec, SwapRec, TokenRec } from "./source
 
 const id = (n: number) => "0x" + n.toString(16).padStart(64, "0");
 const P1 = id(1), P2 = id(2), P3 = id(3), P4 = id(4), P5 = id(5), P6 = id(6);
-const pool = (o: Partial<PoolRec> & { id: string }): PoolRec => ({ token_id: "0xt", quote_id: "0xq", tokenIsCurrency0: true, hooks: "0x0", fee: 3000, tickSpacing: 60, origin: "LONG", createdAt: 0, priceQuote: "1", tvlToken: null, tvlQuote: null, swapCount: 1, lastSwapAt: 0, volumeQuoteAllTime: "0", ...o });
+const pool = (o: Partial<PoolRec> & { id: string }): PoolRec => ({ token_id: "0xt", quote_id: "0xq", tokenIsCurrency0: true, hooks: "0x0", fee: 3000, tickSpacing: 60, origin: "LONG", createdAt: 0, priceQuote: "1", tvlToken: null, tvlQuote: null, swapCount: 1, lastSwapAt: 0, volumeQuoteAllTime: "0", sqrtPriceX96: null, ...o });
 const swap = (o: Partial<SwapRec> & { id: string }): SwapRec => ({ pool_id: P1, token_id: "0xt", timestamp: 0, side: "buy", amountToken: "1", amountQuote: "1", priceQuote: "1", wallet: "0xw", txHash: "0xh", ...o });
 const candle = (o: Partial<CandleRec> & { id: string }): CandleRec => ({ pool_id: P1, t: 0, open: "1", high: "1", low: "1", close: "1", volumeQuote: "0", volumeToken: "0", trades: 0, ...o });
 const token = (o: Partial<TokenRec> & { id: string }): TokenRec => ({ address: o.id, symbol: "T", name: "T", decimals: 18, totalSupply: "0", holdersCount: 0, poolCount: 0, origin: "LONG", createdAt: 0, primaryPool_id: null, metadataLoaded: true, ...o });
@@ -65,7 +65,12 @@ describe("FakeSource", () => {
     expect(ids(await s.topHolders("0xt", 2))).toEqual(["0xh2", "0xh4"]);
     expect(await s.chainMeta()).toEqual({ latestProcessedBlock: 10, blockHeight: 12 });
   });
-  it("walks id ranges ascending, bounded by beforeId, balances only when non-zero", async () => {
+  it("batches top holders per token — same ranking as topHolders, flattened in the order of the given ids", async () => {
+    const s = source();
+    expect(ids(await s.topHoldersBatch(["0xt", "0xother"], 2))).toEqual(["0xh2", "0xh4", "0xh5"]);
+    expect(ids(await s.topHoldersBatch([], 10))).toEqual([]);
+  });
+  it("walks id ranges ascending, bounded by beforeId", async () => {
     const s = source();
     expect(ids(await s.tokensPage("", 10))).toEqual(["0xa", "0xb", "0xc"]);
     expect(ids(await s.tokensPage("0xa", 1))).toEqual(["0xb"]);
@@ -73,8 +78,6 @@ describe("FakeSource", () => {
     expect(ids(await s.swapsPage(S5, S4, 10))).toEqual([S1, S3, S2]);
     expect(ids(await s.swapsPage(S5, null, 10))).toEqual([S1, S3, S2, S4]);
     expect(ids(await s.candlesPage("", null, 2))).toEqual([H1, C1]); // "-h1-" sorts before "-m1-"
-    expect(ids(await s.balancesPage("", null, 10))).toEqual(["0xh1", "0xh2", "0xh4", "0xh5"]);
-    expect(ids(await s.balancesPage("0xh1", "0xh4", 10))).toEqual(["0xh2"]);
   });
   it("records calls, counts queries and throws an armed failure once", async () => {
     const s = source();

@@ -6,6 +6,8 @@ export type PoolRec = {
   id: string; token_id: string; quote_id: string; tokenIsCurrency0: boolean; hooks: string; fee: number; tickSpacing: number;
   origin: string; createdAt: number; priceQuote: Numeric; tvlToken: string | null; tvlQuote: string | null;
   swapCount: number; lastSwapAt: number | null; volumeQuoteAllTime: Numeric;
+  /** The pool's last sqrtPriceX96 (uint160): a decimal string end to end, never run through Number. Null until set. */
+  sqrtPriceX96: string | null;
 };
 export type TokenRec = {
   id: string; address: string; symbol: string; name: string; decimals: number; totalSupply: string; holdersCount: number;
@@ -39,14 +41,14 @@ export interface EnvioSource {
   tokensById(ids: readonly string[]): Promise<TokenRec[]>;
   /** Non-zero balances of one token, largest first. */
   topHolders(tokenId: string, limit: number): Promise<BalanceRec[]>;
+  /** Non-zero balances of each of the given tokens, largest first per token, one request, flattened in the order of tokenIds. Empty input returns [] without a request. */
+  topHoldersBatch(tokenIds: readonly string[], limit: number): Promise<BalanceRec[]>;
   chainMeta(): Promise<{ latestProcessedBlock: number; blockHeight: number }>;
   /** Id-range walks (seed, nightly): rows with id > afterId, and id < beforeId when given, ascending by id, at most limit. */
   tokensPage(afterId: string, limit: number): Promise<TokenRec[]>;
   poolsPage(afterId: string, limit: number): Promise<PoolRec[]>;
   swapsPage(afterId: string, beforeId: string | null, limit: number): Promise<SwapRec[]>;
   candlesPage(afterId: string, beforeId: string | null, limit: number): Promise<CandleRec[]>;
-  /** Only rows with balance > 0. */
-  balancesPage(afterId: string, beforeId: string | null, limit: number): Promise<BalanceRec[]>;
   /** Requests issued so far by this source. */
   readonly queries: number;
 }

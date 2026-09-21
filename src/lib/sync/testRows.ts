@@ -25,7 +25,7 @@ export function poolRec(o: Partial<PoolRec> = {}): PoolRec {
   return {
     id: POOL_A, token_id: TOKEN_A, quote_id: QUOTE, tokenIsCurrency0: true, hooks: addr(0), fee: 3000, tickSpacing: 60,
     origin: "LONG", createdAt: T0, priceQuote: "0.000866", tvlToken: "1000000000000000000000", tvlQuote: "500000000000000000",
-    swapCount: 3, lastSwapAt: T0 + 500, volumeQuoteAllTime: "12.5", ...o,
+    swapCount: 3, lastSwapAt: T0 + 500, volumeQuoteAllTime: "12.5", sqrtPriceX96: null, ...o,
   };
 }
 export function tokenRec(o: Partial<TokenRec> = {}): TokenRec {

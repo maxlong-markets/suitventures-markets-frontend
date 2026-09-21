@@ -8,7 +8,7 @@ const FIRST_PAGE = { k: -1, kid: "" };
 
 const QUOTE_FIELDS = "id address symbol name decimals enabled";
 const QUOTE_PRICE_FIELDS = "id usdPrice updatedAt aggregator";
-const POOL_FIELDS = "id token_id quote_id tokenIsCurrency0 hooks fee tickSpacing origin createdAt priceQuote tvlToken tvlQuote swapCount lastSwapAt volumeQuoteAllTime";
+const POOL_FIELDS = "id token_id quote_id tokenIsCurrency0 hooks fee tickSpacing origin createdAt priceQuote tvlToken tvlQuote swapCount lastSwapAt volumeQuoteAllTime sqrtPriceX96";
 const TOKEN_FIELDS = "id address symbol name decimals totalSupply holdersCount poolCount origin createdAt primaryPool_id metadataLoaded";
 const SWAP_FIELDS = "id pool_id token_id timestamp side amountToken amountQuote priceQuote wallet txHash";
 const CANDLE_FIELDS = "id pool_id t open high low close volumeQuote volumeToken trades";
@@ -38,6 +38,18 @@ const TOKENS_BY_ID = `query SyncTokensById($ids: [String!]!) { Token(where: { id
 const TOP_HOLDERS = `query SyncTopHolders($token: String!, $limit: Int!) {
   TokenBalance(where: { token_id: { _eq: $token }, balance: { _gt: "0" } }, order_by: { balance: desc }, limit: $limit) { ${BALANCE_FIELDS} }
 }`;
+/**
+ * One request for up to n tokens: an aliased TokenBalance selection per token (t0, t1, …), each with its own
+ * `$t0`, `$t1`, … variable so no id is ever interpolated into the document, all sharing one `$limit`.
+ */
+function topHoldersBatchDoc(n: number): string {
+  const vars = Array.from({ length: n }, (_, i) => `$t${i}: String!`).join(", ");
+  const selections = Array.from(
+    { length: n },
+    (_, i) => `t${i}: TokenBalance(where: { token_id: { _eq: $t${i} }, balance: { _gt: "0" } }, order_by: { balance: desc }, limit: $limit) { ${BALANCE_FIELDS} }`,
+  ).join("\n  ");
+  return `query SyncTopHoldersBatch(${vars}, $limit: Int!) {\n  ${selections}\n}`;
+}
 const CHAIN_META = "query SyncChainMeta { chain_metadata { chain_id latest_processed_block block_height } }";
 
 /** Id-range walk: id > $after (and < $before when bounded), ascending, `extra` appended inside the where object. */
@@ -46,13 +58,11 @@ function pageDoc(entity: string, fields: string, bounded: boolean, extra = ""): 
   const range = bounded ? "id: { _gt: $after, _lt: $before }" : "id: { _gt: $after }";
   return `query Sync${entity}Page(${vars}) { ${entity}(where: { ${range}${extra} }, order_by: { id: asc }, limit: $limit) { ${fields} } }`;
 }
-const BALANCE_FILTER = ', balance: { _gt: "0" }';
 const PAGES = {
   Token: [pageDoc("Token", TOKEN_FIELDS, false), pageDoc("Token", TOKEN_FIELDS, true)],
   Pool: [pageDoc("Pool", POOL_FIELDS, false), pageDoc("Pool", POOL_FIELDS, true)],
   Swap: [pageDoc("Swap", SWAP_FIELDS, false), pageDoc("Swap", SWAP_FIELDS, true)],
   Candle: [pageDoc("Candle", CANDLE_FIELDS, false), pageDoc("Candle", CANDLE_FIELDS, true)],
-  TokenBalance: [pageDoc("TokenBalance", BALANCE_FIELDS, false, BALANCE_FILTER), pageDoc("TokenBalance", BALANCE_FIELDS, true, BALANCE_FILTER)],
 } as const;
 
 type ChainRow = { chain_id: number; latest_processed_block: number; block_height: number };
@@ -123,6 +133,15 @@ export function createEnvioSource(opts: { gql?: typeof defaultGql; limiter?: Lim
     async topHolders(tokenId, limit) {
       return (await request<{ TokenBalance: BalanceRec[] }>(TOP_HOLDERS, { token: tokenId, limit })).TokenBalance;
     },
+    async topHoldersBatch(tokenIds, limit) {
+      if (tokenIds.length === 0) return [];
+      const variables: Record<string, unknown> = { limit };
+      tokenIds.forEach((id, i) => {
+        variables[`t${i}`] = id;
+      });
+      const data = await request<Record<string, BalanceRec[]>>(topHoldersBatchDoc(tokenIds.length), variables);
+      return tokenIds.flatMap((_, i) => data[`t${i}`]);
+    },
     async chainMeta() {
       const d = await request<{ chain_metadata: ChainRow[] }>(CHAIN_META, {});
       const row = d.chain_metadata.find((c) => c.chain_id === CHAIN_ID);
@@ -133,6 +152,5 @@ export function createEnvioSource(opts: { gql?: typeof defaultGql; limiter?: Lim
     poolsPage: (afterId, limit) => page<"Pool", PoolRec>("Pool", afterId, null, limit),
     swapsPage: (afterId, beforeId, limit) => page<"Swap", SwapRec>("Swap", afterId, beforeId, limit),
     candlesPage: (afterId, beforeId, limit) => page<"Candle", CandleRec>("Candle", afterId, beforeId, limit),
-    balancesPage: (afterId, beforeId, limit) => page<"TokenBalance", BalanceRec>("TokenBalance", afterId, beforeId, limit),
   };
 }

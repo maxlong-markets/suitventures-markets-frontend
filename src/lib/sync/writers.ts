@@ -59,24 +59,24 @@ export async function upsertPools(db: Db, pools: readonly PoolRec[], syncedAt: n
   for (const c of chunks(rows)) {
     await db.query(
       `insert into market.pools (id, token_id, quote_id, token_is_currency0, hooks, fee, tick_spacing, origin, created_at,
-         price_quote, tvl_token, tvl_quote, swap_count, last_swap_at, volume_quote_all_time, synced_at)
+         price_quote, tvl_token, tvl_quote, swap_count, last_swap_at, volume_quote_all_time, sqrt_price_x96, synced_at)
        select id, token_id, quote_id, token_is_currency0::boolean, hooks, fee, tick_spacing, origin, created_at,
-         price_quote, tvl_token, tvl_quote, swap_count, last_swap_at, volume_quote_all_time, $16::int
+         price_quote, tvl_token, tvl_quote, swap_count, last_swap_at, volume_quote_all_time, sqrt_price_x96, $17::int
        from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::int[], $7::int[], $8::text[], $9::int[],
-         $10::float8[], $11::numeric[], $12::numeric[], $13::int[], $14::int[], $15::float8[])
+         $10::float8[], $11::numeric[], $12::numeric[], $13::int[], $14::int[], $15::float8[], $16::numeric[])
          as u(id, token_id, quote_id, token_is_currency0, hooks, fee, tick_spacing, origin, created_at,
-           price_quote, tvl_token, tvl_quote, swap_count, last_swap_at, volume_quote_all_time)
+           price_quote, tvl_token, tvl_quote, swap_count, last_swap_at, volume_quote_all_time, sqrt_price_x96)
        on conflict (id) do update set token_id = excluded.token_id, quote_id = excluded.quote_id,
          token_is_currency0 = excluded.token_is_currency0, hooks = excluded.hooks, fee = excluded.fee,
          tick_spacing = excluded.tick_spacing, origin = excluded.origin, created_at = excluded.created_at,
          price_quote = excluded.price_quote, tvl_token = excluded.tvl_token, tvl_quote = excluded.tvl_quote,
          swap_count = excluded.swap_count, last_swap_at = excluded.last_swap_at,
-         volume_quote_all_time = excluded.volume_quote_all_time, synced_at = excluded.synced_at`,
+         volume_quote_all_time = excluded.volume_quote_all_time, sqrt_price_x96 = excluded.sqrt_price_x96, synced_at = excluded.synced_at`,
       [
         c.map((p) => p.id), c.map((p) => p.token_id), c.map((p) => p.quote_id), c.map((p) => bool(p.tokenIsCurrency0)),
         c.map((p) => p.hooks), c.map((p) => p.fee), c.map((p) => p.tickSpacing), c.map((p) => p.origin), c.map((p) => p.createdAt),
         c.map((p) => Number(p.priceQuote)), c.map((p) => p.tvlToken), c.map((p) => p.tvlQuote), c.map((p) => p.swapCount),
-        c.map((p) => p.lastSwapAt), c.map((p) => Number(p.volumeQuoteAllTime)), syncedAt,
+        c.map((p) => p.lastSwapAt), c.map((p) => Number(p.volumeQuoteAllTime)), c.map((p) => p.sqrtPriceX96), syncedAt,
       ],
     );
   }

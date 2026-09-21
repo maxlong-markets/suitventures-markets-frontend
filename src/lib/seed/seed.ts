@@ -1,6 +1,6 @@
 import { DbUnavailableError, type Db } from "@/lib/db/client";
 import { parseCandleId, parseSwapId } from "@/lib/sync/ids";
-import { retentionCutoff } from "@/lib/sync/retention";
+import { candleCutoff, retentionCutoff } from "@/lib/sync/retention";
 import type { BalanceRec, CandleRec, EnvioSource, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { finishRun, readState, saveCursors } from "@/lib/sync/state";
 import { insertSwaps, recomputeListedPools, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
@@ -8,6 +8,8 @@ import { insertSwaps, recomputeListedPools, upsertCandles, upsertPools, upsertQu
 export type SeedPhase = "quotes" | "tokens" | "pools" | "swaps" | "candles" | "balances" | "finish";
 export const SEED_PHASES: readonly SeedPhase[] = ["quotes", "tokens", "pools", "swaps", "candles", "balances", "finish"];
 export const HOLDERS_KEPT = 100;
+/** Token ids per topHoldersBatch request: one GraphQL request holds one aliased selection per token. */
+const TOKEN_BATCH = 25;
 /** The market cursors and every watermark start this far before the seed began, so the first cycles replay what moved during it, with an hour of slack for the indexer's own lag at seed start. */
 const CURSOR_BACKDATE_SEC = 3600;
 /** A range's checkpoint value once its walk has ended; never a valid id, so a resume skips it outright. */
@@ -52,10 +54,8 @@ const swapRow = (s: SwapRec) => {
 };
 const CANDLE_COLS = ["pool_id", "interval", "t", "open", "high", "low", "close", "volume_quote", "volume_token", "trades"];
 const candleRow = (c: CandleRec) => [c.pool_id, parseCandleId(c.id).interval, c.t, Number(c.open), Number(c.high), Number(c.low), Number(c.close), Number(c.volumeQuote), Number(c.volumeToken), c.trades];
-const BALANCE_COLS = ["token_id", "holder", "balance", "updated_at"];
-const balanceRow = (b: BalanceRec) => [b.token_id, b.holder, b.balance, b.updatedAt];
 
-/** The one balance writer the sync does not need: an upsert for a page re-read after a resume. */
+/** The balances phase's only writer: naturally idempotent (on conflict do update), so re-running a batch is harmless. */
 async function upsertBalances(db: Db, rows: readonly BalanceRec[]): Promise<number> {
   if (rows.length === 0) return 0;
   await db.query(
@@ -68,14 +68,17 @@ async function upsertBalances(db: Db, rows: readonly BalanceRec[]): Promise<numb
 }
 
 /**
- * Runs the phases from checkpoint.phase, saving the checkpoint at each phase start; big tables walk
+ * Runs the phases from checkpoint.phase, saving the checkpoint at each phase start; a phase already listed in
+ * checkpoint.done is skipped outright, however early checkpoint.phase itself is. Big tables walk
  * `idRanges(workers)` concurrently with COPY per page and save the last id per range after each page; the swaps
  * phase writes only rows with timestamp >= retentionCutoff(cp.startedAt) (the store's 10-day trade window,
- * retention.ts) — pagination, `after` and the checkpoint still walk every row, unfiltered, so a page of entirely
- * stale rows still advances the cursor and still ends the range when it comes back short; "finish"
- * trims balances to holdersKept per token, recomputes
- * every listed pool, raises every pool's synced_to and sync_state.market cursor and cursor2 to startedAt − 3600 (none
- * of them is ever lowered), and marks nightly ok.
+ * retention.ts) and the candles phase writes only rows with t >= candleCutoff(itsInterval, cp.startedAt) (each
+ * interval's own window, retention.ts) — pagination, `after` and the checkpoint still walk every row, unfiltered,
+ * so a page of entirely dropped rows still advances the cursor and still ends the range when it comes back short;
+ * "balances" copies the top holdersKept holders of every token with holders_count > 0, from our own id order, not
+ * Envio's; "finish" trims any surplus per token beyond holdersKept (a no-op after "balances" already capped it),
+ * recomputes every listed pool, raises every pool's synced_to and sync_state.market cursor and cursor2 to
+ * startedAt − 3600 (none of them is ever lowered), and marks nightly ok.
  */
 export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Promise<Checkpoint> {
   const cp: Checkpoint = { ...opts.checkpoint, ranges: { ...opts.checkpoint.ranges }, done: [...opts.checkpoint.done] };
@@ -180,12 +183,51 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
         );
         break;
       }
-      case "candles":
-        await ranged<CandleRec>(phase, (a, b, l) => source.candlesPage(a, b, l), (batch) => db.copy("market.candles", CANDLE_COLS, batch.map(candleRow)), (batch) => upsertCandles(db, batch));
+      case "candles": {
+        // Same shape as the swaps filter above: pagination and the checkpoint stay unfiltered; only the write is
+        // narrowed, this time per row, to that row's own interval's window (the id's interval, parseCandleId).
+        const inWindow = (batch: CandleRec[]) => batch.filter((c) => c.t >= candleCutoff(parseCandleId(c.id).interval, cp.startedAt));
+        await ranged<CandleRec>(
+          phase,
+          (a, b, l) => source.candlesPage(a, b, l),
+          (batch) => db.copy("market.candles", CANDLE_COLS, inWindow(batch).map(candleRow)),
+          (batch) => upsertCandles(db, inWindow(batch)),
+        );
         break;
-      case "balances":
-        await ranged<BalanceRec>(phase, (a, b, l) => source.balancesPage(a, b, l), (batch) => db.copy("market.token_balances", BALANCE_COLS, batch.map(balanceRow)), (batch) => upsertBalances(db, batch));
+      }
+      case "balances": {
+        // Not an id-range walk over the source: our own market.tokens, in our own id order, TOKEN_BATCH ids at a
+        // time, one topHoldersBatch request per batch. A short (or empty) batch of ids ends the walk, exactly like
+        // a short page ends a range above. The checkpoint holds the last token id of each completed batch under
+        // one key ("all", `single`'s), so a resume picks up right after it; re-running a batch is harmless since
+        // upsertBalances is a plain on-conflict-do-update.
+        const key = single.key;
+        const after = cp.ranges[key];
+        if (after !== RANGE_DONE) {
+          let cursor = after ?? single.from;
+          for (;;) {
+            const tokenIds = (
+              await retrying(`${phase} tokens`, () =>
+                db.query<{ id: string }>("select id from market.tokens where holders_count > 0 and id > $1 order by id limit $2", [cursor, TOKEN_BATCH]),
+              )
+            ).map((r) => r.id);
+            if (tokenIds.length > 0) {
+              const balances = await source.topHoldersBatch(tokenIds, kept);
+              const written = await retrying(`${phase} write`, () => upsertBalances(db, balances));
+              rows += written;
+              cursor = tokenIds[tokenIds.length - 1]!;
+              cp.ranges[key] = cursor;
+              pages += 1;
+              await save();
+              log(phase, key);
+            }
+            if (tokenIds.length < TOKEN_BATCH) break;
+          }
+        }
+        cp.ranges[key] = RANGE_DONE;
+        await save();
         break;
+      }
       case "finish": {
         await retrying("finish", async () => {
           // The trim and the recompute scan whole tables, and Supabase's session pooler starts every session with a

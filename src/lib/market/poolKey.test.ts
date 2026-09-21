@@ -139,7 +139,7 @@ describe("poolKey parity: db and envio agree on the trading pool for the same da
     return {
       id: c.id, token_id: tokenId, quote_id: QUOTE, tokenIsCurrency0: true, hooks: HOOKS, fee: FEE, tickSpacing: TICK_SPACING,
       origin: "LONG", createdAt: NOW - 10_000, priceQuote: c.priceQuote, tvlToken: null, tvlQuote: null,
-      swapCount: c.swapCount, lastSwapAt: c.lastSwapAt, volumeQuoteAllTime: "0",
+      swapCount: c.swapCount, lastSwapAt: c.lastSwapAt, volumeQuoteAllTime: "0", sqrtPriceX96: null,
     };
   }
   function tokenRec(s: Scenario): TokenRec {

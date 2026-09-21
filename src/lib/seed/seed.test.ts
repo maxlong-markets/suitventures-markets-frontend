@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DbUnavailableError, type Db } from "@/lib/db/client";
 import { FakeSource } from "@/lib/sync/fakeSource";
-import { retentionCutoff } from "@/lib/sync/retention";
+import type { IndexerInterval } from "@/lib/sync/ids";
+import { candleCutoff, retentionCutoff } from "@/lib/sync/retention";
 import type { BalanceRec, CandleRec, PoolRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { readState } from "@/lib/sync/state";
-import { insertSwaps, markSynced, upsertPools } from "@/lib/sync/writers";
+import { insertSwaps, markSynced, upsertPools, upsertTokens } from "@/lib/sync/writers";
 import { testDb } from "@/test/db";
 import { idRanges, newCheckpoint, runSeed, SEED_PHASES, type Checkpoint } from "./seed";
 
@@ -39,11 +40,15 @@ const token = (id: string, pool: string): TokenRec => ({
 const pool = (id: string, tokenId: string): PoolRec => ({
   id, token_id: tokenId, quote_id: QUOTE, tokenIsCurrency0: true, hooks: hex("0", 40), fee: 3000, tickSpacing: 60, origin: "LONG",
   createdAt: NOW - 100, priceQuote: "1", tvlToken: null, tvlQuote: null, swapCount: 2, lastSwapAt: NOW - 50, volumeQuoteAllTime: "1",
+  sqrtPriceX96: null,
 });
 const swap = (tx: string, timestamp = NOW): SwapRec => ({
   id: `${tx}-0`, pool_id: POOL_A, token_id: TOKEN_A, timestamp, side: "buy", amountToken: "1", amountQuote: "1", priceQuote: "1", wallet: hex("5", 40), txHash: tx,
 });
-const candle = (poolId: string, t: number): CandleRec => ({ id: `${poolId}-m1-${t}`, pool_id: poolId, t, open: "1", high: "1", low: "1", close: "1", volumeQuote: "1", volumeToken: "1", trades: 1 });
+/** interval defaults to "m1" so every existing call site keeps its id shape. */
+const candle = (poolId: string, t: number, interval: IndexerInterval = "m1"): CandleRec => ({
+  id: `${poolId}-${interval}-${t}`, pool_id: poolId, t, open: "1", high: "1", low: "1", close: "1", volumeQuote: "1", volumeToken: "1", trades: 1,
+});
 const balance = (tokenId: string, holder: string, bal: string): BalanceRec => ({ id: `${tokenId}-${holder}`, token_id: tokenId, holder, balance: bal, updatedAt: NOW });
 // Ids spread over the three ranges of idRanges(3): 0x0-0x4, 0x5-0x9, 0xa-0xf. Page limit 2 forces multi-page ranges.
 const data = {
@@ -165,6 +170,50 @@ describe("runSeed", () => {
     await fresh.end();
   });
 
+  it("writes only candles inside each interval's own retention window, still advancing the cursor and checkpointing over the old ones", async () => {
+    const fresh = await testDb();
+    const intervals: IndexerInterval[] = ["m1", "m5", "m15", "h1", "d1"];
+    // One old (just before its own interval's cutoff) and one recent (just after) candle per interval, all on
+    // POOL_A: proves the cutoff is per-row's-own-interval, not one flat cutoff for every candle.
+    const oldCandles = intervals.map((iv) => candle(POOL_A, candleCutoff(iv, NOW) - 10, iv));
+    const recentCandles = intervals.map((iv) => candle(POOL_A, candleCutoff(iv, NOW) + 10, iv));
+    const source = new FakeSource({ ...data, candles: [...oldCandles, ...recentCandles] });
+    // checkpoint.phase is already "candles": walkRange's idempotent is true for the first page, so this exercises
+    // the upsert path (mirrors the swaps retention test above).
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "candles", ranges: {}, done: ["quotes", "tokens", "pools", "swaps"] };
+    const cp = await runSeed(fresh, source, seedOpts(checkpoint, []));
+    expect(cp.done).toEqual([...SEED_PHASES]);
+    const expected = intervals.map((iv) => ({ interval: iv, t: candleCutoff(iv, NOW) + 10 })).sort((a, b) => a.t - b.t);
+    expect(await fresh.query("select interval, t from market.candles order by t")).toEqual(expected);
+    await fresh.end();
+  });
+
+  it("on a checkpoint before the candles phase has begun, the COPY path's first page writes only the in-window candle of an old-and-in-window mix", async () => {
+    const fresh = await testDb();
+    const intervals: IndexerInterval[] = ["m1", "m5", "m15", "h1", "d1"];
+    const oldCandles = intervals.map((iv) => candle(POOL_A, candleCutoff(iv, NOW) - 10, iv));
+    const recentCandles = intervals.map((iv) => candle(POOL_A, candleCutoff(iv, NOW) + 10, iv));
+    const source = new FakeSource({ ...data, candles: [...oldCandles, ...recentCandles] });
+    // Same mechanism as the swaps COPY-path test above: checkpoint.phase "pools" (not "candles"), no stored range
+    // cursor, keeps walkRange's idempotent false once the run reaches candles' first page.
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "pools", ranges: {}, done: ["quotes", "tokens"] };
+    let candleCopyCalls = 0;
+    const spied: Db = {
+      ...fresh,
+      copy: async (table, columns, rows) => {
+        if (table === "market.candles") candleCopyCalls += 1;
+        return fresh.copy(table, columns, rows);
+      },
+    };
+    const cp = await runSeed(spied, source, seedOpts(checkpoint, []));
+    expect(cp.done).toEqual([...SEED_PHASES]);
+    // Confirms the COPY branch actually ran for candles, the same way the swaps test above confirms it for swaps.
+    expect(candleCopyCalls).toBeGreaterThan(0);
+    const expected = intervals.map((iv) => ({ interval: iv, t: candleCutoff(iv, NOW) + 10 })).sort((a, b) => a.t - b.t);
+    expect(await fresh.query("select interval, t from market.candles order by t")).toEqual(expected);
+    await fresh.end();
+  });
+
   it("resumes a phase whose ranges have no stored cursor without copying a landed page twice", async () => {
     const fresh = await testDb();
     // The crash: r1's only page and r2's first page were COPYed, then the process died before either range saved
@@ -189,6 +238,38 @@ describe("runSeed", () => {
     const checkpoint: Checkpoint = { startedAt: NOW, phase: "finish", ranges: {}, done: ["quotes", "tokens", "pools", "swaps", "candles", "balances"] };
     await runSeed(fresh, new FakeSource(data), seedOpts(checkpoint, []));
     expect(await fresh.query("select id, synced_to from market.pools order by id")).toEqual([{ id: POOL_A, synced_to: NOW - 3600 }, { id: POOL_B, synced_to: NOW + 5 }]);
+    await fresh.end();
+  });
+
+  it("balances phase resumes from the stored token id cursor, fetching top holders only for the tokens after it", async () => {
+    const fresh = await testDb();
+    // As the (already-"done") tokens phase would have left them: both qualify (holders_count > 0).
+    await upsertTokens(fresh, data.tokens, NOW);
+    const source = new FakeSource(data);
+    // Mid-balances checkpoint: a previous run's batch already completed through TOKEN_A.
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "balances", ranges: { all: TOKEN_A }, done: ["quotes", "tokens", "pools", "swaps", "candles"] };
+    await runSeed(fresh, source, seedOpts(checkpoint, []));
+    // One batch only, and only for the token after the stored cursor: TOKEN_A's own holders are never fetched.
+    expect(source.calls.filter((c) => c === "topHoldersBatch")).toHaveLength(1);
+    expect(await fresh.query("select distinct token_id from market.token_balances")).toEqual([{ token_id: TOKEN_B }]);
+    await fresh.end();
+  });
+
+  it("a checkpoint whose done already lists a later phase skips it outright, even though checkpoint.phase itself is earlier", async () => {
+    const fresh = await testDb();
+    const source = new FakeSource(data);
+    // The operator's snapshot-run shape (task brief item 6): phase "quotes" (the very first phase) with "swaps"
+    // already in done, so the whole run must skip swaps wherever the loop reaches it, never fetching a page.
+    const checkpoint: Checkpoint = { startedAt: NOW, phase: "quotes", ranges: {}, done: ["swaps"] };
+    const cp = await runSeed(fresh, source, seedOpts(checkpoint, []));
+    expect(source.calls).not.toContain("swapsPage");
+    expect(await count(fresh, "swaps")).toBe(0);
+    // Every phase ran exactly once — same seven phases as SEED_PHASES, "swaps" included (it was already done),
+    // order aside: the loop never re-appends a phase that started in `done`.
+    expect(cp.done).toHaveLength(SEED_PHASES.length);
+    expect([...cp.done].sort()).toEqual([...SEED_PHASES].sort());
+    // Every other phase still ran normally, immediately before and after the skipped one.
+    for (const [table, n] of [["quotes", 1], ["tokens", 2], ["pools", 2], ["candles", 4]] as const) expect(await count(fresh, table)).toBe(n);
     await fresh.end();
   });
 });

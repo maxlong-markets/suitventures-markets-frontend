@@ -27,6 +27,14 @@ function idRange<T extends { id: string }>(rows: readonly T[], afterId: string, 
 
 const nonZero = (b: BalanceRec) => BigInt(b.balance) > 0n;
 
+/** Non-zero balances of one token, largest first (ties by holder ascending) — same ranking real Envio applies. */
+function holdersOf(balances: readonly BalanceRec[], tokenId: string, limit: number): BalanceRec[] {
+  return balances
+    .filter((b) => b.token_id === tokenId && nonZero(b))
+    .sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : BigInt(b.balance) < BigInt(a.balance) ? -1 : cmp(a.holder, b.holder)))
+    .slice(0, limit);
+}
+
 /** In-memory EnvioSource applying exactly the filters, orderings and keysets documented on the interface. `calls` records method names in order; `failOn` makes the named method throw the given error on its next call. */
 export class FakeSource implements EnvioSource {
   readonly data: Required<FakeData>;
@@ -89,10 +97,11 @@ export class FakeSource implements EnvioSource {
   }
   async topHolders(tokenId: string, limit: number) {
     this.hit("topHolders");
-    return this.data.balances
-      .filter((b) => b.token_id === tokenId && nonZero(b))
-      .sort((a, b) => (BigInt(b.balance) > BigInt(a.balance) ? 1 : BigInt(b.balance) < BigInt(a.balance) ? -1 : cmp(a.holder, b.holder)))
-      .slice(0, limit);
+    return holdersOf(this.data.balances, tokenId, limit);
+  }
+  async topHoldersBatch(tokenIds: readonly string[], limit: number) {
+    this.hit("topHoldersBatch");
+    return tokenIds.flatMap((id) => holdersOf(this.data.balances, id, limit));
   }
   async chainMeta() {
     this.hit("chainMeta");
@@ -113,9 +122,5 @@ export class FakeSource implements EnvioSource {
   async candlesPage(afterId: string, beforeId: string | null, limit: number) {
     this.hit("candlesPage");
     return idRange(this.data.candles, afterId, beforeId, limit);
-  }
-  async balancesPage(afterId: string, beforeId: string | null, limit: number) {
-    this.hit("balancesPage");
-    return idRange(this.data.balances.filter(nonZero), afterId, beforeId, limit);
   }
 }

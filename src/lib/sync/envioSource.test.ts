@@ -31,7 +31,7 @@ function countingLimiter() {
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 const POOL = "0x" + "ab".repeat(32);
 const POOL2 = "0x" + "cd".repeat(32);
-const POOL_FIELDS = "id token_id quote_id tokenIsCurrency0 hooks fee tickSpacing origin createdAt priceQuote tvlToken tvlQuote swapCount lastSwapAt volumeQuoteAllTime";
+const POOL_FIELDS = "id token_id quote_id tokenIsCurrency0 hooks fee tickSpacing origin createdAt priceQuote tvlToken tvlQuote swapCount lastSwapAt volumeQuoteAllTime sqrtPriceX96";
 const TOKEN_FIELDS = "id address symbol name decimals totalSupply holdersCount poolCount origin createdAt primaryPool_id metadataLoaded";
 const SWAP_FIELDS = "id pool_id token_id timestamp side amountToken amountQuote priceQuote wallet txHash";
 const CANDLE_FIELDS = "id pool_id t open high low close volumeQuote volumeToken trades";
@@ -114,6 +114,26 @@ describe("createEnvioSource", () => {
     expect(g.calls[1].variables).toEqual({ token: "0xa", limit: 100 });
   });
 
+  it("fetches top holders for a batch of tokens in one request, one aliased selection per token, flattened in request order", async () => {
+    const g = fakeGql([{ t0: [{ id: "b0" }], t1: [{ id: "b1" }] }]);
+    const source = createEnvioSource({ gql: g.fn, limiter: countingLimiter() });
+    expect(await source.topHoldersBatch(["0xa", "0xb"], 100)).toEqual([{ id: "b0" }, { id: "b1" }]);
+    expect(g.calls).toHaveLength(1);
+    const q = norm(g.calls[0].query);
+    expect(q).toContain(`t0: TokenBalance(where: { token_id: { _eq: $t0 }, balance: { _gt: "0" } }, order_by: { balance: desc }, limit: $limit) { ${BALANCE_FIELDS} }`);
+    expect(q).toContain(`t1: TokenBalance(where: { token_id: { _eq: $t1 }, balance: { _gt: "0" } }, order_by: { balance: desc }, limit: $limit) { ${BALANCE_FIELDS} }`);
+    expect(g.calls[0].variables).toEqual({ t0: "0xa", t1: "0xb", limit: 100 });
+    expect(source.queries).toBe(1);
+  });
+
+  it("returns [] without a request for an empty topHoldersBatch", async () => {
+    const g = fakeGql([]);
+    const source = createEnvioSource({ gql: g.fn, limiter: countingLimiter() });
+    expect(await source.topHoldersBatch([], 100)).toEqual([]);
+    expect(g.calls).toHaveLength(0);
+    expect(source.queries).toBe(0);
+  });
+
   it("reads chain 4663 from chain_metadata and fails when it is missing", async () => {
     const rows = [{ chain_id: 1, latest_processed_block: 5, block_height: 9 }, { chain_id: 4663, latest_processed_block: 10, block_height: 12 }];
     const g = fakeGql([{ chain_metadata: rows }, { chain_metadata: [] }]);
@@ -124,23 +144,21 @@ describe("createEnvioSource", () => {
   });
 
   it("walks id ranges ascending, bounding them only when beforeId is given", async () => {
-    const g = fakeGql([{ Token: [] }, { Pool: [] }, { Swap: [] }, { Candle: [] }, { TokenBalance: [] }]);
+    const g = fakeGql([{ Token: [] }, { Pool: [] }, { Swap: [] }, { Candle: [] }]);
     const source = createEnvioSource({ gql: g.fn, limiter: countingLimiter() });
     await source.tokensPage("", 1000);
     await source.poolsPage("0x1", 1000);
     await source.swapsPage("0x1", "0x2", 1000);
     await source.candlesPage("0x1", null, 1000);
-    await source.balancesPage("0x1", "0x2", 1000);
-    const [tokens, pools, swaps, candles, balances] = g.calls.map((c) => norm(c.query));
+    const [tokens, pools, swaps, candles] = g.calls.map((c) => norm(c.query));
     expect(tokens).toContain(`Token(where: { id: { _gt: $after } }, order_by: { id: asc }, limit: $limit) { ${TOKEN_FIELDS} }`);
     expect(pools).toContain(`Pool(where: { id: { _gt: $after } }, order_by: { id: asc }, limit: $limit) { ${POOL_FIELDS} }`);
     expect(swaps).toContain(`Swap(where: { id: { _gt: $after, _lt: $before } }, order_by: { id: asc }, limit: $limit) { ${SWAP_FIELDS} }`);
     expect(candles).toContain(`Candle(where: { id: { _gt: $after } }, order_by: { id: asc }, limit: $limit) { ${CANDLE_FIELDS} }`);
-    expect(balances).toContain(`TokenBalance(where: { id: { _gt: $after, _lt: $before }, balance: { _gt: "0" } }, order_by: { id: asc }, limit: $limit) { ${BALANCE_FIELDS} }`);
     expect(g.calls[0].variables).toEqual({ after: "", limit: 1000 });
     expect(g.calls[2].variables).toEqual({ after: "0x1", before: "0x2", limit: 1000 });
     expect(g.calls[3].variables).toEqual({ after: "0x1", limit: 1000 });
-    expect(source.queries).toBe(5);
+    expect(source.queries).toBe(4);
   });
 
   it("does not retry when retry is false", async () => {
