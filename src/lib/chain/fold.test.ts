@@ -421,18 +421,22 @@ describe("ModifyLiquidity", () => {
     expect(added0).toBe(1000000000000n);
     expect(added1).toBe(1000000000000000000000000n);
 
-    foldEvents([modifyLiquidityEvent(id, 10n ** 18n, 101)], state);
+    const addResult = foldEvents([modifyLiquidityEvent(id, 10n ** 18n, 101)], state);
     const afterAdd = state.pools.get(id)!;
     expect(afterAdd.tvlToken).toBe(added1); // token is currency1
     expect(afterAdd.tvlQuote).toBe(added0); // quote (USDG) is currency0
+    // NIT-C (round-3 re-review): an ordinary, successful ModifyLiquidity must leave
+    // skippedLiquidity at 0 — a mutation that increments it unconditionally must fail here.
+    expect(addResult.skippedLiquidity).toBe(0);
 
     const { amount0: removed0, amount1: removed1 } = amountsForLiquidityDelta(price, -887272, 887272, -(10n ** 18n));
-    foldEvents([modifyLiquidityEvent(id, -(10n ** 18n), 102)], state);
+    const removeResult = foldEvents([modifyLiquidityEvent(id, -(10n ** 18n), 102)], state);
     const afterRemove = state.pools.get(id)!;
     // Adds round up and removes round down, so a few wei of dust remain instead of exactly 0.
     expect(afterRemove.tvlToken).toBe(added1 + removed1);
     expect(afterRemove.tvlQuote).toBe(added0 + removed0);
     expect(afterRemove.tvlToken).toBe(1n);
+    expect(removeResult.skippedLiquidity).toBe(0);
     expect(afterRemove.tvlQuote).toBe(1n);
   });
 
@@ -753,7 +757,22 @@ describe("skippedLiquidity: a legacy pool with an underivable price never wedges
   it("still throws for a reason unrelated to the price derivation (a missing token is a different kind of problem)", () => {
     const state = seededState({ sqrtPriceX96: null, priceQuote: 3.40256786836388e50 });
     state.tokens.delete(AI); // break the pool -> token invariant on purpose
-    expect(() => foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state)).toThrow();
+    // NIT-D (round-3 re-review): a bare .toThrow() passes for ANY throw, not specifically this
+    // one — match the message so a future regression that throws for some other reason (or
+    // stops throwing and gets miscounted as skippedLiquidity instead) cannot hide behind it.
+    expect(() => foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state)).toThrow(/missing token/);
+  });
+
+  // Round-3 re-review, MINOR-A: the catch in tryDeriveLiquidityAmounts must apply ONLY when the
+  // sqrt is DERIVED (pool.sqrtPriceX96 === null). A pool with a REAL, chain-captured sqrt is
+  // always in range, so the only way amountsForLiquidityDelta can throw for it is a bad tick
+  // range — and ticks come straight from the decoded log, so that throw means a decoder or
+  // sign-extension bug, not stale legacy data. It must stay loud, not get silently counted as
+  // skippedLiquidity (which would let TVL quietly stop moving with no signal why).
+  it("still throws for a pool with a REAL stored sqrtPriceX96 and an inverted tick range (a decoder bug, not stale data) — not counted as skipped", () => {
+    const state = seededState({ sqrtPriceX96: Q96, tvlToken: 0n, tvlQuote: 0n }); // real sqrt, not derived
+    const invertedTicks = modifyLiquidityEvent(POOL, 10n ** 18n, 1, { tickLower: 100, tickUpper: -100 });
+    expect(() => foldEvents([invertedTicks], state)).toThrow(/tickLower must be less than tickUpper/);
   });
 });
 

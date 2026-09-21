@@ -49,6 +49,14 @@
  *     `tryDeriveLiquidityAmounts` catches that (and only that) and the event is skipped and
  *     counted in `FoldResult.skippedLiquidity`, instead of aborting the whole batch's
  *     transaction and wedging the cron on that block permanently.
+ *
+ * Fix round 3, on top of round 2, from the re-review at
+ * .superpowers/sdd/2026-09-21-chain-reader/task-3-rereview.md:
+ *   - MINOR-A: `tryDeriveLiquidityAmounts`'s catch narrowed to ONLY the derived-sqrt path
+ *     (`pool.sqrtPriceX96 === null`). A pool with a real, chain-captured sqrt calls
+ *     `amountsForLiquidityDelta` directly, outside any try/catch, so a throw there (a bad tick
+ *     range — a decoder bug, not stale legacy data) still propagates instead of being silently
+ *     counted as `skippedLiquidity`. See the function's own doc comment for the full reasoning.
  */
 
 import type {
@@ -512,19 +520,30 @@ function handleSwap(event: SwapEvent, state: FoldState, ctx: FoldContext): void 
 /**
  * BLOCKER (round-2 review, MINOR-5), measured against production, not theoretical: every one
  * of the 238,391 pools copied from the old indexer has a null `sqrtPriceX96`, so every
- * ModifyLiquidity on one takes the `sqrtPriceX96FromPrice(pool.priceQuote, …)` fallback below.
- * 2,349 of those copied pools carry a garbage `priceQuote` around 3.40256786836388e50 and 532
- * carry one below 1e-30 — neither is non-finite or non-positive, so `sqrtPriceX96FromPrice`
- * itself does not reject them, but the sqrt it derives is then out of `amountsForLiquidityDelta`'s
- * valid range (a 55-digit value for the first case, one below `MIN_SQRT_RATIO` for the second),
- * and it throws. One of the over-large-price pools has 101,092 swaps — actively traded, not a
- * dead row. Since `applyFold` writes rows and the cursor in one transaction, an uncaught throw
- * here would roll back the whole batch and wedge the cron and the catch-up on that block
- * permanently. So: catch it, skip just this one event, and count it in `skippedLiquidity` —
- * never let one bad legacy pool's price take down the pipeline. Any throw that is NOT from
- * these two calls (a missing token, for instance) is a different kind of problem and must still
- * propagate — this function's `try` is scoped to exactly the derivation and the amount
- * computation, nothing else.
+ * ModifyLiquidity on one takes the `sqrtPriceX96FromPrice(pool.priceQuote, …)` DERIVED path
+ * below. 2,349 of those copied pools carry a garbage `priceQuote` around 3.40256786836388e50
+ * and 532 carry one below 1e-30 — neither is non-finite or non-positive, so
+ * `sqrtPriceX96FromPrice` itself does not reject them, but the sqrt it derives is then out of
+ * `amountsForLiquidityDelta`'s valid range (a 55-digit value for the first case, one below
+ * `MIN_SQRT_RATIO` for a token paired with a 6-decimals quote in the second — see the test for
+ * why the quote's decimals matter there), and it throws. One of the over-large-price pools has
+ * 101,092 swaps — actively traded, not a dead row. Since `applyFold` writes rows and the cursor
+ * in one transaction, an uncaught throw here would roll back the whole batch and wedge the cron
+ * and the catch-up on that block permanently. So: catch it, skip just this one event, and count
+ * it in `skippedLiquidity` — never let one bad legacy pool's price take down the pipeline.
+ *
+ * NARROWED (round-3 re-review, MINOR-A): the catch below applies ONLY on the derived path, i.e.
+ * only when `pool.sqrtPriceX96` is null. A pool with a REAL, chain-captured `sqrtPriceX96` (set
+ * unconditionally by `handleInitialize` or `handleSwap` from an actual on-chain event) is
+ * always inside `[MIN_SQRT_RATIO, MAX_SQRT_RATIO)` by construction — the only way
+ * `amountsForLiquidityDelta` can then throw for it is `tickLower`/`tickUpper` being
+ * non-integer, out of range, or inverted, and ticks come straight from the decoded log,
+ * unmodified. A throw there means the ABI decode or the int24 sign-extension is wrong, not that
+ * the row is legacy data, and it must stay loud: silently swallowing it would let a broken
+ * decoder count every ModifyLiquidity as "skipped" while TVL quietly stopped moving, with
+ * nothing in the batch's result to say why. So a real `sqrtPriceX96` calls
+ * `amountsForLiquidityDelta` directly, outside any try/catch, and any throw propagates exactly
+ * as it would if this function did not exist.
  */
 function tryDeriveLiquidityAmounts(
   pool: PoolState,
@@ -532,10 +551,13 @@ function tryDeriveLiquidityAmounts(
   dec1: number,
   event: ModifyLiquidityEvent,
 ): { amount0: bigint; amount1: bigint } | null {
+  if (pool.sqrtPriceX96 !== null) {
+    return amountsForLiquidityDelta(pool.sqrtPriceX96, event.tickLower, event.tickUpper, event.liquidityDelta);
+  }
+  // Only the DERIVED path — a pool copied from the old indexer, sqrtPriceX96 never captured —
+  // can carry a garbage priceQuote with no real sqrt to fall back on instead.
   try {
-    // sqrtPriceX96 is null for pools copied from the old indexer before it was captured
-    // (see PoolState.sqrtPriceX96's doc comment): derive it from the stored price instead.
-    const sqrt = pool.sqrtPriceX96 ?? sqrtPriceX96FromPrice(pool.priceQuote, dec0, dec1, pool.tokenIsCurrency0);
+    const sqrt = sqrtPriceX96FromPrice(pool.priceQuote, dec0, dec1, pool.tokenIsCurrency0);
     return amountsForLiquidityDelta(sqrt, event.tickLower, event.tickUpper, event.liquidityDelta);
   } catch {
     return null;

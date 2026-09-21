@@ -170,8 +170,11 @@ export type FoldResult = {
    */
   ignoredPools: number;
   /**
-   * ModifyLiquidity events whose pool has no usable price to derive a sqrt from, so the
-   * liquidity change could not be applied.
+   * ModifyLiquidity events on a pool with no real, chain-captured sqrtPriceX96 (copied from the
+   * old indexer before it was captured) whose priceQuote could not be turned into a usable sqrt
+   * in range, so the liquidity change could not be applied. Never counts a pool with a real
+   * sqrtPriceX96: a throw there means the decoded tick range is wrong (a decoder bug), not that
+   * the price is stale, and it propagates instead of being counted here.
    */
   skippedLiquidity: number;
 };
