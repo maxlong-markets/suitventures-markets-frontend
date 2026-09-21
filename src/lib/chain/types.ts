@@ -1,0 +1,167 @@
+/**
+ * The chain reader's shared contract (spec: docs/superpowers/specs/2026-09-21-chain-reader-design.md).
+ *
+ * The reader replaces the hosted indexer: it reads the Uniswap v4 PoolManager's events straight from the
+ * chain, folds them with the indexer's own arithmetic, and writes market.* in one transaction with its
+ * block cursor. Every module under src/lib/chain/ meets at these types, so they are written first and the
+ * modules are built against them in parallel.
+ *
+ * Conventions: addresses, pool ids and tx hashes are lowercase hex strings; block timestamps are unix
+ * seconds; raw on-chain integers are bigint and never pass through `number`.
+ */
+
+/** What every decoded PoolManager log carries. `txFrom` is the transaction's sender, the wallet a trade is credited to. */
+export type ChainEventBase = {
+  block: number;
+  logIndex: number;
+  timestamp: number;
+  txHash: string;
+  txFrom: string | null;
+};
+
+export type InitializeEvent = ChainEventBase & {
+  kind: "initialize";
+  poolId: string;
+  currency0: string;
+  currency1: string;
+  fee: number;
+  tickSpacing: number;
+  hooks: string;
+  sqrtPriceX96: bigint;
+  tick: number;
+};
+
+export type SwapEvent = ChainEventBase & {
+  kind: "swap";
+  poolId: string;
+  /** The swapper's deltas, as emitted: negative means the swapper paid that currency into the pool. */
+  amount0: bigint;
+  amount1: bigint;
+  sqrtPriceX96: bigint;
+  liquidity: bigint;
+  tick: number;
+  /** Swap fee in pips (LP plus protocol), as emitted. */
+  fee: number;
+};
+
+export type ModifyLiquidityEvent = ChainEventBase & {
+  kind: "modifyLiquidity";
+  poolId: string;
+  tickLower: number;
+  tickUpper: number;
+  liquidityDelta: bigint;
+};
+
+export type ChainEvent = InitializeEvent | SwapEvent | ModifyLiquidityEvent;
+
+/** Where events come from. HyperSync is the first implementation; a plain-RPC one can follow behind the same interface. */
+export interface LogSource {
+  /** The newest block this source can serve right now. */
+  head(): Promise<number>;
+  /**
+   * The PoolManager's Initialize, Swap and ModifyLiquidity events in [fromBlock, toBlock], ascending by
+   * (block, logIndex). A source may cover fewer blocks than asked (responses are size-capped): `nextBlock`
+   * is the first block NOT covered, so the caller continues from it. `nextBlock > fromBlock` always, or
+   * the call throws: a fetch that makes no progress must never look like an empty range.
+   */
+  fetch(fromBlock: number, toBlock: number): Promise<{ events: ChainEvent[]; nextBlock: number }>;
+  /** Requests issued so far, for budgets and reports. */
+  readonly requests: number;
+}
+
+/** A pool as the fold sees it. Mirrors market.pools; `baselineAt` is market.pools.baseline_at. */
+export type PoolState = {
+  id: string;
+  tokenId: string;
+  quoteId: string;
+  tokenIsCurrency0: boolean;
+  hooks: string;
+  fee: number;
+  tickSpacing: number;
+  origin: string;
+  createdAt: number;
+  priceQuote: number;
+  /** Null for pools copied from the old indexer before it was captured; derive from priceQuote when needed. */
+  sqrtPriceX96: bigint | null;
+  tvlToken: bigint | null;
+  tvlQuote: bigint | null;
+  swapCount: number;
+  lastSwapAt: number | null;
+  volumeQuoteAllTime: number;
+  /**
+   * The running totals (tvl, swapCount, volumeQuoteAllTime) already include every event with
+   * timestamp <= baselineAt, because they were copied from the old indexer at that moment. The fold applies
+   * totals only for events after it. 0 for pools the reader created itself. Price, last trade time, trade
+   * rows and candles are never gated by it.
+   */
+  baselineAt: number;
+};
+
+/** A token as the fold sees it. Holder count and supply are deliberately absent: the fold never writes them. */
+export type TokenState = {
+  id: string;
+  address: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  poolCount: number;
+  origin: string;
+  primaryPoolId: string | null;
+  createdAt: number;
+  metadataLoaded: boolean;
+};
+
+export type QuoteState = { id: string; decimals: number; usdPrice: number | null };
+
+export type CandleInterval = "m1" | "m5" | "m15" | "h1" | "d1";
+
+export type CandleState = {
+  poolId: string;
+  interval: CandleInterval;
+  /** Bucket start, unix seconds. */
+  t: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volumeQuote: number;
+  volumeToken: number;
+  trades: number;
+};
+
+/** One trade row, shaped for market.swaps. `id` is `${txHash}-${logIndex}`. */
+export type TradeRow = {
+  id: string;
+  poolId: string;
+  tokenId: string;
+  timestamp: number;
+  side: "buy" | "sell";
+  amountToken: number;
+  amountQuote: number;
+  priceQuote: number;
+  wallet: string;
+  txHash: string;
+  logIndex: number;
+};
+
+/** Everything the fold needs to know before it sees a batch. Keys: pool id, token id, quote id, `${poolId}-${interval}-${t}`. */
+export type FoldState = {
+  pools: Map<string, PoolState>;
+  tokens: Map<string, TokenState>;
+  quotes: Map<string, QuoteState>;
+  candles: Map<string, CandleState>;
+  /** Every pool id of each token present in `tokens`, for primary-pool choice; includes pools not otherwise touched. */
+  poolsByToken: Map<string, string[]>;
+};
+
+/** What a batch changed: final states, not deltas, so writing them twice is harmless. */
+export type FoldResult = {
+  pools: PoolState[];
+  tokens: TokenState[];
+  candles: CandleState[];
+  trades: TradeRow[];
+  /** Token ids created in this batch whose symbol, name and decimals still have to be read from the chain. */
+  newTokens: string[];
+  /** Pool ids the batch referenced that the state did not hold and no Initialize in the batch created: untracked pools, ignored. */
+  ignoredPools: number;
+};
