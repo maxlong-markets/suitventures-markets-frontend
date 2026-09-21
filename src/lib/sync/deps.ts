@@ -21,7 +21,12 @@ export const SYNC_RETRY: RetryOpts = { attempts: 3 };
  * nightly's about 366 requests take three minutes at 120, inside its 280 s window, and the market invocation yields
  * while the nightly holds its lease (spec 5.1), so the two never add up against the endpoint's 250.
  */
-export const SOURCE_PER_MINUTE: Record<SyncJob, number> = { market: 200, nightly: 120 };
+/**
+ * `chain` is a placeholder so this literal still satisfies Record<SyncJob, number> now that SyncJob carries the
+ * chain reader's job: that job reads HyperSync, not Envio's GraphQL, so it never builds a source from this file
+ * and never spends this budget. Task 6 rewires deps.ts and removes the entry.
+ */
+export const SOURCE_PER_MINUTE: Record<SyncJob, number> = { market: 200, nightly: 120, chain: 0 };
 
 /** What a cron route runs against: the process Db (getDb throws DbUnavailableError without DATABASE_URL), the real source with the job's limiter, and — for "nightly" only — a real Quoter for its probe phase. */
 export function syncDeps(job: SyncJob): SyncDeps {
