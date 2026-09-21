@@ -84,3 +84,33 @@ export async function seedCursor(
   }
   return { from, to, rewound: to < from };
 }
+
+/** Every candle interval divides this evenly (m1 60, m5 300, m15 900, h1 3_600, d1 86_400): flooring to it is a bucket boundary for all five at once (fix round 2, task-7-report.md). */
+const DAY_SEC = 86_400;
+
+/** Floors `ts` to the start of its UTC day (`scripts/chain/catchup.mts`'s `--from-ts` alignment). */
+export function flooredToUtcMidnight(ts: number): number {
+  return Math.floor(ts / DAY_SEC) * DAY_SEC;
+}
+
+/**
+ * The earliest `--from-ts` `scripts/chain/catchup.mts` should ever be allowed to start from, floored
+ * to its own UTC midnight — or `null` when no pool carries one, which the caller must treat as
+ * "refuse to run," never as "no bound" (fix round 3, task-7-report.md).
+ *
+ * Filters to `baseline_at > 0` deliberately. `baseline_at` is `int not null default 0`
+ * (`supabase/migrations/20260921010000_chain_reader.sql`), and the chain reader itself creates every
+ * NEW pool with that default — `upsertPools`'s column set never mentions it
+ * (`src/lib/chain/store.ts`, pinned by `store.test.ts`'s "never writes baseline_at ... defaults it to
+ * 0 for a pool it creates"). Without this filter, the very first `Initialize` event the catch-up
+ * replays drops a `baseline_at = 0` row into `market.pools`, and from that moment `min(baseline_at)`
+ * over ALL pools is `0` forever: the bound silently decays from "not before 17 Sep" to "not negative"
+ * after exactly one cycle of the very first run — worse than no bound at all, since it still reads as
+ * protection. Filtering to real baselines only reads the one value that never moves: the snapshot
+ * copy's own `synced_at`, backfilled once by the `chain_reader` migration and never written again by
+ * anything in this build.
+ */
+export async function earliestRebuildableFromTs(db: Db): Promise<number | null> {
+  const [row] = await db.query<{ min: number | null }>("select min(baseline_at) filter (where baseline_at > 0) as min from market.pools");
+  return row?.min == null ? null : flooredToUtcMidnight(row.min);
+}

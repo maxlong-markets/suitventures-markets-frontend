@@ -32,7 +32,7 @@
  */
 import { createDb, type Db } from "@/lib/db/client";
 import { bucketStart, INTERVAL_SECONDS } from "@/lib/sync/ids";
-import { acquireLease, releaseLease } from "@/lib/sync/state";
+import { acquireLease, readState, releaseLease } from "@/lib/sync/state";
 
 type GapfillInterval = "h1" | "d1";
 const GAPFILL_INTERVALS: readonly GapfillInterval[] = ["h1", "d1"];
@@ -48,11 +48,17 @@ function fail(msg: string): never {
 /** market.sync_state job name; matches src/lib/chain/run.ts's, src/lib/chain/store.ts's, src/lib/chain/catchup.ts's and scripts/chain/catchup.mts's own copies of the same constant. */
 const CHAIN_JOB = "chain";
 
-// Short (review round 2, finding 6): this script is one bounded bulk insert per interval, not an
-// hours-long loop, so it never needs renewing — it just has to outlive the slowest realistic run.
-// Bounds how long a killed gap-fill can block the cron or a catch-up if the signal handler below
-// somehow does not catch it.
-const GAPFILL_LEASE_SEC = 600;
+// Review round 3: 600 s was too thin. The h1 pass is one statement over the whole trade window (up to
+// SWAP_RETENTION_SEC = 10 days, src/lib/sync/retention.ts — roughly 2.2M rows), doing a hash aggregate
+// plus two full sorts (the open/close `distinct on` CTEs) before an insert of up to ~24x the 60,704-row
+// d1 precedent against a 2.9M-row unique index; this store has been measured taking 31 s for a bare row
+// count once its burstable disk allowance ran out (docs/superpowers/plans/2026-09-16-supabase-market-store.md,
+// finding R3a), so minutes per statement on a degraded tier is realistic, not a worst case to dismiss.
+// 3_600 s (one hour) is 6x the old value and comfortably above even that pessimistic estimate for both
+// intervals combined, while staying far short of catchup.mts's 21_600 s (this script is one bounded
+// bulk operation per run, never a multi-hour loop, so it is never renewed — see the warning below
+// instead, printed if a run ever does outlast this).
+const GAPFILL_LEASE_SEC = 3_600;
 const SIGNAL_RELEASE_TIMEOUT_MS = 5_000; // matches catchup.mts's own MINOR 10 fix: never let a hung db hang Ctrl-C.
 
 type Args = { before: number; intervals: readonly GapfillInterval[] };
@@ -185,10 +191,21 @@ async function main(): Promise<void> {
   const owner = `gapfill-${process.pid}`;
   installSignalHandlers(db, owner);
 
+  // Review round 3: this project's Supabase sessions start with a two-minute statement_timeout
+  // (docs/superpowers/plans/2026-09-16-supabase-market-store.md), and createDb sets none, so the
+  // grouped insert below (a single statement per interval, easily minutes on this tier — see
+  // GAPFILL_LEASE_SEC's comment) would simply be killed partway through. Disabled for this whole
+  // session, matching src/lib/seed/seed.ts's own `set local statement_timeout = 0` for the same class
+  // of bulk statement — plain `set`, not `set local`, since this script's statements are not wrapped
+  // in a transaction and `set local` outside one is silently a no-op. Safe for the whole session: this
+  // connection (createDb's max: 1, so genuinely one dedicated session) does nothing else.
+  await db.exec("set statement_timeout = 0");
+
   try {
     // Review round 2, finding 6: take the same chain lease the cron and the catch-up take, so none of
     // the three can ever run at the same time as another.
-    const acquired = await acquireLease(db, CHAIN_JOB, owner, Math.floor(Date.now() / 1000), GAPFILL_LEASE_SEC);
+    const acquiredAtMs = Date.now();
+    const acquired = await acquireLease(db, CHAIN_JOB, owner, Math.floor(acquiredAtMs / 1000), GAPFILL_LEASE_SEC);
     if (!acquired) {
       throw new Error("the chain lease is held by the cron or a catch-up run; refusing to run concurrently with either. Try again once it is free.");
     }
@@ -217,6 +234,21 @@ async function main(): Promise<void> {
         );
       }
     } finally {
+      // Review round 3: the lease is never renewed (GAPFILL_LEASE_SEC's comment explains why not), so
+      // a run that takes longer than it was granted may have already lost exclusivity before this
+      // point — checked here rather than left to be discovered as unexplained corruption later.
+      const elapsedMs = Date.now() - acquiredAtMs;
+      if (elapsedMs > GAPFILL_LEASE_SEC * 1000) {
+        const current = await readState(db, CHAIN_JOB).catch(() => null);
+        const stillOwned = current?.leaseOwner === owner;
+        console.error(
+          `[chain:gapfill] WARNING: this run took ${Math.round(elapsedMs / 1000)}s, longer than the ${GAPFILL_LEASE_SEC}s lease it was granted. ` +
+            (stillOwned
+              ? "The lease row still names this run as the owner, but the TTL alone no longer guaranteed that for the whole run."
+              : "The lease row NO LONGER names this run as the owner — something else may have acquired it and be running concurrently right now.") +
+            " Verify nothing else (the cron, a catch-up) ran or is running concurrently before trusting these candles.",
+        );
+      }
       await releaseLease(db, CHAIN_JOB, owner);
     }
   } finally {

@@ -47,18 +47,39 @@
  * through before anything destructive happens: it is floored to the UTC midnight at or before it (a
  * bucket boundary for m1/m5/m15/h1/d1 all at once, so no straddling bucket survives the delete to be
  * folded onto a second time), refused if in the future, refused if earlier than the stored data can
- * rebuild (`min(baseline_at)`, unless --force-rewind), refused if the block search could not actually
- * find a matching block (findBlockAtOrAfter's "not found" answer and a legitimate one share a return
- * value), and refused if seeding the cursor would leave it at 0. The exact candle count about to be
- * deleted and the floored start block are both printed before the delete, not just under --dry-run.
+ * rebuild, refused if the block search could not actually find a matching block (findBlockAtOrAfter's
+ * "not found" answer and a legitimate one share a return value), and refused if seeding the cursor
+ * would leave it at 0. The exact candle count about to be deleted and the floored start block are both
+ * printed before the delete, not just under --dry-run.
+ *
+ * Review round 3 made the lower bound absolute and durable. It is `earliestRebuildableFromTs`
+ * (`src/lib/chain/catchup.ts`): the earliest `baseline_at` across `market.pools` that is greater than
+ * 0, floored to its own UTC midnight — filtered to `> 0` because `baseline_at` defaults to 0 and the
+ * chain reader itself creates every new pool with that default, so an unfiltered `min()` degrades to 0
+ * (an unbounded start!) the moment the very first `Initialize` event is replayed; filtering to real
+ * baselines reads the one value that never moves, the snapshot copy's own `synced_at`. If NO pool
+ * carries a real baseline, this refuses to run rather than fall back to an unbounded start.
+ *
+ * That bound is now absolute: NO flag on this command line can start earlier than it, --force-rewind
+ * included. --force-rewind keeps only its other two meanings — lowering an already-advanced stored
+ * cursor, and redoing the candle delete on a restart — and is still checked against the floor like any
+ * other run. A genuine full rebuild from the chain's start is a real, if rare, need: it is roughly a
+ * ten-hour replay (the chain's whole history, not the ~4.1M blocks since 17 Sep) that deletes daily
+ * candle history back to June, which the five-day trade window cannot rebuild — only a full replay can
+ * regenerate it, the gap-fill cannot, since it only ever reads from market.swaps. That operation is
+ * deliberately not reachable from the command line at all: doing it requires editing this script (temporarily
+ * changing or removing the bound check below) so it can never be one mistyped date away from a routine
+ * re-run.
  *
  * Run: npm run chain:catchup -- --from-ts <unix> [--force-rewind] [--max-span <n>] [--max-requests <n>] [--dry-run]
  *      npm run chain:catchup -- --release-lease [--yes]
  *   --from-ts <unix>     Required (unless --release-lease). Floored to the UTC midnight at or before
  *                        it; replay starts at the first block at or after that floored timestamp.
+ *                        Never accepted earlier than the earliest real pool baseline — see above; no
+ *                        flag on this command line lifts that.
  *   --force-rewind       Also seed the cursor backwards if it is already past the found start block,
- *                        redo the candle delete even on a restart, and allow a --from-ts earlier than
- *                        the stored data can rebuild. Only for a deliberate re-run.
+ *                        and redo the candle delete even on a restart. Only for a deliberate re-run —
+ *                        does NOT affect the lower bound above.
  *   --max-span <n>       Widest block span asked per HyperSync request. Default 20_000 (comfortably
  *                        above the ~2,000-block response cap this measures against in practice, so
  *                        the source's own size cap decides the real per-request span, not this).
@@ -71,6 +92,8 @@
  *                        catch-up would hand the job to the very next cron tick otherwise). Ignores
  *                        every other flag.
  *   --yes                Only meaningful with --release-lease (above); required to clear a live lease.
+ *                        Refused if given without --release-lease, since it would otherwise silently
+ *                        do nothing and read like it confirmed something.
  *
  * Takes the same `chain` lease the cron takes (src/lib/sync/state.ts's acquireLease), so the two can
  * never run at once: if the lease is held, this exits without doing any destructive work rather than
@@ -82,7 +105,7 @@
  * Do NOT run this against the real database — it is for the integrator to run at cutover.
  */
 import type { PublicClient } from "viem";
-import { findBlockAtOrAfter, seedCursor } from "@/lib/chain/catchup";
+import { earliestRebuildableFromTs, findBlockAtOrAfter, flooredToUtcMidnight, seedCursor } from "@/lib/chain/catchup";
 import { runChainSync, type ChainRunOpts } from "@/lib/chain/run";
 import { readChainCursor } from "@/lib/chain/store";
 import type { Db } from "@/lib/db/client";
@@ -100,9 +123,6 @@ function fail(msg: string): never {
 
 /** market.sync_state job name; matches src/lib/chain/run.ts's, src/lib/chain/store.ts's and src/lib/chain/catchup.ts's own copies of the same constant. */
 const CHAIN_JOB = "chain";
-
-/** Every candle interval divides this evenly (m1 60, m5 300, m15 900, h1 3_600, d1 86_400): a UTC midnight is a bucket boundary for all five at once (review round 2, finding 1+2). */
-const DAY_SEC = 86_400;
 
 // windowSec: effectively unbounded — stopWhenCaughtUp and --max-requests are the real stop
 // conditions for the fetch/fold loop, not the window. Kept far below Number.MAX_SAFE_INTEGER so
@@ -176,6 +196,9 @@ function parseArgs(argv: readonly string[]): Args {
     }
   }
   if (releaseLeaseFlag) return { releaseLease: true, yes };
+  // Review round 3, small fix: --yes has no effect at all outside --release-lease — silently dropping
+  // it reads like it confirmed something (e.g. "--from-ts X --yes" looks like a green light).
+  if (yes) fail("--yes is only meaningful together with --release-lease");
   if (fromTs === undefined) fail("--from-ts <unix> is required (or pass --release-lease on its own)");
   return { releaseLease: false, fromTs, forceRewind, maxSpan, maxRequests, dryRun };
 }
@@ -221,28 +244,17 @@ async function countStaleCandles(db: Db, fromTs: number): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-/** Floors ts to the start of its UTC day. DAY_SEC divides every candle interval evenly, so this is always a bucket boundary for all five. */
-function flooredToUtcMidnight(ts: number): number {
-  return Math.floor(ts / DAY_SEC) * DAY_SEC;
-}
-
-/**
- * The earliest --from-ts the stored data can actually rebuild from, floored to its own UTC midnight —
- * or null when market.pools is empty (nothing to bound against). Review round 2, finding 1: bounds how
- * far back a mistyped --from-ts can reach, since candle history older than this cannot be rebuilt by
- * either the replay or the gap-fill (the trade window is a handful of days; daily candles go back
- * months).
- */
-async function earliestRebuildableFromTs(db: Db): Promise<number | null> {
-  const [row] = await db.query<{ min: number | null }>("select min(baseline_at) as min from market.pools");
-  return row?.min == null ? null : flooredToUtcMidnight(row.min);
-}
-
 /**
  * --release-lease: prints the current holder and expiry and changes nothing when the lease is live
  * and --yes was not given (review round 2, finding 5 — the previous version force-cleared
  * unconditionally, which would hand a healthy catch-up's lease to the very next cron tick). An
  * expired or already-empty lease is always cleared, --yes or not: there is nothing live to protect.
+ *
+ * Review round 3, small fix: on the non---yes path the clearing UPDATE is now conditioned on
+ * `lease_until < now` at write time, not unconditional — closing the (millisecond-wide, but real)
+ * TOCTOU between the `readState` above and the write, where a lease acquired in that gap would
+ * otherwise have been cleared anyway despite --yes never being given. --yes still clears
+ * unconditionally, live or not: that IS its purpose.
  */
 async function releaseLeaseCommand(db: Db, yes: boolean): Promise<void> {
   const before = await readState(db, CHAIN_JOB);
@@ -259,7 +271,19 @@ async function releaseLeaseCommand(db: Db, yes: boolean): Promise<void> {
     return;
   }
 
-  await db.query("update market.sync_state set lease_until = 0, lease_owner = null where job = $1", [CHAIN_JOB]);
+  const rows = yes
+    ? await db.query("update market.sync_state set lease_until = 0, lease_owner = null where job = $1 returning job", [CHAIN_JOB])
+    : await db.query(
+        "update market.sync_state set lease_until = 0, lease_owner = null where job = $1 and lease_until < $2::int returning job",
+        [CHAIN_JOB, nowSec()],
+      );
+
+  if (rows.length === 0) {
+    console.log(
+      "[chain:catchup] --release-lease: the lease became live between checking it and clearing it — nothing was changed. Re-run to see its new state.",
+    );
+    return;
+  }
   if (!before.leaseOwner && before.leaseUntil === 0) {
     console.log("[chain:catchup] --release-lease: the chain lease was already clear; nothing to do.");
     return;
@@ -324,14 +348,24 @@ async function main(): Promise<void> {
       console.log(`[chain:catchup] --from-ts ${args.fromTs} (${isoUtc(args.fromTs)}) floored to the UTC midnight at or before it: ${flooredFromTs} (${isoUtc(flooredFromTs)})`);
     }
 
-    // Review round 2, finding 1: refuse a start earlier than the stored data can rebuild, unless the
-    // operator explicitly overrides with --force-rewind.
+    // Review round 3: the lower bound is now absolute — no flag on this command line bypasses it (see
+    // the header comment). earliestRebuildableFromTs filters to baseline_at > 0 so the bound cannot
+    // decay to 0 once the catch-up's own first cycle creates a pool (which defaults to baseline_at 0).
+    // A null result (no pool carries a real baseline at all) refuses too, rather than falling back to
+    // an unbounded start.
     const earliestFromTs = await earliestRebuildableFromTs(db);
-    if (earliestFromTs !== null && flooredFromTs < earliestFromTs && !args.forceRewind) {
+    if (earliestFromTs === null) {
+      fail(
+        "no pool in market.pools carries a real baseline_at (every value is 0, or the table is empty) — there is nothing to bound " +
+          "--from-ts against. Refusing to run without a lower bound rather than allow an unbounded start.",
+      );
+    }
+    if (flooredFromTs < earliestFromTs) {
       fail(
         `--from-ts floors to ${isoUtc(flooredFromTs)} (${flooredFromTs}), which is earlier than the earliest data this build can ` +
-          `rebuild, ${isoUtc(earliestFromTs)} (${earliestFromTs}, floored from the earliest pool's baseline_at). Candle history before ` +
-          "that cannot be rebuilt from trades or replayed. Pass --force-rewind if you are certain you want to proceed anyway.",
+          `rebuild, ${isoUtc(earliestFromTs)} (${earliestFromTs}, floored from the earliest pool's real baseline_at). Candle history ` +
+          "before that cannot be rebuilt from trades or replayed, and no flag on this command line lifts this bound — see the header " +
+          "comment for what a genuine full rebuild requires.",
       );
     }
 
@@ -552,6 +586,13 @@ async function main(): Promise<void> {
 
     if (report.error) {
       console.error(`[chain:catchup] finished with an error: ${report.error}`);
+      process.exitCode = 1;
+    } else if (leaseLost) {
+      // Review round 3, small fix: leaseLost is only thrown at the top of the NEXT onCycle (above), so
+      // if the loop instead ended for an unrelated reason first — caught up, --max-requests, the
+      // window — that throw never happens, report.error stays null, and this would otherwise print
+      // "done"/"caught up" and exit 0 despite a renewal having failed or errored somewhere in the run.
+      console.error(`[chain:catchup] a lease renewal failed or errored during this run, but the loop ended before that could be recorded: ${leaseLost}`);
       process.exitCode = 1;
     }
   } finally {
