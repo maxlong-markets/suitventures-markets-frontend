@@ -39,11 +39,11 @@ query), which the store lists anyway. Anything else is a defect.
 ## Chain reader scripts
 
 Two one-off scripts around the chain reader (`src/lib/chain`, Task 6):
-`scripts/chain/gapfill-candles.mts` and `scripts/chain/catchup.mts`. Run the gap-fill first, over the trades
-already in `market.swaps`, then the catch-up.
+`scripts/chain/gapfill-candles.mts` and `scripts/chain/catchup.mts`.
 
-Run the gap-fill first, then the catch-up, and give the gap-fill a `--before` at or below the
-timestamp the catch-up will start from. A bucket the gap-fill writes above that line is one the
+Run the gap-fill first, over the trades already in `market.swaps`, then the catch-up, and give the
+gap-fill a `--before` at or below the timestamp the catch-up will start from. A bucket the gap-fill
+writes above that line is one the
 replay later adds its trades onto a second time, inflating that candle's volume and trade count.
 Both take the same `chain` lease the cron takes, so neither can run beside the other or beside the
 cron. Run both while `CRON_SECRET` is unset, so nothing else is writing.
