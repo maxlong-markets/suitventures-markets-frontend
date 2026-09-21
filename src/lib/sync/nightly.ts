@@ -2,7 +2,7 @@ import type { Db } from "@/lib/db/client";
 import type { Quoter } from "@/lib/quote/quoter";
 import type { CycleOpts } from "./market";
 import { probePools } from "./probe";
-import { pruneSwaps } from "./retention";
+import { pruneCandles, pruneSwaps } from "./retention";
 import { readState, saveCursors } from "./state";
 import { recomputeListedPools } from "./writers";
 
@@ -11,7 +11,9 @@ export type NightlyResult = {
   /** probed counts every candidate the probe phase attempted, skips included; routable/unroutable/skipped (I4) split it three ways. */
   probed: number; routable: number; unroutable: number; skipped: number;
   /** Swaps the prune phase deleted for being outside the retention window (retention.ts); every run, quoter or not. */
-  pruned: number; queries: number;
+  pruned: number;
+  /** Candles the prune phase deleted for being outside their interval's own retention window (retention.ts's CANDLE_RETENTION_SEC), run right after pruned; every run, quoter or not. */
+  prunedCandles: number; queries: number;
 };
 
 const PHASES = ["listed", "probe", "prune"] as const;
@@ -20,9 +22,11 @@ type Phase = (typeof PHASES)[number];
 /**
  * Phases in order, persisted in sync_state.nightly.phase: "listed" (recomputeListedPools "all"), "probe"
  * (probePools over pools active in the last PROBE_ACTIVE_SEC, cursor_text = its lastId, saved after every
- * page it processes rather than once at the end — I3), "prune" (pruneSwaps over market.swaps, retention.ts
- * — no request of its own, so it runs whether or not opts.quoter was supplied), then phase "" and
- * done = true. Resumes from the stored phase and cursor; stops early (done = false) at the deadline.
+ * page it processes rather than once at the end — I3), "prune" (pruneSwaps over market.swaps, then
+ * pruneCandles over market.candles, both retention.ts — neither has a request of its own, so both run
+ * whether or not opts.quoter was supplied, sharing one deadline; the phase is done only once both report
+ * done), then phase "" and done = true. Resumes from the stored phase and cursor; stops early (done = false)
+ * at the deadline.
  *
  * Before Task 6 (`.superpowers/sdd/2026-09-21-chain-reader/task-6-brief.md`) this job opened with two more
  * phases, "tokens" and "pools", that re-copied market.tokens/market.pools from Envio's GraphQL API. Envio was
@@ -42,7 +46,7 @@ type Phase = (typeof PHASES)[number];
  */
 export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }): Promise<NightlyResult> {
   const state = await readState(db, "nightly");
-  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, queries: 0 };
+  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, queries: 0 };
   const finish = (done: boolean, phase: string) => {
     r.done = done;
     r.phase = phase;
@@ -84,11 +88,14 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     await saveCursors(db, "nightly", { phase, cursorText: "" });
   }
   if (phase === "prune") {
-    // No request and no cursor of its own (retention.ts) — a deadline stop just leaves rows for the next
-    // run's `ts < retentionCutoff(now)` scan to find again.
-    const prune = await pruneSwaps(db, { now: opts.now, deadlineMs: opts.deadlineMs });
-    r.pruned = prune.deleted;
-    if (!prune.done) return finish(false, "prune");
+    // Neither has a request or a cursor of its own (retention.ts) — a deadline stop just leaves rows for the
+    // next run's `ts < retentionCutoff(now)` / `t < candleCutoff(interval, now)` scans to find again. Candles
+    // run right after swaps, sharing the same deadline; the phase is done only once both report done.
+    const swaps = await pruneSwaps(db, { now: opts.now, deadlineMs: opts.deadlineMs });
+    r.pruned = swaps.deleted;
+    const candles = await pruneCandles(db, { now: opts.now, deadlineMs: opts.deadlineMs });
+    r.prunedCandles = candles.deleted;
+    if (!swaps.done || !candles.done) return finish(false, "prune");
   }
   await saveCursors(db, "nightly", { phase: "", cursorText: "" });
   return finish(true, "");

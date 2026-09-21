@@ -36,6 +36,17 @@ Expected differences: tokens that traded after the last sync cycle (a field diff
 either side), and `missing on Envio` lines for tokens beyond M1's recovery window (its 1000-candidate, 7-day
 query), which the store lists anyway. Anything else is a defect.
 
+## Chain reader scripts
+
+Two one-off scripts around the chain reader (`src/lib/chain`, Task 6):
+`scripts/chain/gapfill-candles.mts` and `scripts/chain/catchup.mts`. Run the gap-fill first, over the trades
+already in `market.swaps`, then the catch-up.
+
+| Command | What it does |
+|---|---|
+| `npm run chain:gapfill` | Gap-fills candles from the trades already stored in `market.swaps`. |
+| `npm run chain:catchup` | Runs the chain reader through to the chain's current head in one pass, rather than the one-minute cron's rolling window. |
+
 ## Fork scripts (M2 trading)
 
 Three scripts prove the whole trading path on a local anvil fork of Robinhood Chain, without

@@ -39,24 +39,29 @@ Everything the UI renders comes through `MarketsDataSource`
 ### The store
 
 Live market data lives in a Postgres schema `market` on a Supabase project the
-app owns (`supabase/migrations/`), mirrored from the Envio indexer. The route
-handlers under `src/app/api` read that store; Envio is the ingest engine and is
-queried only by the sync job, the holders read-through refresh and the health
-probe.
+app owns (`supabase/migrations/`). The one-minute cron reads the PoolManager's
+`Initialize`, `Swap` and `ModifyLiquidity` events through HyperSync, folds them
+with the indexer's own arithmetic, and writes rows and a block cursor in one
+transaction; ERC-20 `Transfer` is deliberately not indexed, so total supply
+comes from the token contract and the holder count from the stored baseline
+moved by trades. The route handlers under `src/app/api` read that store.
 
-- **Sync** (`src/lib/sync`): `GET /api/internal/sync` runs every minute on
-  Vercel cron (`vercel.json`) and pulls what moved since its cursor — quotes,
-  the pools that traded, their swaps and candles, their tokens — in cycles about
-  30 s apart; `GET /api/internal/sync/nightly` re-pulls every token and pool at
-  03:00 UTC. Both require `Authorization: Bearer <CRON_SECRET>`, take a lease in
+- **Sync** (`src/lib/chain`, `src/lib/sync`): `GET /api/internal/sync` runs
+  every minute on Vercel cron (`vercel.json`) and is the chain reader
+  (`src/lib/chain/run.ts`) described above; `GET /api/internal/sync/nightly`
+  (`src/lib/sync/nightly.ts`) runs at 03:00 UTC, recomputing every listed pool,
+  probing pool routability, and pruning swaps and candles past their retention
+  windows. Both require `Authorization: Bearer <CRON_SECRET>`, take a lease in
   `market.sync_state` so invocations never overlap, and record their last run,
-  last success and last error there. Every write is an upsert, so re-processing
-  the overlap changes nothing.
+  last success and last error there. The chain job's lease matches its 300 s
+  `maxDuration` exactly: re-folding an overlapping block range would double-count
+  candle volume and pool totals, unlike the nightly phases' plain upserts.
 - **Backend switch** (`src/lib/market`): route handlers call `getBackend()`,
-  which is the store implementation when `DATABASE_URL` is set and the M1 Envio
-  implementation otherwise, or whenever `MARKET_DATA_BACKEND=envio` (the
-  rollback path). Both produce the same JSON, field for field: `shapePairs()`
-  in `src/lib/envio/shape.ts` is the reference and `npm run db:parity` checks it.
+  which is always the store implementation now — Envio was decommissioned 21
+  Sep 2026 (Task 6) and `MARKET_DATA_BACKEND` is no longer read anywhere, so
+  setting it changes nothing and there is no rollback path left. `shapePairs()`
+  in `src/lib/envio/shape.ts` remains the parity reference the laptop-only
+  `npm run db:parity` (`scripts/db/parity.mts`) checks the store against.
 - **Routes**: `/api/pairs`, `/api/quotes` and
   `/api/tokens/[address]/{candles,trades,holders}` keep their contract and cache
   headers. `GET /api/tokens/[address]` is new: one `TokenPair` (or 404) for a
@@ -75,10 +80,10 @@ Live mode needs these variables; all but the first are server-only:
 | `NEXT_PUBLIC_DATA_SOURCE` | `envio` |
 | `DATABASE_URL` | Supabase pooler, transaction mode, port 6543 |
 | `CRON_SECRET` | 32 random bytes; Vercel sends it as a Bearer token to the cron routes |
-| `MARKET_DATA_BACKEND` | unset (the store) or `envio` to roll back to the M1 path |
+| `HYPERSYNC_API_TOKEN` | the chain reader's HyperSync token, from Envio's HyperSync dashboard (`ENVIO_API_TOKEN` is a fallback) |
+| `HYPERSYNC_URL` | optional; defaults to `https://4663.hypersync.xyz` |
+| `CHAIN_RPC_URL` | optional; RPC for token metadata and Chainlink prices, defaults to the chain's public RPC |
 | `SYNC_INTERVAL_SEC` | optional; seconds between sync cycles inside one invocation, default 30 |
-| `ENVIO_GRAPHQL_URL` | the indexer's GraphQL endpoint |
-| `ENVIO_GRAPHQL_KEY` | the endpoint API key from Envio Cloud's Security tab (not the HyperSync token) |
 
 Preview deployments get no database variable and stay on the mock source. The live source
 prices a trade through `GET /api/tokens/[address]/quote`, which simulates the V4 Quoter and

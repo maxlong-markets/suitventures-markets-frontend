@@ -1,11 +1,13 @@
 import type { Db } from "@/lib/db/client";
+import { INTERVALS } from "./ids";
 
 /**
- * How long a trade stays in market.swaps (Kobe, 18 Sep 2026: the chain produces ~1M trades a day, and keeping
- * every one forever grows the store ~15 GB a month). Candles keep their own, much longer, per-interval window
- * (CANDLE_RETENTION_SEC below), not forever; only the raw swap row is pruned here, by nightly.ts's "prune" phase.
+ * How long a trade stays in market.swaps (Kobe, 21 Sep 2026: nothing on the site reads a trade older than 24
+ * hours except the newest-fifty list on a token page, and five days keeps that list full even on a quiet
+ * token). Candles keep their own, much longer, per-interval window (CANDLE_RETENTION_SEC below); only the raw
+ * swap row is pruned here, by nightly.ts's "prune" phase.
  */
-export const SWAP_RETENTION_SEC = 10 * 86_400;
+export const SWAP_RETENTION_SEC = 5 * 86_400;
 
 /** The oldest ts a swap may still hold at `now`; rows with ts below this are due for pruning. */
 export function retentionCutoff(now: number): number {
@@ -16,7 +18,8 @@ export function retentionCutoff(now: number): number {
  * How long each candle interval is kept. The read path never returns more than CANDLES_LIMIT (300,
  * src/lib/market/dbBackend.ts) candles for one pool and interval, so 300 buckets is the most the screen can
  * ever show: 5 h of m1, 25 h of m5, 75 h of m15, 12.5 d of h1, 300 d of d1. Each window below covers that with
- * margin. Nothing here prunes candles yet; that ships with the chain-events reader.
+ * margin. `pruneCandles` below deletes rows past these windows; nightly.ts's "prune" phase runs it right
+ * after `pruneSwaps`.
  */
 export const CANDLE_RETENTION_SEC = { m1: 86_400, m5: 2 * 86_400, m15: 4 * 86_400, h1: 14 * 86_400, d1: 300 * 86_400 } as const;
 
@@ -56,4 +59,37 @@ export async function pruneSwaps(db: Db, opts: { now: number; deadlineMs: number
     deleted += rows.length;
     if (rows.length === 0) return { deleted, done: true };
   }
+}
+
+/**
+ * One interval's one batch of pruneCandles's delete, the same ctid-batch shape as PRUNE_SQL above and for the
+ * same reason: no ORDER BY, and `returning pool_id` is the only way to learn the row count through the Db
+ * interface (pool_id need not be unique across the returned rows; only the count is used). `$1` is the
+ * interval, `$2` its candleCutoff, `$3` the batch size.
+ */
+const PRUNE_CANDLES_SQL = `
+  delete from market.candles
+  where ctid = any(array(select ctid from market.candles where interval = $1 and t < $2::int limit $3::int))
+  returning pool_id`;
+
+/**
+ * Deletes market.candles rows past each interval's own CANDLE_RETENTION_SEC window (candleCutoff), opts.batch
+ * (default 50000) at a time, one interval fully drained (INTERVALS order, ids.ts) before the next starts.
+ * Stops early (done false) at opts.deadlineMs, same as pruneSwaps; carries no cursor of its own either — an
+ * interval only partly drained, or not yet reached, is simply found again by the next nightly's own
+ * `t < candleCutoff(interval, now)` scan. Called from nightly.ts's "prune" phase, right after pruneSwaps.
+ */
+export async function pruneCandles(db: Db, opts: { now: number; deadlineMs: number; batch?: number }): Promise<{ deleted: number; done: boolean }> {
+  const batch = opts.batch ?? DEFAULT_BATCH;
+  let deleted = 0;
+  for (const interval of INTERVALS) {
+    const cutoff = candleCutoff(interval, opts.now);
+    for (;;) {
+      if (Date.now() >= opts.deadlineMs) return { deleted, done: false };
+      const rows = await db.query<{ pool_id: string }>(PRUNE_CANDLES_SQL, [interval, cutoff, batch]);
+      deleted += rows.length;
+      if (rows.length === 0) break;
+    }
+  }
+  return { deleted, done: true };
 }
