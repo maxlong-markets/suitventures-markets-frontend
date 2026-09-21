@@ -169,4 +169,9 @@ export type FoldResult = {
    * history, which is a different (and unremarkable) condition.
    */
   ignoredPools: number;
+  /**
+   * ModifyLiquidity events whose pool has no usable price to derive a sqrt from, so the
+   * liquidity change could not be applied.
+   */
+  skippedLiquidity: number;
 };

@@ -575,9 +575,9 @@ describe("newTokenCandidates", () => {
     expect(candidates).toEqual([]);
   });
 
-  it("never returns a token already in state", () => {
+  it("never returns a token already in state with metadata loaded", () => {
     const state = emptyState();
-    state.tokens.set(AI, tokenFixture());
+    state.tokens.set(AI, tokenFixture()); // metadataLoaded: true by default
     expect(newTokenCandidates([initEvent()], state)).toEqual([]);
   });
 
@@ -660,5 +660,109 @@ describe("foldEvents with pre-supplied token metadata (opts.tokenMetadata)", () 
     const tokenMetadata = new Map([[AI, { symbol: "AI", name: "AI Token", decimals: 6 }]]);
     const result = foldEvents([initEvent()], state, { tokenMetadata });
     expect(result.newTokens).toEqual([AI]);
+  });
+});
+
+// Round-2 review, MAJOR-1: the reference re-applies metadata to an EXISTING token on every
+// Initialize, and retries hourly from Swap. That repair path had no equivalent after Fix
+// round 1 — metadata was only ever applied when a token was first created — so a token whose
+// first read failed was pinned at 18 decimals and `metadataLoaded: false` forever, with every
+// later trade, candle and the pool's own priceQuote silently wrong. These tests exercise the
+// fix: newTokenCandidates also surfaces an already-known, still-unloaded token whenever this
+// batch touches its pool (via ANY event kind, not only a second Initialize), and foldEvents
+// applies a supplied entry for it before that same event finishes pricing anything.
+describe("metadata repair for an already-known token (MAJOR-1)", () => {
+  it("newTokenCandidates returns an already-known token's id when this batch's Swap touches its pool", () => {
+    const state = seededState({}, { metadataLoaded: false, decimals: 18 });
+    const events = [swapEvent(2_000_000n, -(10n ** 18n), 2n * Q96, 1)];
+    expect(newTokenCandidates(events, state)).toEqual([AI]);
+  });
+
+  it("a swap in the same batch with supplied metadata for an already-known token produces amounts at the supplied decimals", () => {
+    const state = seededState({}, { metadataLoaded: false, decimals: 18, symbol: AI.slice(0, 6), name: AI });
+    const events = [swapEvent(2_000_000n, -(10n ** 18n), 2n * Q96, 1)]; // 2_000_000n raw: 2 at 6 decimals, 2e-12 at 18
+    const tokenMetadata = new Map([[AI, { symbol: "AI", name: "AI Token", decimals: 6 }]]);
+
+    const result = foldEvents(events, state, { tokenMetadata });
+
+    const token = state.tokens.get(AI)!;
+    expect(token.decimals).toBe(6);
+    expect(token.symbol).toBe("AI");
+    expect(token.name).toBe("AI Token");
+    expect(token.metadataLoaded).toBe(true);
+    expect(result.trades[0]!.amountToken).toBeCloseTo(2, 9); // supplied 6 decimals, not the stale 18
+  });
+
+  it("repairs on a ModifyLiquidity too, not only a Swap", () => {
+    const state = seededState({}, { metadataLoaded: false, decimals: 18 });
+    const tokenMetadata = new Map([[AI, { symbol: "AI", name: "AI Token", decimals: 6 }]]);
+    foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state, { tokenMetadata });
+    const token = state.tokens.get(AI)!;
+    expect(token.decimals).toBe(6);
+    expect(token.metadataLoaded).toBe(true);
+  });
+
+  it("leaves an already-loaded token's metadata untouched even when a (mistaken) entry is supplied for it", () => {
+    const state = seededState({}, { metadataLoaded: true, decimals: 18, symbol: "REAL", name: "Real Token" });
+    const tokenMetadata = new Map([[AI, { symbol: "WRONG", name: "Wrong Token", decimals: 6 }]]);
+    foldEvents([swapEvent(2_000_000n, -(10n ** 18n), 2n * Q96, 1)], state, { tokenMetadata });
+    const token = state.tokens.get(AI)!;
+    expect(token.decimals).toBe(18);
+    expect(token.symbol).toBe("REAL");
+  });
+});
+
+// Round-2 review, BLOCKER: measured against the production database, not theoretical. Every
+// one of the 238,391 pools copied from the old indexer has a null sqrtPriceX96, so every
+// ModifyLiquidity on one derives a sqrt from pool.priceQuote instead. 2,349 copied pools carry
+// a garbage priceQuote around 3.40256786836388e50 (18/18 decimals derives a 55-digit sqrt,
+// out of amountsForLiquidityDelta's valid range) and 532 carry one below 1e-30 — one of the
+// over-large-price pools has 101,092 swaps, so this is not a dead row. A throw here used to
+// abort the whole batch; since rows and the cursor move in one transaction, that would wedge
+// the cron and the catch-up on that block permanently.
+describe("skippedLiquidity: a legacy pool with an underivable price never wedges the batch", () => {
+  it("skips just the one ModifyLiquidity, counts it, leaves that pool's TVL untouched, and still applies the rest of the batch", () => {
+    const state = seededState({ sqrtPriceX96: null, priceQuote: 3.40256786836388e50, tvlToken: 5n, tvlQuote: 7n });
+    const events = [
+      modifyLiquidityEvent(POOL, 10n ** 18n, 1), // underivable: must be skipped, not thrown
+      swapEvent(1000n * 10n ** 18n, -(10n ** 18n), 2n * Q96, 2), // rest of the batch: must still apply
+    ];
+
+    const result = foldEvents(events, state); // must not throw: the batch completes
+
+    expect(result.skippedLiquidity).toBe(1);
+    expect(result.trades).toHaveLength(1); // the swap after the skipped event still ran
+    const pool = state.pools.get(POOL)!;
+    // TVL reflects only the swap (starting 5n/7n, minus/plus its principal): the skipped
+    // ModifyLiquidity contributed nothing at all, not even a partial or garbage amount.
+    expect(pool.tvlToken).toBe(5n - 1000n * 10n ** 18n);
+    expect(pool.tvlQuote).toBe(7n + 997n * 10n ** 15n);
+  });
+
+  it("skips a price below MIN_SQRT_RATIO too, not only an out-of-range-high one", () => {
+    // 18-decimals token against a 6-decimals quote (USDG): sqrtPriceX96FromPrice(1e-35, 18, 6,
+    // true) derives 250541, below MIN_SQRT_RATIO (4295128739n) — verified with the ported
+    // math directly. At 18/18 decimals the same priceQuote derives 250541448375, which is
+    // NOT out of range, so the quote's decimals matter for reproducing this one.
+    const state = seededState({ sqrtPriceX96: null, priceQuote: 1e-35, tvlToken: 0n, tvlQuote: 0n, quoteId: USDG });
+    const result = foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state);
+    expect(result.skippedLiquidity).toBe(1);
+    expect(result.pools).toEqual([]);
+  });
+
+  it("still throws for a reason unrelated to the price derivation (a missing token is a different kind of problem)", () => {
+    const state = seededState({ sqrtPriceX96: null, priceQuote: 3.40256786836388e50 });
+    state.tokens.delete(AI); // break the pool -> token invariant on purpose
+    expect(() => foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state)).toThrow();
+  });
+});
+
+describe("lastSwapAt never moves backwards (MINOR-3)", () => {
+  it("keeps a later existing lastSwapAt when a swap's own timestamp is earlier", () => {
+    const baselineAt = 1_700_000_500;
+    const state = seededState({ baselineAt, lastSwapAt: baselineAt + 1000 });
+    foldEvents([swapEvent(1000n * 10n ** 18n, -(10n ** 18n), 2n * Q96, 1, { timestamp: baselineAt })], state);
+    const pool = state.pools.get(POOL)!;
+    expect(pool.lastSwapAt).toBe(baselineAt + 1000);
   });
 });
