@@ -180,7 +180,14 @@ export async function loadFoldState(db: Db, events: readonly ChainEvent[]): Prom
       decimals: 18,
       poolCount: tokenPoolIds.length,
       origin: pool.origin,
-      primaryPoolId: null,
+      // Fix round 5 (observability review, missing-token-review.md, MINOR-1): matches
+      // handleInitialize's never-seen-token literal, which always sets its one pool as primary.
+      // recomputePrimaryPool is gated on poolCount > 1 everywhere it's called, so a single-pool
+      // token that started life here with primaryPoolId: null would keep it forever — the only
+      // divergence from a normally-created token's final shape. A multi-pool token correctly
+      // stays null: it self-corrects on its very next event, ranked properly, which beats
+      // guessing among several loaded pools here.
+      primaryPoolId: tokenPoolIds.length === 1 ? tokenPoolIds[0]! : null,
       createdAt: pool.createdAt,
       metadataLoaded: false,
     });

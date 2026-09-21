@@ -79,7 +79,10 @@ function initEvent(o: Partial<InitializeEvent> = {}): InitializeEvent {
   };
 }
 function result(o: Partial<FoldResult> = {}): FoldResult {
-  return { pools: [pool()], tokens: [token()], candles: [candle()], trades: [trade()], newTokens: [], ignoredPools: 0, skippedLiquidity: 0, ...o };
+  return {
+    pools: [pool()], tokens: [token()], candles: [candle()], trades: [trade()], newTokens: [],
+    ignoredPools: 0, orphanedTokens: 0, skippedLiquidity: 0, ...o,
+  };
 }
 async function insertQuote(o: { id?: string; usdPrice?: number | null } = {}) {
   const id = o.id ?? QUOTE;
@@ -274,10 +277,34 @@ describe("loadFoldState", () => {
       decimals: 18,
       poolCount: 1, // the number of TOKEN_B's pools this load found
       origin: "LONG", // from the pool
-      primaryPoolId: null,
+      // Fix round 5 (missing-token-review.md, MINOR-1): a single-pool token matches
+      // handleInitialize's final state, which always sets its one pool as primary — otherwise
+      // primaryPoolId would stay null forever (recomputePrimaryPool is gated on poolCount > 1).
+      primaryPoolId: POOL_A,
       createdAt: T0, // from the pool
       metadataLoaded: false,
     });
+  });
+
+  it("leaves primaryPoolId null when synthesizing a token with more than one loaded pool (self-corrects on the token's next event instead of guessing)", async () => {
+    const poolC = poolId(0x13);
+    await applyFold(
+      db,
+      result({
+        pools: [pool({ id: POOL_A, tokenId: TOKEN_B }), pool({ id: poolC, tokenId: TOKEN_B })],
+        tokens: [],
+        candles: [],
+        trades: [],
+      }),
+      100,
+      T0,
+    );
+
+    const state = await loadFoldState(db, [swapEvent({ poolId: POOL_A })]);
+
+    const synthesized = state.tokens.get(TOKEN_B)!;
+    expect(synthesized.poolCount).toBe(2);
+    expect(synthesized.primaryPoolId).toBeNull();
   });
 
   it("never synthesizes a token for an id no loaded pool references (an Initialize currency alone doesn't count)", async () => {

@@ -43,7 +43,7 @@ async function seedToken(db: Db, id: string, now: number): Promise<void> {
   await applyFold(
     db,
     {
-      pools: [], candles: [], trades: [], newTokens: [id], ignoredPools: 0, skippedLiquidity: 0,
+      pools: [], candles: [], trades: [], newTokens: [id], ignoredPools: 0, orphanedTokens: 0, skippedLiquidity: 0,
       tokens: [{ id, address: id, symbol: id.slice(0, 6), name: id, decimals: 18, poolCount: 0, origin: "Other", primaryPoolId: null, createdAt: now, metadataLoaded: false }],
     },
     1,
@@ -159,7 +159,7 @@ describe("runChainSync: lease and cursor guards", () => {
     const source = new FakeLogSource({ head: 1000 });
     const report = await runChainSync(db, chainDeps({ source }), baseOpts());
     expect(report).toEqual({
-      skipped: "lease", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0,
+      skipped: "lease", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
       skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
     });
     expect(source.requests).toBe(0);
@@ -194,7 +194,7 @@ describe("runChainSync: yields to the nightly (final review MAJOR)", () => {
     const source = new FakeLogSource({ head: 1030 });
     const report = await runChainSync(db, chainDeps({ source }), baseOpts());
     expect(report).toEqual({
-      skipped: "nightly", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0,
+      skipped: "nightly", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
       skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 1000, error: null,
     });
     expect(source.requests).toBe(0); // never asked the source for anything, not even head()

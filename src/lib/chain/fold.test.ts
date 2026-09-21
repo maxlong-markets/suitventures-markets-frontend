@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { foldEvents, newTokenCandidates } from "./fold";
 import type {
   FoldState,
@@ -760,11 +760,14 @@ describe("skippedLiquidity: a legacy pool with an underivable price never wedges
   // permanently. It is now a different kind of "ignored" from an underivable legacy price: still
   // distinguished from skippedLiquidity (NIT-D's original concern — a regression that miscounts
   // it there would hide a real signal), but skipped rather than thrown either way.
-  it("skips rather than throws when the pool's token is missing, counting it as ignoredPools, not skippedLiquidity", () => {
+  // Fix round 5 (missing-token-review.md, MAJOR-1): also distinguished from ignoredPools now —
+  // a missing token is its own orphanedTokens counter, not folded into the pool-untracked case.
+  it("skips rather than throws when the pool's token is missing, counting it as orphanedTokens, not ignoredPools or skippedLiquidity", () => {
     const state = seededState({ sqrtPriceX96: null, priceQuote: 3.40256786836388e50 });
     state.tokens.delete(AI); // break the pool -> token invariant on purpose
     const result = foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state);
-    expect(result.ignoredPools).toBe(1);
+    expect(result.orphanedTokens).toBe(1);
+    expect(result.ignoredPools).toBe(0);
     expect(result.skippedLiquidity).toBe(0);
     expect(result.pools).toEqual([]);
   });
@@ -789,25 +792,68 @@ describe("skippedLiquidity: a legacy pool with an underivable price never wedges
 // unreachable in practice; it stays as a defensive skip (never a throw) precisely so one future bad
 // row, of any origin, can never wedge applyFold's one-transaction batch and stop the whole reader.
 describe("a pool whose token is entirely missing from state (defensive: should be unreachable after loadFoldState's fix)", () => {
-  it("skips a Swap and counts it in ignoredPools rather than throwing", () => {
+  it("skips a Swap and counts it in orphanedTokens, not ignoredPools, rather than throwing", () => {
     const state = seededState();
     state.tokens.delete(AI); // break the pool -> token invariant on purpose
     const result = foldEvents([swapEvent(1000n * 10n ** 18n, -(10n ** 18n), 2n * Q96, 1)], state);
-    expect(result.ignoredPools).toBe(1);
+    expect(result.orphanedTokens).toBe(1);
+    expect(result.ignoredPools).toBe(0);
     expect(result.trades).toHaveLength(0);
     expect(result.pools).toEqual([]); // the pool itself is untouched: the event never priced it
     const pool = state.pools.get(POOL)!;
     expect(pool.swapCount).toBe(0);
   });
 
-  it("skips a ModifyLiquidity and counts it in ignoredPools rather than throwing", () => {
+  it("skips a ModifyLiquidity and counts it in orphanedTokens, not ignoredPools, rather than throwing", () => {
     const state = seededState();
     state.tokens.delete(AI); // break the pool -> token invariant on purpose
     const result = foldEvents([modifyLiquidityEvent(POOL, 10n ** 18n, 1)], state);
-    expect(result.ignoredPools).toBe(1);
+    expect(result.orphanedTokens).toBe(1);
+    expect(result.ignoredPools).toBe(0);
     expect(result.pools).toEqual([]); // the pool itself is untouched
     const pool = state.pools.get(POOL)!;
     expect(pool.tvlToken).toBe(0n); // seededState/poolFixture default: unchanged
+  });
+
+  // Fix round 5 (missing-token-review.md, MAJOR-1): the warning is the forensic breadcrumb the
+  // old throw's message used to provide. Spied rather than asserted by exact string, so the test
+  // doesn't pin console formatting — just that it fires, with the pool and token ids in it.
+  it("warns once with the pool and token ids when it skips an orphaned-token event", () => {
+    const state = seededState();
+    state.tokens.delete(AI);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      foldEvents([swapEvent(1000n * 10n ** 18n, -(10n ** 18n), 2n * Q96, 1)], state);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [message] = warn.mock.calls[0]!;
+      expect(message).toContain(POOL);
+      expect(message).toContain(AI);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Caps at MAX_ORPHAN_WARNINGS (5) distinct pool ids per foldEvents call: the count itself
+  // (orphanedTokens) stays the uncapped signal, but the log cannot be flooded by a batch that
+  // somehow hits many orphaned pools (or the same one repeatedly) at once.
+  it("caps warnings at 5 distinct pool ids per call and never repeats a pool id already warned about", () => {
+    const state = emptyState();
+    const poolIds = Array.from({ length: 7 }, (_, i) => "0x" + String(i).padStart(2, "0").repeat(32));
+    for (const id of poolIds) {
+      state.pools.set(id, poolFixture({ id, tokenId: AI })); // state.tokens has no AI entry: emptyState() starts empty
+    }
+    const events = [
+      ...poolIds.map((id, i) => modifyLiquidityEvent(id, 10n ** 18n, i + 1)),
+      modifyLiquidityEvent(poolIds[0]!, 10n ** 18n, 20), // same pool again: must not add a second warning
+    ];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = foldEvents(events, state);
+      expect(result.orphanedTokens).toBe(8); // the count is NOT capped, only the log is
+      expect(warn).toHaveBeenCalledTimes(5);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

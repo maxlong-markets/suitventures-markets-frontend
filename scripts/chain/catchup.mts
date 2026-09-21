@@ -504,6 +504,11 @@ async function main(): Promise<void> {
     const startCursor = seeded.to;
     let cumEvents = 0;
     let cumTrades = 0;
+    // Fix round 5 (observability review, .superpowers/sdd/2026-09-21-chain-reader/missing-token-review.md,
+    // MAJOR-1): should stay 0 for the whole run — a nonzero value is the signal a torn-read-style gap
+    // reached the fold again. Folded into the per-cycle line below so a 14-hour replay makes it watchable
+    // in-flight, not just in the final "done" line.
+    let cumOrphanedTokens = 0;
 
     // Review round 2, finding 4: runChainSync acquires the lease once and never renews it, so a run
     // past leaseSec would otherwise be silently overtaken by the cron. Renewed from onCycle instead
@@ -533,6 +538,7 @@ async function main(): Promise<void> {
 
         cumEvents += c.events;
         cumTrades += c.trades;
+        cumOrphanedTokens += c.orphanedTokens;
         const elapsedSec = (Date.now() - startedAtMs) / 1000;
         const blocksDone = c.cursor - startCursor;
         const blocksPerSec = elapsedSec > 0 ? blocksDone / elapsedSec : 0;
@@ -540,7 +546,7 @@ async function main(): Promise<void> {
         const eta = blocksPerSec > 0 ? formatDuration(behind / blocksPerSec) : "unknown";
         console.log(
           `[chain:catchup] cursor=${c.cursor} behind=${behind} blocks/s=${blocksPerSec.toFixed(1)} ` +
-            `events=${cumEvents} trades=${cumTrades} requests=${c.requests} eta=${eta}`,
+            `events=${cumEvents} trades=${cumTrades} orphanedTokens=${cumOrphanedTokens} requests=${c.requests} eta=${eta}`,
         );
 
         const cycleMs = Date.now();
@@ -588,7 +594,7 @@ async function main(): Promise<void> {
     console.log(
       `[chain:catchup] done: cursor=${report.cursor} cycles=${report.cycles} blocks=${report.blocks} events=${report.events} ` +
         `trades=${report.trades} newTokens=${report.newTokens} ignoredPools=${report.ignoredPools} ` +
-        `skippedLiquidity=${report.skippedLiquidity} requests=${report.requests}`,
+        `orphanedTokens=${report.orphanedTokens} skippedLiquidity=${report.skippedLiquidity} requests=${report.requests}`,
     );
 
     // Review round 2, MINOR 11: a run cut short by --max-requests (or anything else) used to print the

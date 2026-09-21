@@ -30,6 +30,15 @@ import type { LogSource } from "./types";
  * old indexer carry a garbage price that makes the derivation throw. The fold counts and skips these rather
  * than aborting the batch; a large and growing number here means many pools are stuck without a real
  * `sqrt_price_x96`, which their first swap heals. This runner only reports the count; it never fails on it.
+ *
+ * `orphanedTokens` (summed from `FoldResult.orphanedTokens`; observability review,
+ * .superpowers/sdd/2026-09-21-chain-reader/missing-token-review.md, MAJOR-1) counts a Swap or ModifyLiquidity
+ * whose pool IS tracked but whose token is missing from the loaded state entirely — structurally unreachable
+ * once `loadFoldState` synthesizes a fallback token for every pool it loads, so this should always be 0. A
+ * nonzero value here (or the `console.warn` the fold emits alongside it) means that invariant broke somewhere.
+ * Deliberately its own counter, not folded into `ignoredPools`: that field's ordinary meaning ("an event
+ * naming a pool nothing tracks") is enormous and routine — 62% of all events in one measured run — and would
+ * bury this anomaly completely.
  */
 
 /** The minimal slice of a viem `PublicClient` the chain reader ever calls (see `onchain.ts`). */
@@ -65,7 +74,7 @@ export type ChainRunOpts = {
    * replay rather than idling out its whole window.
    */
   stopWhenCaughtUp?: boolean;
-  onCycle?: (c: { cursor: number; target: number; blocks: number; events: number; trades: number; requests: number }) => void;
+  onCycle?: (c: { cursor: number; target: number; blocks: number; events: number; trades: number; orphanedTokens: number; requests: number }) => void;
 };
 
 export type ChainRunReport = {
@@ -76,6 +85,7 @@ export type ChainRunReport = {
   trades: number;
   newTokens: number;
   ignoredPools: number;
+  orphanedTokens: number;
   skippedLiquidity: number;
   requests: number;
   quotesRefreshed: number;
@@ -99,7 +109,7 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 
 function emptyReport(): ChainRunReport {
   return {
-    skipped: null, cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0,
+    skipped: null, cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
     skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
   };
 }
@@ -212,10 +222,14 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
         report.trades += result.trades.length;
         report.newTokens += result.newTokens.length;
         report.ignoredPools += result.ignoredPools;
+        report.orphanedTokens += result.orphanedTokens;
         report.skippedLiquidity += result.skippedLiquidity;
 
         const queries = deps.source.requests - before;
-        opts.onCycle?.({ cursor, target, blocks, events: events.length, trades: result.trades.length, requests: deps.source.requests - requestsStart });
+        opts.onCycle?.({
+          cursor, target, blocks, events: events.length, trades: result.trades.length,
+          orphanedTokens: result.orphanedTokens, requests: deps.source.requests - requestsStart,
+        });
 
         await finishRun(db, CHAIN_JOB, {
           now: sec(opts.now()), ok: true,

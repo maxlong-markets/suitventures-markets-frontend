@@ -66,9 +66,18 @@
  * (store.ts) now synthesizes a fallback `TokenState` for any pool it loads whose token has no row,
  * which should make this unreachable via the normal `newTokenCandidates` -> real-metadata-read ->
  * `applyFold` path. Both handlers no longer throw on a still-missing token regardless: they skip
- * the event and count it in `FoldResult.ignoredPools`, exactly like the "pool itself missing" case
- * they already handle — one bad row must never be able to stop the whole reader. Every other throw
+ * the event instead — one bad row must never be able to stop the whole reader. Every other throw
  * in this file is untouched.
+ *
+ * Fix round 5, from the observability review at
+ * .superpowers/sdd/2026-09-21-chain-reader/missing-token-review.md (MAJOR-1): round 4's skip was
+ * counted in `FoldResult.ignoredPools`, which already means "an event naming a pool nothing
+ * tracks" — routine and enormous (62% of all events in one measured run). A missing-token skip is
+ * a structural anomaly (it should be impossible once `loadFoldState` synthesizes a fallback) and
+ * was invisible inside that count. It now has its own `FoldResult.orphanedTokens` counter, and
+ * each skip site also `console.warn`s once per distinct pool id (capped per `foldEvents` call —
+ * see `MAX_ORPHAN_WARNINGS` below) so the pool/token ids the old throw message used to carry are
+ * still visible to an operator watching logs.
  */
 
 import type {
@@ -117,9 +126,28 @@ type FoldContext = {
   trades: TradeRow[];
   newTokenIds: string[];
   ignoredPools: number;
+  orphanedTokens: number;
   skippedLiquidity: number;
   tokenMetadata: ReadonlyMap<string, TokenMetadata> | undefined;
+  /** Pool ids `warnOrphanedToken` has already warned about, this call only — caps log spam. */
+  warnedOrphanPools: Set<string>;
 };
+
+/**
+ * Fix round 5 (observability review, missing-token-review.md, MAJOR-1): the softened throw in
+ * handleSwap/handleModifyLiquidity left no forensic trace of which pool/token hit it, unlike the
+ * throw it replaced. Cap at a handful of distinct pool ids per `foldEvents` call — the uncapped
+ * signal is `FoldResult.orphanedTokens` itself; this is only so a batch that somehow hits many
+ * distinct orphaned pools at once cannot flood stdout/Vercel logs.
+ */
+const MAX_ORPHAN_WARNINGS = 5;
+
+function warnOrphanedToken(ctx: FoldContext, poolId: string, tokenId: string): void {
+  if (ctx.warnedOrphanPools.has(poolId)) return;
+  if (ctx.warnedOrphanPools.size >= MAX_ORPHAN_WARNINGS) return;
+  ctx.warnedOrphanPools.add(poolId);
+  console.warn(`fold: pool ${poolId} references missing token ${tokenId} — skipping event (orphanedTokens)`);
+}
 
 /**
  * foldEvents mutates `state` in place and returns the FINAL state of everything this batch
@@ -139,8 +167,10 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts
     trades: [],
     newTokenIds: [],
     ignoredPools: 0,
+    orphanedTokens: 0,
     skippedLiquidity: 0,
     tokenMetadata: opts?.tokenMetadata,
+    warnedOrphanPools: new Set(),
   };
 
   for (const event of events) {
@@ -164,6 +194,7 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts
     trades: ctx.trades,
     newTokens: ctx.newTokenIds,
     ignoredPools: ctx.ignoredPools,
+    orphanedTokens: ctx.orphanedTokens,
     skippedLiquidity: ctx.skippedLiquidity,
   };
 }
@@ -463,9 +494,12 @@ function handleSwap(event: SwapEvent, state: FoldState, ctx: FoldContext): void 
     // Fix round 4: should be unreachable now that loadFoldState synthesizes a fallback
     // TokenState for every pool it loads (store.ts) — but applyFold writes rows and the cursor
     // in one transaction, so a throw here would roll back the whole batch and wedge the cron on
-    // this block forever over a single bad row. Skip the event and count it in the same
-    // ignoredPools the pool-missing check above already uses.
-    ctx.ignoredPools += 1;
+    // this block forever over a single bad row. Skip the event.
+    // Fix round 5 (missing-token-review.md, MAJOR-1): counted in its own orphanedTokens, NOT the
+    // pool-missing check's ignoredPools above — that field's routine, six-figure count would
+    // bury this structural anomaly. Warned too, capped, so the ids survive in the logs.
+    ctx.orphanedTokens += 1;
+    warnOrphanedToken(ctx, pool.id, pool.tokenId);
     return;
   }
   // MAJOR-1 (round-2 review): repair before pricing, so a swap that is this batch's only
@@ -601,9 +635,12 @@ function handleModifyLiquidity(event: ModifyLiquidityEvent, state: FoldState, ct
     // Fix round 4: should be unreachable now that loadFoldState synthesizes a fallback
     // TokenState for every pool it loads (store.ts) — but applyFold writes rows and the cursor
     // in one transaction, so a throw here would roll back the whole batch and wedge the cron on
-    // this block forever over a single bad row. Skip the event and count it in the same
-    // ignoredPools the pool-missing check above already uses.
-    ctx.ignoredPools += 1;
+    // this block forever over a single bad row. Skip the event.
+    // Fix round 5 (missing-token-review.md, MAJOR-1): counted in its own orphanedTokens, NOT the
+    // pool-missing check's ignoredPools above — that field's routine, six-figure count would
+    // bury this structural anomaly. Warned too, capped, so the ids survive in the logs.
+    ctx.orphanedTokens += 1;
+    warnOrphanedToken(ctx, pool.id, pool.tokenId);
     return;
   }
   // MAJOR-1 (round-2 review): repair before deriving, same reasoning as handleSwap above.

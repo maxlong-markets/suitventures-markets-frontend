@@ -165,15 +165,26 @@ export type FoldResult = {
   /**
    * Events naming a pool nothing tracks: a Swap or a ModifyLiquidity whose pool id is not in
    * state.pools and no Initialize in this batch created — a health signal the runner reports.
-   * Also counts a Swap or a ModifyLiquidity whose pool IS tracked but whose token has no entry
-   * in state.tokens at all (Fix round 4: a torn-read gap in the original snapshot copy — see
-   * loadFoldState's synthesized fallback in store.ts, which should make this unreachable in
-   * practice): the event is skipped rather than thrown, so one bad row can never wedge the whole
-   * batch's transaction.
    * Does NOT include ModifyLiquidity's null-TVL guard: that pool is tracked, just without TVL
    * history, which is a different (and unremarkable) condition.
+   * Does NOT include a tracked pool whose token is missing from state.tokens — see
+   * `orphanedTokens` below; that used to be folded in here too (Fix round 4) but is now counted
+   * separately (observability review, missing-token-review.md, MAJOR-1) so a real anomaly is not
+   * buried in this field's ordinary, high-volume count (measured 62% of all events in one run).
    */
   ignoredPools: number;
+  /**
+   * A Swap or a ModifyLiquidity whose pool IS tracked (in state.pools) but whose token has no
+   * entry in state.tokens at all — a torn-read gap in the original snapshot copy (Fix round 4,
+   * missing-token-report.md). `loadFoldState`'s synthesized fallback (store.ts) makes this
+   * structurally unreachable in normal operation, so this should always be 0; a nonzero value
+   * means either that synthesis, or the "every loaded pool's token is in state.tokens" invariant
+   * it depends on, is broken. Split out from `ignoredPools` (observability review,
+   * missing-token-review.md, MAJOR-1) precisely so it stays a legible signal instead of one
+   * anomaly buried in that field's routine, six-figure count. The event is still skipped rather
+   * than thrown either way: one bad row must never wedge the whole batch's transaction.
+   */
+  orphanedTokens: number;
   /**
    * ModifyLiquidity events on a pool with no real, chain-captured sqrtPriceX96 (copied from the
    * old indexer before it was captured) whose priceQuote could not be turned into a usable sqrt
