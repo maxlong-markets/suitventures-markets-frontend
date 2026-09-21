@@ -33,9 +33,19 @@ function retryAfterMs(res: Response): number | undefined {
   return seconds * 1000;
 }
 
-/** A block's `timestamp` is a hex string in production ("0x6ab0f871"); a plain number is accepted too, defensively. */
-function parseBlockTimestamp(value: string | number): number {
-  return typeof value === "number" ? value : Number(BigInt(value));
+// A block's `timestamp` is a hex string in production ("0x6ab0f871"). BigInt("") is 0n, so an
+// empty (or otherwise non-hex) string must be rejected explicitly before reaching BigInt — it
+// must never silently become timestamp 0, the same "no silent fallback" rule that already applies
+// to a log whose block row is absent entirely.
+const HEX_TIMESTAMP_RE = /^0x[0-9a-fA-F]+$/;
+
+/** A plain number is accepted too, defensively. Throws, naming `blockNumber`, for anything that isn't a number or a non-empty hex string. */
+function parseBlockTimestamp(value: string | number, blockNumber: number): number {
+  if (typeof value === "number") return value;
+  if (!HEX_TIMESTAMP_RE.test(value)) {
+    throw new Error(`HyperSync block ${blockNumber} has a malformed timestamp: ${JSON.stringify(value)}`);
+  }
+  return Number(BigInt(value));
 }
 
 type HyperSyncBlock = { number: number; timestamp: string | number };
@@ -99,6 +109,14 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
     const token = getToken();
     const headers: Record<string, string> = { ...extraHeaders, Authorization: `Bearer ${token}` };
     let attemptsMade = 0;
+
+    // Shared by every retryable failure below (network error, malformed JSON body, 429, 5xx):
+    // sleeps `waitMs` and returns, or throws `err` once `maxAttempts` is exhausted.
+    async function retryOrThrow(err: unknown, waitMs: number): Promise<void> {
+      if (attemptsMade >= maxAttempts) throw err;
+      await sleep(waitMs);
+    }
+
     for (;;) {
       attemptsMade += 1;
       requests += 1;
@@ -106,20 +124,27 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
       try {
         res = await fetchImpl(`${url}${path}`, { method, headers, body });
       } catch (err) {
-        if (attemptsMade >= maxAttempts) throw err;
-        await sleep(backoffMs(attemptsMade - 1));
+        await retryOrThrow(err, backoffMs(attemptsMade - 1));
         continue;
       }
-      if (res.ok) return (await res.json()) as unknown;
+      if (res.ok) {
+        // A truncated or otherwise malformed body on an ok response is just as transient-shaped
+        // as a network error or a 5xx (responses run to several MB and a catch-up makes
+        // thousands of sequential calls), so it gets the same retry treatment rather than
+        // failing the whole call on one mid-stream hiccup.
+        try {
+          return (await res.json()) as unknown;
+        } catch (err) {
+          await retryOrThrow(err, backoffMs(attemptsMade - 1));
+          continue;
+        }
+      }
       if (res.status === 401 || res.status === 403) {
         throw new Error("HyperSync rejected the API token");
       }
       if (res.status === 429 || res.status >= 500) {
-        if (attemptsMade >= maxAttempts) {
-          throw new Error(`HyperSync request failed with status ${res.status}`);
-        }
         const wait = Math.max(retryAfterMs(res) ?? 0, backoffMs(attemptsMade - 1));
-        await sleep(wait);
+        await retryOrThrow(new Error(`HyperSync request failed with status ${res.status}`), wait);
         continue;
       }
       // Any other 4xx is not retryable.
@@ -151,13 +176,22 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
         JSON.stringify(queryBody),
       )) as HyperSyncQueryResponse;
 
+      // `Math.min` coerces with ToNumber: a missing or non-numeric next_block would silently
+      // become NaN, and `NaN <= fromBlock` is false, so the no-progress guard below would never
+      // fire for it — this must throw here instead, before nextBlock is ever computed. Mirrors
+      // the reference client's fetchPage check (SuitVenturesMarket-indexer/src/lib/hypersync.ts).
+      if (!Array.isArray(response.data) || !Number.isInteger(response.next_block)) {
+        throw new Error(`HyperSync response malformed for block ${fromBlock}: missing data array or next_block`);
+      }
+
       // A log's block or transaction can sit in a different chunk of the response than the log
       // itself, so every chunk's blocks and transactions are joined before any log is decoded.
       const timestamps = new Map<number, number>();
       const senders = new Map<string, string | null>();
       for (const chunk of response.data) {
         for (const b of chunk.blocks ?? []) {
-          timestamps.set(Number(b.number), parseBlockTimestamp(b.timestamp));
+          const blockNumber = Number(b.number);
+          timestamps.set(blockNumber, parseBlockTimestamp(b.timestamp, blockNumber));
         }
         for (const t of chunk.transactions ?? []) {
           senders.set(t.hash.toLowerCase(), t.from ? t.from.toLowerCase() : null);

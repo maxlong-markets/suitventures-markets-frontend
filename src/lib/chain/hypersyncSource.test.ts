@@ -223,6 +223,31 @@ describe("createHyperSyncSource", () => {
     });
   });
 
+  // Fix round 1, finding 1 (BLOCKER): Math.min coerces a missing or non-numeric next_block to
+  // NaN, and `NaN <= fromBlock` is false, so the no-progress guard used to never fire for this
+  // input class — fetch() returned `{ events, nextBlock: NaN }` instead of throwing. Validated
+  // directly before the fix: each of these three resolved (or threw the wrong error) rather than
+  // rejecting with a "malformed" message.
+  describe("fetch: malformed response", () => {
+    it("throws a clear error when next_block is missing from an otherwise well-formed response", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ data: [] })); // no next_block key at all
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.fetch(100, 199)).rejects.toThrow(/malformed/i);
+    });
+
+    it("throws a clear error when next_block is present but not an integer", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ data: [], next_block: "not-a-number" }));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.fetch(100, 199)).rejects.toThrow(/malformed/i);
+    });
+
+    it("throws a clear error when data is missing or not an array", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ next_block: 200 })); // no data key
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.fetch(100, 199)).rejects.toThrow(/malformed/i);
+    });
+  });
+
   describe("fetch: missing timestamp", () => {
     it("throws when a log's block has no matching timestamp anywhere in the response", async () => {
       const fetchImpl = vi.fn(async () =>
@@ -232,6 +257,31 @@ describe("createHyperSyncSource", () => {
               {
                 logs: [swapLog({ blockNumber: 100 })],
                 blocks: [], // block 100 never arrives
+                transactions: [{ hash: TX_HASH, from: TX_FROM }],
+              },
+            ],
+            200,
+          ),
+        ),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.fetch(100, 199)).rejects.toThrow(/timestamp/i);
+    });
+  });
+
+  // Fix round 1, finding 3 (MAJOR): BigInt("") is 0n, so a present-but-empty timestamp used to
+  // silently decode to 0 (1 Jan 1970) instead of throwing, the same "silent fallback that hides
+  // bad data" pattern the plan explicitly rules out for the adjacent "block row absent" case
+  // above. Validated directly before the fix: this resolved with timestamp 0 rather than rejecting.
+  describe("fetch: malformed timestamp", () => {
+    it("throws when a block's timestamp is an empty string instead of silently parsing to 0", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page(
+            [
+              {
+                logs: [swapLog({ blockNumber: 100 })],
+                blocks: [{ number: 100, timestamp: "" }],
                 transactions: [{ hash: TX_HASH, from: TX_FROM }],
               },
             ],
@@ -289,6 +339,25 @@ describe("createHyperSyncSource", () => {
       expect(nextBlock).toBe(200);
       expect(calls).toBe(3);
       expect(source.requests).toBe(3);
+    });
+
+    // Fix round 1, finding 2 (MAJOR): res.json() used to sit outside the retried region, so a
+    // truncated/malformed body on an otherwise-ok 2xx response failed the whole call with no
+    // retry, unlike every other transient failure this function handles. Validated directly
+    // before the fix: fetchImpl was called exactly once and the call rejected with a SyntaxError.
+    it("retries a 2xx response whose body fails to parse as JSON, then succeeds", async () => {
+      const { sleep } = fakeSleep();
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) return new Response("not json{{{", { status: 200 });
+        return jsonResponse(page([], 200));
+      });
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, sleep });
+      const { nextBlock } = await source.fetch(100, 199);
+      expect(nextBlock).toBe(200);
+      expect(calls).toBe(2);
+      expect(source.requests).toBe(2);
     });
 
     it("gives up after maxAttempts on a persistent 5xx", async () => {
