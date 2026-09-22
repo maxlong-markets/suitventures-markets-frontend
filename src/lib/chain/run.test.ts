@@ -87,20 +87,44 @@ class FakeLogSource {
 type TokenFixture = { symbol: string; name: string; decimals: number; totalSupply?: bigint };
 type QuoteFixture = readonly [bigint, bigint, bigint, bigint, bigint]; // roundId, answer, startedAt, updatedAt, answeredInRound
 
-/** A ChainClient (readContract only) keyed by lowercase address, for both readTokenMetadata and readQuotePrices — an address with no fixture throws, which readTokenMetadata/readQuotePrices both already treat as a normal per-item failure (their own tests cover that; this file is about run.ts's orchestration, not their decode logic). */
-function fakeChainClient(opts: { tokens?: Record<string, TokenFixture>; quotes?: Record<string, QuoteFixture> } = {}): ChainClient & { calls: { address: string; functionName: string }[] } {
+/**
+ * A ChainClient (readContract only) keyed by lowercase address, for readTokenMetadata,
+ * readQuotePrices, AND readBalances — an address (or, for balances, a token-wallet pair) with no
+ * fixture throws, which all three already treat as a normal per-item failure (their own tests cover
+ * that; this file is about run.ts's orchestration, not their decode logic). `balances` is keyed
+ * `${token}-${wallet}`, both lowercase, matching readBalances' own map convention; `onBalanceCall` (if
+ * given) is invoked with each call's `blockNumber` so a test can assert whether a historical block was
+ * asked for (normal mode) or not (the catch-up fallback).
+ */
+function fakeChainClient(
+  opts: {
+    tokens?: Record<string, TokenFixture>;
+    quotes?: Record<string, QuoteFixture>;
+    balances?: Record<string, bigint>;
+    onBalanceCall?: (blockNumber: bigint | undefined) => void;
+  } = {},
+): ChainClient & { calls: { address: string; functionName: string }[] } {
   const tokens = opts.tokens ?? {};
   const quotes = opts.quotes ?? {};
+  const balances = opts.balances ?? {};
   const calls: { address: string; functionName: string }[] = [];
   return {
     calls,
-    readContract: (async (args: { address: string; functionName: string }) => {
+    readContract: (async (args: { address: string; functionName: string; args?: readonly unknown[]; blockNumber?: bigint }) => {
       const address = args.address.toLowerCase();
       calls.push({ address, functionName: args.functionName });
       if (args.functionName === "latestRoundData") {
         const q = quotes[address];
         if (!q) throw new Error(`fakeChainClient: no quote fixture for ${address}`);
         return q;
+      }
+      if (args.functionName === "balanceOf") {
+        opts.onBalanceCall?.(args.blockNumber);
+        const wallet = String(args.args?.[0]).toLowerCase();
+        const key = `${address}-${wallet}`;
+        const balance = balances[key];
+        if (balance === undefined) throw new Error(`fakeChainClient: no balance fixture for ${key}`);
+        return balance;
       }
       const t = tokens[address];
       if (!t) throw new Error(`fakeChainClient: no token fixture for ${address}`);
@@ -160,7 +184,8 @@ describe("runChainSync: lease and cursor guards", () => {
     const report = await runChainSync(db, chainDeps({ source }), baseOpts());
     expect(report).toEqual({
       skipped: "lease", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
-      skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
+      skippedLiquidity: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
+      metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
     });
     expect(source.requests).toBe(0);
     expect((await readState(db, "chain")).leaseOwner).toBe("other");
@@ -195,7 +220,8 @@ describe("runChainSync: yields to the nightly (final review MAJOR)", () => {
     const report = await runChainSync(db, chainDeps({ source }), baseOpts());
     expect(report).toEqual({
       skipped: "nightly", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
-      skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 1000, error: null,
+      skippedLiquidity: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
+      metadataRetried: 0, metadataFailed: 0, cursor: 1000, error: null,
     });
     expect(source.requests).toBe(0); // never asked the source for anything, not even head()
     // Its own chain lease was taken and then given straight back, not left held for the nightly's duration.
@@ -395,5 +421,136 @@ describe("runChainSync: metadata retry sweep", () => {
       [OK],
     ))[0]!;
     expect(okRow).toEqual({ metadata_loaded: true, metadata_retry_at: 0, symbol: "XYZ", decimals: 8, total_supply: "12345" });
+  });
+});
+
+describe("runChainSync: holder-count upkeep", () => {
+  const WALLET_2 = addr(0xc2);
+  const holdersOf = async (id: string) =>
+    (await db.query<{ holders_count: number }>("select holders_count from market.tokens where id = $1", [id]))[0]!.holders_count;
+  const tokenFixture = { [AI]: { symbol: "AI", name: "AI Token", decimals: 18, totalSupply: 1_000_000n } };
+
+  it("normal mode: a buy from a wallet with a zero balance before the trade is a new holder (+1), applied in the same cycle that creates the token", async () => {
+    await seedCursor(db, 99);
+    const events = [initEvent(), swapEvent()]; // swapEvent(): amount0 2_000_000n > 0 -> a buy of AI (currency0) by WALLET
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n } });
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.holderDeltaApplied).toBe(1);
+    expect(report.holderReadsUnknown).toBe(0);
+    // brand-new token inserted at 0, then this cycle's own +1 delta applied on top (store.test.ts pins the ordering).
+    expect(await holdersOf(AI)).toBe(1);
+    // the "before" read is historical, at cursor (99) — the block before this batch, not the current head.
+    const balanceCall = client.calls.find((c) => c.functionName === "balanceOf");
+    expect(balanceCall).toBeDefined();
+  });
+
+  it("normal mode: a full sell to zero is one fewer holder (-1), derived from the pair's net raw delta without a second chain read", async () => {
+    await seedToken(db, AI, 1_700_000_000); // AI already exists before this cycle, so its baseline below survives the fold
+    await db.query("update market.tokens set holders_count = 3 where id = $1", [AI]);
+    await seedCursor(db, 99);
+
+    // A pool for the already-known AI token, then a sell of exactly 500 raw units (tokenIsCurrency0 true,
+    // so the token leg is amount0) by WALLET, whose pre-batch balance is fixed at exactly 500n — a full exit.
+    const events = [initEvent(), swapEvent({ txHash: hex(2, 64), amount0: -500n, amount1: 300n })];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 500n } });
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.holderDeltaApplied).toBe(1);
+    expect(await holdersOf(AI)).toBe(2); // 3 - 1
+  });
+
+  it("a pair whose balance could not be read contributes 0 and is counted unknown, never guessed", async () => {
+    await seedCursor(db, 99);
+    const events = [initEvent(), swapEvent()];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({ tokens: tokenFixture }); // no `balances` fixture at all: the one read fails
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.holderDeltaApplied).toBe(0);
+    expect(report.holderReadsUnknown).toBe(1);
+    expect(await holdersOf(AI)).toBe(0); // never guessed: stays at the brand-new-token default
+  });
+
+  it("catch-up mode (stopWhenCaughtUp): reads the current balance instead of a historical one, catches a sell-to-zero exactly, and contributes 0 for a buy from an unknown prior state", async () => {
+    await seedToken(db, AI, 1);
+    await db.query("update market.tokens set holders_count = 5 where id = $1", [AI]);
+    await seedCursor(db, 99);
+
+    // Two wallets trade AI in the same batch: WALLET sells out, WALLET_2 buys in.
+    const events = [
+      initEvent(),
+      swapEvent({ txHash: hex(2, 64), txFrom: WALLET, amount0: -500n, amount1: 300n }),
+      swapEvent({ txHash: hex(3, 64), txFrom: WALLET_2, amount0: 200n, amount1: -100n }),
+    ];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const blockNumbers: (bigint | undefined)[] = [];
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      // Current balances only — no historical fixture would even matter, since catch-up mode never asks
+      // for a blockNumber at all (asserted below via onBalanceCall).
+      balances: { [`${AI}-${WALLET}`]: 0n, [`${AI}-${WALLET_2}`]: 999n },
+      onBalanceCall: (b) => blockNumbers.push(b),
+    });
+    // stopWhenCaughtUp: true is exactly scripts/chain/catchup.mts's own configuration; this batch is not
+    // caught up yet (target 200 > cursor 99), so the loop still runs this one cycle before stopping.
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2, stopWhenCaughtUp: true });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.holderDeltaApplied).toBe(2);
+    expect(report.holderReadsUnknown).toBe(0);
+    expect(await holdersOf(AI)).toBe(4); // 5 - 1 (WALLET sold to 0) + 0 (WALLET_2's buy is unknown-prior-state)
+    expect(blockNumbers.every((b) => b === undefined)).toBe(true); // current balance, never a historical one
+  });
+
+  it("respects the per-cycle pair cap: reads only the first pairCap pairs, counts the rest unknown, and never drops a trade", async () => {
+    await seedCursor(db, 99);
+    const events = [
+      initEvent(),
+      swapEvent({ txHash: hex(2, 64), txFrom: WALLET, logIndex: 0 }),
+      swapEvent({ txHash: hex(3, 64), txFrom: WALLET_2, logIndex: 1 }),
+    ];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      balances: { [`${AI}-${WALLET}`]: 0n, [`${AI}-${WALLET_2}`]: 0n }, // both fixtures exist; the cap alone decides
+    });
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2, holderPairCap: 1 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.trades).toBe(2); // the cap never drops a trade
+    expect(report.holderDeltaApplied).toBe(1);
+    expect(report.holderReadsUnknown).toBe(1);
+  });
+
+  it("surfaces holderDeltaApplied and holderReadsUnknown on the onCycle callback, alongside orphanedTokens", async () => {
+    await seedCursor(db, 99);
+    const events = [initEvent(), swapEvent()];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n } });
+    const cycles: { holderDeltaApplied: number; holderReadsUnknown: number; orphanedTokens: number }[] = [];
+    const opts = baseOpts({
+      maxSpan: 150, maxRequests: 2,
+      onCycle: (c) => cycles.push({ holderDeltaApplied: c.holderDeltaApplied, holderReadsUnknown: c.holderReadsUnknown, orphanedTokens: c.orphanedTokens }),
+    });
+
+    await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(cycles).toEqual([{ holderDeltaApplied: 1, holderReadsUnknown: 0, orphanedTokens: 0 }]);
   });
 });

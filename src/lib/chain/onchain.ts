@@ -304,3 +304,63 @@ export async function readQuotePrices(
   }
   return results;
 }
+
+// ---------------------------------------------------------------------------
+// Wallet balances (holder-count upkeep, 2026-09-22)
+//
+// The chain reader deliberately does not index ERC-20 Transfer (see the design doc's "What is
+// deliberately not indexed"), so holders_count can no longer be derived by summing transfers. It
+// instead drifts forward from its 17 Sep baseline, moved by the wallets that trade: a wallet's
+// balanceOf, read once per (token, wallet) pair a batch's trades touch, tells run.ts's
+// computeHolderDeltas whether that wallet held the token already. See run.ts for the delta rule
+// itself and how "before" vs "after" is chosen.
+// ---------------------------------------------------------------------------
+
+const ERC20_BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+
+export type BalancePair = { token: string; wallet: string };
+
+/**
+ * ERC-20 `balanceOf` for each (token, wallet) pair in `pairs`, keyed `${token}-${wallet}` with both
+ * lowercased. `blockNumber` reads a historical balance (run.ts's normal "before a trade" case);
+ * omitted, it reads the current balance (run.ts's catch-up-mode "after" fallback).
+ *
+ * Same failure discipline as readTokenMetadata: one pair's read failing — a revert, no code at the
+ * address, a transport error, or (during a catch-up) the node no longer holding state that old —
+ * never fails the batch. UNLIKE readTokenMetadata, though, there is no safe fallback VALUE for a
+ * balance: 0 is a real, meaningful answer here (it is exactly what turns a holder into a
+ * non-holder), so a failed read is ABSENT from the returned map rather than defaulted to 0n —
+ * guessing it would corrupt the count. The caller must treat a missing key as "unknown," never as
+ * "zero."
+ *
+ * The viem client already batches up to 100 calls into one HTTP request (createChainClient's
+ * `batch.batchSize`); every read here fires in parallel and relies entirely on that transport-level
+ * batching — this function never chunks or throttles the list itself.
+ */
+export async function readBalances(
+  client: Pick<PublicClient, "readContract">,
+  pairs: readonly BalancePair[],
+  blockNumber?: bigint,
+): Promise<Map<string, bigint>> {
+  const settled = await Promise.allSettled(
+    pairs.map(async (pair) => {
+      const token = pair.token.toLowerCase();
+      const wallet = pair.wallet.toLowerCase();
+      const balance = await client.readContract({
+        address: token as `0x${string}`,
+        abi: ERC20_BALANCE_ABI,
+        functionName: "balanceOf",
+        args: [wallet as `0x${string}`],
+        blockNumber,
+      });
+      return { key: `${token}-${wallet}`, balance };
+    }),
+  );
+
+  const result = new Map<string, bigint>();
+  for (const outcome of settled) {
+    if (outcome.status === "fulfilled") result.set(outcome.value.key, outcome.value.balance);
+    // A rejected read is left absent — see the doc comment above.
+  }
+  return result;
+}

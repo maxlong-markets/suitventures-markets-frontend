@@ -478,6 +478,126 @@ describe("applyFold", () => {
     });
   });
 
+  describe("opts.holderDeltas (holder-count upkeep)", () => {
+    const holdersOf = async (id: string) =>
+      (await db.query<{ holders_count: number }>("select holders_count from market.tokens where id = $1", [id]))[0]!.holders_count;
+
+    it("adds a positive delta to an existing token's holders_count", async () => {
+      await applyFold(db, result(), 100, T0); // TOKEN_A starts at 0
+      await db.query("update market.tokens set holders_count = 10 where id = $1", [TOKEN_A]);
+      await applyFold(db, result({ tokens: [token({ symbol: "NEW" })] }), 200, T0 + 1000, {
+        holderDeltas: new Map([[TOKEN_A, 3]]),
+      });
+      expect(await holdersOf(TOKEN_A)).toBe(13);
+    });
+
+    it("subtracts a negative delta", async () => {
+      await applyFold(db, result(), 100, T0);
+      await db.query("update market.tokens set holders_count = 10 where id = $1", [TOKEN_A]);
+      await applyFold(db, result({ tokens: [token({ symbol: "NEW" })] }), 200, T0 + 1000, {
+        holderDeltas: new Map([[TOKEN_A, -4]]),
+      });
+      expect(await holdersOf(TOKEN_A)).toBe(6);
+    });
+
+    it("clamps at 0 rather than going negative", async () => {
+      await applyFold(db, result(), 100, T0);
+      await db.query("update market.tokens set holders_count = 2 where id = $1", [TOKEN_A]);
+      await applyFold(db, result({ tokens: [token({ symbol: "NEW" })] }), 200, T0 + 1000, {
+        holderDeltas: new Map([[TOKEN_A, -50]]),
+      });
+      expect(await holdersOf(TOKEN_A)).toBe(0);
+    });
+
+    it("never touches a token not named in the map, even when other tokens in the same fold are", async () => {
+      await applyFold(
+        db,
+        result({
+          tokens: [token(), token({ id: TOKEN_B, address: TOKEN_B, primaryPoolId: null, poolCount: 0 })],
+        }),
+        100,
+        T0,
+      );
+      await db.query("update market.tokens set holders_count = 5 where id = $1", [TOKEN_B]);
+      await applyFold(
+        db,
+        result({ tokens: [token({ symbol: "NEW" }), token({ id: TOKEN_B, address: TOKEN_B, primaryPoolId: null, poolCount: 0, symbol: "NEW2" })] }),
+        200,
+        T0 + 1000,
+        { holderDeltas: new Map([[TOKEN_A, 7]]) }, // TOKEN_B not named
+      );
+      expect(await holdersOf(TOKEN_A)).toBe(7);
+      expect(await holdersOf(TOKEN_B)).toBe(5); // untouched, even though TOKEN_B was folded this same cycle
+    });
+
+    it("is a no-op — and never errors — when the map is empty, undefined, or every entry is 0", async () => {
+      await applyFold(db, result(), 100, T0);
+      await db.query("update market.tokens set holders_count = 9 where id = $1", [TOKEN_A]);
+
+      await applyFold(db, result({ tokens: [token({ symbol: "A" })] }), 200, T0 + 1000); // opts omitted entirely
+      expect(await holdersOf(TOKEN_A)).toBe(9);
+
+      await applyFold(db, result({ tokens: [token({ symbol: "B" })] }), 300, T0 + 2000, { holderDeltas: new Map() });
+      expect(await holdersOf(TOKEN_A)).toBe(9);
+
+      await applyFold(db, result({ tokens: [token({ symbol: "C" })] }), 400, T0 + 3000, { holderDeltas: new Map([[TOKEN_A, 0]]) });
+      expect(await holdersOf(TOKEN_A)).toBe(9);
+    });
+
+    it("seeds a brand-new token at 0 and then applies its own same-cycle delta on top", async () => {
+      // A token created and given its first holder in the SAME cycle: upsertTokensFromFold's insert
+      // (holders_count 0) must run before applyHolderDeltas' update, or this update would match no row.
+      await applyFold(db, result(), 100, T0, { holderDeltas: new Map([[TOKEN_A, 1]]) });
+      expect(await holdersOf(TOKEN_A)).toBe(1);
+    });
+
+    it("commits holders_count in the same transaction as the rest of the fold, and rolls both back together when a later statement in that transaction throws", async () => {
+      await applyFold(db, result(), 100, T0); // seed TOKEN_A: holders_count 0, symbol "AI"
+      await db.query("update market.tokens set holders_count = 10 where id = $1", [TOKEN_A]);
+      const cursorBefore = await readChainCursor(db);
+
+      // Wraps `db`, letting every query through unchanged until it sees this new statement's own SQL
+      // run (the marker), then throws on the very next query — whichever statement in applyFold that
+      // happens to be (recomputeListedPools or saveCursors) — to prove holders_count is not committed
+      // ahead of, or independently from, the rest of applyFold's one transaction.
+      function throwAfterHoldersUpdate(inner: Db): Db {
+        let seenMarker = false;
+        let thrown = false;
+        function level(target: Db): Db {
+          return {
+            query: async (text, params) => {
+              if (seenMarker && !thrown) {
+                thrown = true;
+                throw new Error("test-injected failure: after the holders_count update");
+              }
+              if (text.includes("holders_count = greatest")) seenMarker = true;
+              return target.query(text, params);
+            },
+            exec: (text) => target.exec(text),
+            copy: (table, columns, rows) => target.copy(table, columns, rows),
+            tx: (fn) => target.tx((t) => fn(level(t))),
+            end: () => target.end(),
+          };
+        }
+        return level(inner);
+      }
+
+      await expect(
+        applyFold(throwAfterHoldersUpdate(db), result({ tokens: [token({ symbol: "SHOULD_NOT_STICK" })] }), 999, T0 + 1000, {
+          holderDeltas: new Map([[TOKEN_A, 5]]),
+        }),
+      ).rejects.toThrow("test-injected failure: after the holders_count update");
+
+      const row = (await db.query<{ holders_count: number; symbol: string }>(
+        "select holders_count, symbol from market.tokens where id = $1",
+        [TOKEN_A],
+      ))[0]!;
+      expect(row.holders_count).toBe(10); // the +5 rolled back with everything else
+      expect(row.symbol).toBe("AI"); // token()'s default symbol — "SHOULD_NOT_STICK" rolled back too
+      expect(await readChainCursor(db)).toBe(cursorBefore); // the cursor advance rolled back too
+    });
+  });
+
   describe("protected columns", () => {
     it("adds metadata_retry_at defaulting to 0, which this task's statements never mention", async () => {
       await applyFold(db, result(), 100, T0);

@@ -10,7 +10,7 @@ import {
   type PublicClient,
 } from "viem";
 import { robinhoodChain } from "@/lib/chain";
-import { createChainClient, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
+import { createChainClient, readBalances, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
 
 // Spies on viem's `http` (delegating to the real implementation) so createChainClient's tests
 // below can assert on the exact transport config it passes — batchSize/wait aren't observable
@@ -427,6 +427,86 @@ describe("readQuotePrices", () => {
     const readContract = vi.fn();
     const client = { readContract } as unknown as Pick<PublicClient, "readContract">;
     expect(await readQuotePrices(client, [], 1_700_000_999)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readBalances
+// ---------------------------------------------------------------------------
+
+const WALLET_MIXED = "0x3F8a7C21e9B4d0A6f15C8e2b7d9A4c0e1F6b9a2C";
+const WALLET = WALLET_MIXED.toLowerCase();
+const WALLET_2 = "0x0000000000000000000000000000000000dead";
+
+function makeBalanceClient(
+  byKey: Record<string, bigint | "revert">,
+): { client: Pick<PublicClient, "readContract">; calls: { address: string; args: readonly unknown[]; blockNumber?: bigint }[] } {
+  const calls: { address: string; args: readonly unknown[]; blockNumber?: bigint }[] = [];
+  const client = {
+    readContract: (async (args: { address: string; functionName: string; args: readonly unknown[]; blockNumber?: bigint }) => {
+      if (args.functionName !== "balanceOf") throw new Error(`unexpected functionName ${args.functionName}`);
+      calls.push({ address: args.address.toLowerCase(), args: args.args, blockNumber: args.blockNumber });
+      const wallet = (args.args[0] as string).toLowerCase();
+      const key = `${args.address.toLowerCase()}-${wallet}`;
+      const entry = byKey[key];
+      if (entry === undefined || entry === "revert") throw new Error(`revert: ${key}`);
+      return entry;
+    }) as unknown as PublicClient["readContract"],
+  };
+  return { client, calls };
+}
+
+describe("readBalances", () => {
+  it("reads balanceOf and keys the result by lowercase token-wallet", async () => {
+    const { client } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
+    const result = await readBalances(client, [{ token: TOKEN_MIXED, wallet: WALLET_MIXED }]);
+    expect(result.get(`${TOKEN}-${WALLET}`)).toBe(500n);
+    expect(result.size).toBe(1);
+  });
+
+  it("passes blockNumber through for a historical read", async () => {
+    const { client, calls } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
+    await readBalances(client, [{ token: TOKEN, wallet: WALLET }], 12_345n);
+    expect(calls[0]?.blockNumber).toBe(12_345n);
+  });
+
+  it("omits blockNumber for a current-balance read", async () => {
+    const { client, calls } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
+    await readBalances(client, [{ token: TOKEN, wallet: WALLET }]);
+    expect(calls[0]?.blockNumber).toBeUndefined();
+  });
+
+  it("leaves a reverting pair ABSENT from the map rather than defaulting it to zero, without failing the rest of the batch", async () => {
+    const { client } = makeBalanceClient({
+      [`${TOKEN}-${WALLET}`]: "revert",
+      [`${TOKEN_2}-${WALLET}`]: 0n, // a real, meaningful zero balance for the other pair
+    });
+    const result = await readBalances(client, [
+      { token: TOKEN, wallet: WALLET },
+      { token: TOKEN_2, wallet: WALLET },
+    ]);
+    expect(result.has(`${TOKEN}-${WALLET}`)).toBe(false); // absent, not 0n
+    expect(result.get(`${TOKEN_2}-${WALLET}`)).toBe(0n); // a genuine zero balance still comes through
+    expect(result.size).toBe(1);
+  });
+
+  it("keys mixed-case input as lowercase and distinguishes two wallets of the same token", async () => {
+    const { client } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 1n, [`${TOKEN}-${WALLET_2}`]: 2n });
+    const result = await readBalances(client, [
+      { token: TOKEN_MIXED, wallet: WALLET_MIXED },
+      { token: TOKEN_MIXED, wallet: WALLET_2 },
+    ]);
+    expect([...result.keys()].sort()).toEqual([`${TOKEN}-${WALLET}`, `${TOKEN}-${WALLET_2}`].sort());
+    expect(result.get(`${TOKEN}-${WALLET}`)).toBe(1n);
+    expect(result.get(`${TOKEN}-${WALLET_2}`)).toBe(2n);
+  });
+
+  it("returns an empty map for an empty pair list, without calling the client", async () => {
+    const readContract = vi.fn();
+    const client = { readContract } as unknown as Pick<PublicClient, "readContract">;
+    const result = await readBalances(client, []);
+    expect(result.size).toBe(0);
+    expect(readContract).not.toHaveBeenCalled();
   });
 });
 

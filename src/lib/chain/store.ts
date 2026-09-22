@@ -301,6 +301,34 @@ async function upsertCandlesFromFold(db: Db, candles: readonly CandleState[]): P
 }
 
 /**
+ * Holder-count upkeep's one write (holder-count upkeep, 2026-09-22 —
+ * .superpowers/sdd/2026-09-21-chain-reader/holder-count-report.md): adds each named token's signed
+ * delta (run.ts's computeHolderDeltas) to holders_count, clamped at 0 with `greatest` so it can never
+ * go negative regardless of what order unknowns and knowns happen to land in over time. Zero-delta
+ * entries are dropped before the query even runs — an explicit "add 0" would be a harmless no-op, but
+ * skipping it keeps this from touching rows this cycle has nothing to say about.
+ *
+ * The ONLY statement in this file — or anywhere else that writes market.tokens — that mentions
+ * holders_count. upsertTokensFromFold's insert still seeds a brand-new token at 0 (unchanged by this
+ * task, and it runs before this in applyFold below, so a token created and given its first holder in
+ * the same cycle has a row to update rather than a no-op update against a not-yet-inserted id) and its
+ * own update statement still never mentions the column (see that function's doc comment): this is
+ * deliberately the single writer, named for the tokens this cycle actually touched, never a scan.
+ */
+async function applyHolderDeltas(db: Db, deltas: ReadonlyMap<string, number>): Promise<void> {
+  const entries = [...deltas.entries()].filter(([, delta]) => delta !== 0);
+  if (entries.length === 0) return;
+  for (const c of chunk(entries)) {
+    await db.query(
+      `update market.tokens t set holders_count = greatest(0, t.holders_count + u.delta)
+       from unnest($1::text[], $2::int[]) as u(id, delta)
+       where t.id = u.id`,
+      [c.map(([id]) => id), c.map(([, delta]) => delta)],
+    );
+  }
+}
+
+/**
  * Everything a batch changed, written with its cursor in ONE transaction: a failure leaves rows and the
  * cursor untouched. Reuses upsertPools as-is (its column set is exactly PoolState minus baseline_at, which it
  * never mentions, so an existing pool's baseline_at survives the update and a new pool gets the migration's
@@ -316,20 +344,24 @@ async function upsertCandlesFromFold(db: Db, candles: readonly CandleState[]): P
  *
  * opts.newTokenSupply carries total_supply for a brand-new token the runner already read from the chain this
  * same cycle (Task 6: readTokenMetadata for FoldResult.newTokens), so it doesn't show a supply of 0 until the
- * next nightly; see upsertTokensFromFold for how it's used and what it can never affect.
+ * next nightly; see upsertTokensFromFold for how it's used and what it can never affect. opts.holderDeltas
+ * (holder-count upkeep) is applied by applyHolderDeltas above, in the same transaction as everything else
+ * here: a crash or thrown error anywhere in this function leaves holders_count exactly where it started,
+ * same as every other column this writes.
  */
 export async function applyFold(
   db: Db,
   result: FoldResult,
   cursorBlock: number,
   now: number,
-  opts?: { newTokenSupply?: ReadonlyMap<string, bigint> },
+  opts?: { newTokenSupply?: ReadonlyMap<string, bigint>; holderDeltas?: ReadonlyMap<string, number> },
 ): Promise<void> {
   await db.tx(async (t) => {
     await upsertPools(t, result.pools.map(poolStateToRec), now);
     await upsertTokensFromFold(t, result.tokens, now, opts?.newTokenSupply);
     await insertTrades(t, result.trades);
     await upsertCandlesFromFold(t, result.candles);
+    if (opts?.holderDeltas) await applyHolderDeltas(t, opts.holderDeltas);
     const tokenIds = [...new Set([...result.tokens.map((tok) => tok.id), ...result.pools.map((p) => p.tokenId)])];
     await recomputeListedPools(t, tokenIds);
     await saveCursors(t, CHAIN_JOB, { cursor: cursorBlock });

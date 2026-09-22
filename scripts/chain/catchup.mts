@@ -509,6 +509,12 @@ async function main(): Promise<void> {
     // reached the fold again. Folded into the per-cycle line below so a 14-hour replay makes it watchable
     // in-flight, not just in the final "done" line.
     let cumOrphanedTokens = 0;
+    // Holder-count upkeep (2026-09-22): this whole script runs with stopWhenCaughtUp true, so every cycle
+    // here uses computeHolderDeltas' catch-up fallback (current balance only, sells-to-zero caught, buys
+    // from an unknown prior state contributed as 0 — see run.ts's own doc comment). Watchable in-flight for
+    // the same reason cumOrphanedTokens is.
+    let cumHolderDeltaApplied = 0;
+    let cumHolderReadsUnknown = 0;
 
     // Review round 2, finding 4: runChainSync acquires the lease once and never renews it, so a run
     // past leaseSec would otherwise be silently overtaken by the cron. Renewed from onCycle instead
@@ -539,6 +545,8 @@ async function main(): Promise<void> {
         cumEvents += c.events;
         cumTrades += c.trades;
         cumOrphanedTokens += c.orphanedTokens;
+        cumHolderDeltaApplied += c.holderDeltaApplied;
+        cumHolderReadsUnknown += c.holderReadsUnknown;
         const elapsedSec = (Date.now() - startedAtMs) / 1000;
         const blocksDone = c.cursor - startCursor;
         const blocksPerSec = elapsedSec > 0 ? blocksDone / elapsedSec : 0;
@@ -546,7 +554,9 @@ async function main(): Promise<void> {
         const eta = blocksPerSec > 0 ? formatDuration(behind / blocksPerSec) : "unknown";
         console.log(
           `[chain:catchup] cursor=${c.cursor} behind=${behind} blocks/s=${blocksPerSec.toFixed(1)} ` +
-            `events=${cumEvents} trades=${cumTrades} orphanedTokens=${cumOrphanedTokens} requests=${c.requests} eta=${eta}`,
+            `events=${cumEvents} trades=${cumTrades} orphanedTokens=${cumOrphanedTokens} ` +
+            `holderDeltaApplied=${cumHolderDeltaApplied} holderReadsUnknown=${cumHolderReadsUnknown} ` +
+            `requests=${c.requests} eta=${eta}`,
         );
 
         const cycleMs = Date.now();
@@ -594,7 +604,8 @@ async function main(): Promise<void> {
     console.log(
       `[chain:catchup] done: cursor=${report.cursor} cycles=${report.cycles} blocks=${report.blocks} events=${report.events} ` +
         `trades=${report.trades} newTokens=${report.newTokens} ignoredPools=${report.ignoredPools} ` +
-        `orphanedTokens=${report.orphanedTokens} skippedLiquidity=${report.skippedLiquidity} requests=${report.requests}`,
+        `orphanedTokens=${report.orphanedTokens} skippedLiquidity=${report.skippedLiquidity} ` +
+        `holderDeltaApplied=${report.holderDeltaApplied} holderReadsUnknown=${report.holderReadsUnknown} requests=${report.requests}`,
     );
 
     // Review round 2, MINOR 11: a run cut short by --max-requests (or anything else) used to print the

@@ -3,9 +3,10 @@ import type { Db } from "@/lib/db/client";
 import { acquireLease, finishRun, readState, releaseLease } from "@/lib/sync/state";
 import { upsertQuotes } from "@/lib/sync/writers";
 import { foldEvents, newTokenCandidates } from "./fold";
-import { readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
+import { holderDelta } from "./math/holders";
+import { readBalances, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
 import { applyFold, dueForMetadata, loadFoldState, readChainCursor, refreshTokenMetadata } from "./store";
-import type { LogSource } from "./types";
+import type { ChainEvent, FoldResult, LogSource, PoolState, TradeRow } from "./types";
 
 /**
  * The one-minute cron's chain job (Task 6, `docs/superpowers/plans/2026-09-21-chain-reader.md`; brief:
@@ -39,6 +40,16 @@ import type { LogSource } from "./types";
  * Deliberately its own counter, not folded into `ignoredPools`: that field's ordinary meaning ("an event
  * naming a pool nothing tracks") is enormous and routine — 62% of all events in one measured run — and would
  * bury this anomaly completely.
+ *
+ * `holderDeltaApplied`/`holderReadsUnknown` (holder-count upkeep, 2026-09-22 — see
+ * .superpowers/sdd/2026-09-21-chain-reader/holder-count-report.md; the design doc's "What is deliberately
+ * not indexed" describes the intended approach): the old indexer derived holders_count by replaying every
+ * ERC-20 Transfer, which this reader does not index at all (see that section). Instead, `computeHolderDeltas`
+ * below runs AFTER `foldEvents` and BEFORE `applyFold`, reads one `balanceOf` per distinct (token, wallet)
+ * pair this batch's trades touch (capped — see DEFAULT_HOLDER_PAIR_CAP), and turns a zero-to-non-zero or
+ * non-zero-to-zero swing into +/-1 via `holderDelta` (math/holders.ts). `holderDeltaApplied` counts pairs
+ * this actually resolved (whether the resulting delta was +1, -1 or a genuine 0); `holderReadsUnknown` counts
+ * pairs whose balance could not be read or that the per-cycle cap skipped — never guessed, counted instead.
  */
 
 /** The minimal slice of a viem `PublicClient` the chain reader ever calls (see `onchain.ts`). */
@@ -67,6 +78,8 @@ export type ChainRunOpts = {
   quoteRefreshSec?: number;
   /** Token ids read per invocation's metadata retry sweep. Default 50. */
   metadataRetryLimit?: number;
+  /** Distinct (token, wallet) pairs read for holder-count upkeep per cycle. Default 2_000 — see DEFAULT_HOLDER_PAIR_CAP. */
+  holderPairCap?: number;
   /**
    * When caught up (the fetch target is at or behind the cursor), stop the loop instead of sleeping and
    * waiting for new blocks. Default false, which is what the cron wants (keep polling for the rest of its
@@ -74,7 +87,17 @@ export type ChainRunOpts = {
    * replay rather than idling out its whole window.
    */
   stopWhenCaughtUp?: boolean;
-  onCycle?: (c: { cursor: number; target: number; blocks: number; events: number; trades: number; orphanedTokens: number; requests: number }) => void;
+  onCycle?: (c: {
+    cursor: number;
+    target: number;
+    blocks: number;
+    events: number;
+    trades: number;
+    orphanedTokens: number;
+    holderDeltaApplied: number;
+    holderReadsUnknown: number;
+    requests: number;
+  }) => void;
 };
 
 export type ChainRunReport = {
@@ -87,6 +110,8 @@ export type ChainRunReport = {
   ignoredPools: number;
   orphanedTokens: number;
   skippedLiquidity: number;
+  holderDeltaApplied: number;
+  holderReadsUnknown: number;
   requests: number;
   quotesRefreshed: number;
   metadataRetried: number;
@@ -104,14 +129,157 @@ const DEFAULT_MAX_REQUESTS = 80;
 const DEFAULT_QUOTE_REFRESH_SEC = 60;
 const DEFAULT_METADATA_RETRY_LIMIT = 50;
 
+/**
+ * Cap on distinct (token, wallet) pairs read for holder-count upkeep per cycle. The module doc
+ * comment's own sizing measurement says a busy cycle has roughly 1,700 trades; at 100 calls per HTTP
+ * request (createChainClient's batch size) reading every pair in a cycle that busy costs about 17
+ * requests to the plain RPC node — a separate, much less constrained allowance than HyperSync's
+ * `maxRequests` above (a public JSON-RPC endpoint, not the Starter-tier-limited HyperSync API), so
+ * this cap is generous headroom, not a tight budget. 2,000 covers "roughly 1,700" with room for a
+ * cycle a little busier than typical without silently starting to undercount on an ordinary day, and
+ * still bounds a pathological cycle (e.g. one token's launch drawing far more distinct wallets than
+ * usual) rather than reading it without limit: the excess pairs are skipped and counted unknown
+ * (ChainRunReport.holderReadsUnknown) instead of dropping trades or slowing the reader.
+ */
+const DEFAULT_HOLDER_PAIR_CAP = 2_000;
+
 const sec = (ms: number) => Math.floor(ms / 1000);
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 function emptyReport(): ChainRunReport {
   return {
     skipped: null, cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
-    skippedLiquidity: 0, requests: 0, quotesRefreshed: 0, metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
+    skippedLiquidity: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
+    metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
   };
+}
+
+type HolderPair = { token: string; wallet: string };
+
+const holderPairKey = (pair: HolderPair): string => `${pair.token}-${pair.wallet}`;
+
+/**
+ * Distinct (token, wallet) pairs this batch's trades touch, in first-seen order, each paired with the
+ * NET raw signed token delta its trade(s) contributed this batch (summed when one wallet traded the
+ * same token more than once in one cycle).
+ *
+ * The raw delta is re-derived from the same formula handleSwap itself uses (fold.ts:
+ * `tokenIsCurrency0 ? amount0 : amount1`) against the batch's own raw `events` and the fold's own
+ * `result.pools` — never from `TradeRow.amountToken`, which is already a lossy display `number`
+ * (types.ts's own convention: "raw on-chain integers are bigint and never pass through number"). This
+ * is what lets computeHolderDeltas below derive "after" from "before" with exact bigint arithmetic
+ * instead of a second chain read or a float round-trip.
+ */
+function collectHolderPairs(
+  events: readonly ChainEvent[],
+  trades: readonly TradeRow[],
+  pools: readonly PoolState[],
+): { pairs: HolderPair[]; netDeltaByPair: Map<string, bigint> } {
+  const tokenIsCurrency0ByPool = new Map<string, boolean>();
+  for (const p of pools) tokenIsCurrency0ByPool.set(p.id, p.tokenIsCurrency0);
+
+  const rawDeltaByTradeId = new Map<string, bigint>();
+  for (const event of events) {
+    if (event.kind !== "swap") continue;
+    const tokenIsCurrency0 = tokenIsCurrency0ByPool.get(event.poolId);
+    if (tokenIsCurrency0 === undefined) continue; // no trade resulted from this event; nothing to correlate
+    rawDeltaByTradeId.set(`${event.txHash}-${event.logIndex}`, tokenIsCurrency0 ? event.amount0 : event.amount1);
+  }
+
+  const seen = new Map<string, HolderPair>();
+  const netDeltaByPair = new Map<string, bigint>();
+  for (const trade of trades) {
+    const pair = { token: trade.tokenId, wallet: trade.wallet };
+    const key = holderPairKey(pair);
+    if (!seen.has(key)) seen.set(key, pair);
+    const raw = rawDeltaByTradeId.get(trade.id) ?? 0n;
+    netDeltaByPair.set(key, (netDeltaByPair.get(key) ?? 0n) + raw);
+  }
+  return { pairs: [...seen.values()], netDeltaByPair };
+}
+
+/**
+ * Holder-count upkeep for one cycle (holder-count upkeep, 2026-09-22;
+ * .superpowers/sdd/2026-09-21-chain-reader/holder-count-report.md — read first for the two decisions
+ * this does not re-open: the count drifts forward from its baseline rather than replaying transfer
+ * history, and this ships now, in parallel with the running catch-up replay, rather than later).
+ * Called from the main loop AFTER foldEvents and BEFORE applyFold, so the caller can pass its result
+ * straight into that same transaction.
+ *
+ * One `balanceOf` read per distinct (token, wallet) pair this batch's trades touch (collectHolderPairs
+ * above), capped at `pairCap` (DEFAULT_HOLDER_PAIR_CAP unless overridden): a cycle with more distinct
+ * pairs than the cap reads only the first `pairCap` (first-seen order) and counts the rest unknown,
+ * rather than growing the read unboundedly or slowing the reader.
+ *
+ * Two modes, selected once per invocation by `catchUp` (the caller's own `stopWhenCaughtUp` — already
+ * exactly the flag that tells the catch-up script's one-shot replay apart from the cron's steady-state
+ * polling, so this reuses it rather than inventing a second signal):
+ *   - Normal (`catchUp` false): reads each pair's balance BEFORE the batch, at `cursor` — the block
+ *     before this batch's first event, so it reflects no event this cycle folded. "After" is derived
+ *     from it plus the pair's net raw token delta this batch, never a second read, and the two are
+ *     compared with `holderDelta`.
+ *   - Catch-up (`catchUp` true): a historical `balanceOf` at a days- or weeks-old `cursor` fails on the
+ *     public node once its retained state for that block has been pruned — normal well before the
+ *     reader is caught up, since the catch-up script replays from wherever production last stopped
+ *     (18 Sep) forward. Reading "before" there would fail almost every time and waste the read, so
+ *     this reads each pair's CURRENT balance instead (no `blockNumber`) and applies the coarser rule
+ *     the task specifies: a wallet sitting at zero right now is -1 (it must have held something to
+ *     trade, so zero now means it sold out — true no matter how much it held before); anything else
+ *     contributes 0, since a nonzero current balance cannot tell "already a holder, unchanged" apart
+ *     from "a new holder" without the before side. Accuracy cost: every new holder created purely by a
+ *     catch-up-era buy is missed (undercounted) until that wallet trades again once the reader is
+ *     caught up; a full exit is still caught exactly either way.
+ *
+ * A pair whose read fails outright (readBalances' own per-pair failure discipline) is counted unknown
+ * too, right alongside a pair the cap skipped — both are "we do not know," never guessed as 0.
+ */
+async function computeHolderDeltas(
+  client: ChainClient,
+  events: readonly ChainEvent[],
+  result: FoldResult,
+  cursor: number,
+  catchUp: boolean,
+  pairCap: number,
+): Promise<{ deltas: Map<string, number>; applied: number; unknown: number }> {
+  const { pairs, netDeltaByPair } = collectHolderPairs(events, result.trades, result.pools);
+  const capped = pairs.slice(0, pairCap);
+  let unknown = pairs.length - capped.length;
+  let applied = 0;
+  const deltas = new Map<string, number>();
+  const add = (tokenId: string, delta: number): void => {
+    if (delta === 0) return;
+    deltas.set(tokenId, (deltas.get(tokenId) ?? 0) + delta);
+  };
+
+  if (capped.length > 0) {
+    if (catchUp) {
+      const afterMap = await readBalances(client, capped);
+      for (const pair of capped) {
+        const after = afterMap.get(holderPairKey(pair));
+        if (after === undefined) {
+          unknown += 1;
+          continue;
+        }
+        applied += 1;
+        add(pair.token, after === 0n ? -1 : 0);
+      }
+    } else {
+      const beforeMap = await readBalances(client, capped, BigInt(cursor));
+      for (const pair of capped) {
+        const key = holderPairKey(pair);
+        const before = beforeMap.get(key);
+        if (before === undefined) {
+          unknown += 1;
+          continue;
+        }
+        const after = before + (netDeltaByPair.get(key) ?? 0n);
+        applied += 1;
+        add(pair.token, holderDelta(before, after));
+      }
+    }
+  }
+
+  return { deltas, applied, unknown };
 }
 
 /**
@@ -158,6 +326,7 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
   const maxRequests = opts.maxRequests ?? DEFAULT_MAX_REQUESTS;
   const quoteRefreshSec = opts.quoteRefreshSec ?? DEFAULT_QUOTE_REFRESH_SEC;
   const metadataRetryLimit = opts.metadataRetryLimit ?? DEFAULT_METADATA_RETRY_LIMIT;
+  const holderPairCap = opts.holderPairCap ?? DEFAULT_HOLDER_PAIR_CAP;
   const endMs = startMs + opts.windowSec * 1000;
   const requestsStart = deps.source.requests;
 
@@ -210,7 +379,15 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
         }
 
         const result = foldEvents(events, state, { tokenMetadata });
-        await applyFold(db, result, nextBlock - 1, sec(opts.now()), { newTokenSupply });
+
+        // Holder-count upkeep (holder-count upkeep, 2026-09-22): AFTER the fold, BEFORE applyFold, so
+        // its deltas land in the very same transaction as everything else this cycle wrote. `cursor`
+        // here is still the block BEFORE this batch (it only advances below), matching computeHolderDeltas'
+        // "before" read.
+        const holderOutcome = await computeHolderDeltas(
+          deps.client, events, result, cursor, opts.stopWhenCaughtUp ?? false, holderPairCap,
+        );
+        await applyFold(db, result, nextBlock - 1, sec(opts.now()), { newTokenSupply, holderDeltas: holderOutcome.deltas });
 
         const prevCursor = cursor;
         cursor = nextBlock - 1;
@@ -224,11 +401,14 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
         report.ignoredPools += result.ignoredPools;
         report.orphanedTokens += result.orphanedTokens;
         report.skippedLiquidity += result.skippedLiquidity;
+        report.holderDeltaApplied += holderOutcome.applied;
+        report.holderReadsUnknown += holderOutcome.unknown;
 
         const queries = deps.source.requests - before;
         opts.onCycle?.({
           cursor, target, blocks, events: events.length, trades: result.trades.length,
-          orphanedTokens: result.orphanedTokens, requests: deps.source.requests - requestsStart,
+          orphanedTokens: result.orphanedTokens, holderDeltaApplied: holderOutcome.applied,
+          holderReadsUnknown: holderOutcome.unknown, requests: deps.source.requests - requestsStart,
         });
 
         await finishRun(db, CHAIN_JOB, {
