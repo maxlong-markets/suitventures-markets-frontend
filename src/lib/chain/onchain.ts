@@ -383,26 +383,37 @@ export async function readBalances(
   blockNumber?: bigint,
   timeoutMs?: number,
 ): Promise<Map<string, bigint>> {
-  const settled = await Promise.allSettled(
-    pairs.map(async (pair) => {
-      const token = pair.token.toLowerCase();
-      const wallet = pair.wallet.toLowerCase();
-      const read = client.readContract({
-        address: token as `0x${string}`,
-        abi: ERC20_BALANCE_ABI,
-        functionName: "balanceOf",
-        args: [wallet as `0x${string}`],
-        blockNumber,
-      });
-      const balance = await (timeoutMs === undefined ? read : withDeadline(read, timeoutMs));
-      return { key: balancePairKey(pair), balance };
-    }),
-  );
-
   const result = new Map<string, bigint>();
-  for (const outcome of settled) {
-    if (outcome.status === "fulfilled") result.set(outcome.value.key, outcome.value.balance);
-    // A rejected read (including a timeout) is left absent — see the doc comment above.
+  // Sequential chunks of BALANCE_READ_CHUNK, never everything at once. The transport batches every read
+  // issued within its 16 ms window into ONE JSON-RPC batch, and the public node counts each call in a
+  // batch toward its rate limit: measured 22 Sep 2026, a batch of 50 balanceOf calls resolves in ~400 ms
+  // while 60 or more answers HTTP 429 "Too Many Requests" for the WHOLE batch, so a busy cycle's pairs
+  // issued together resolved zero of them and every holder count stayed frozen. Awaiting each chunk
+  // keeps at most BALANCE_READ_CHUNK calls in one batch and spaces the batches out.
+  for (let i = 0; i < pairs.length; i += BALANCE_READ_CHUNK) {
+    const chunk = pairs.slice(i, i + BALANCE_READ_CHUNK);
+    const settled = await Promise.allSettled(
+      chunk.map(async (pair) => {
+        const token = pair.token.toLowerCase();
+        const wallet = pair.wallet.toLowerCase();
+        const read = client.readContract({
+          address: token as `0x${string}`,
+          abi: ERC20_BALANCE_ABI,
+          functionName: "balanceOf",
+          args: [wallet as `0x${string}`],
+          blockNumber,
+        });
+        const balance = await (timeoutMs === undefined ? read : withDeadline(read, timeoutMs));
+        return { key: balancePairKey(pair), balance };
+      }),
+    );
+    for (const outcome of settled) {
+      if (outcome.status === "fulfilled") result.set(outcome.value.key, outcome.value.balance);
+      // A rejected read (including a timeout) is left absent — see the doc comment above.
+    }
   }
   return result;
 }
+
+/** Reads per JSON-RPC batch for balanceOf: the measured ceiling on the public node is 50 before it answers 429 for the whole batch. */
+export const BALANCE_READ_CHUNK = 40;

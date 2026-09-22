@@ -143,13 +143,16 @@ const DEFAULT_METADATA_RETRY_LIMIT = 50;
  * request (createChainClient's batch size) reading every pair in a cycle that busy costs about 17
  * requests to the plain RPC node — a separate, much less constrained allowance than HyperSync's
  * `maxRequests` above (a public JSON-RPC endpoint, not the Starter-tier-limited HyperSync API), so
- * this cap is generous headroom, not a tight budget. 2,000 covers "roughly 1,700" with room for a
- * cycle a little busier than typical without silently starting to undercount on an ordinary day, and
- * still bounds a pathological cycle (e.g. one token's launch drawing far more distinct wallets than
- * usual) rather than reading it without limit: the excess pairs are skipped and counted unknown
- * (ChainRunReport.holderReadsUnknown) instead of dropping trades or slowing the reader.
+ * this cap is a time budget, not a request budget. readBalances reads in sequential batches of
+ * BALANCE_READ_CHUNK (40) because the public node answers 429 to a batch above 50, and each batch takes
+ * about 400 ms; the upkeep reads every pair twice, before and after the batch. So 600 pairs is 30 batches,
+ * roughly 12 s of a 50 s window, leaving room for the fetch, the fold and the write. A live minute of chain
+ * carries about 1,000 trades and fewer distinct (token, wallet) pairs, so an ordinary cycle fits; a
+ * pathological one (one token's launch drawing far more wallets than usual) has its excess pairs skipped
+ * and counted unknown (ChainRunReport.holderReadsUnknown) instead of dropping trades or overrunning the
+ * window. Was 2,000 before 22 Sep 2026, which took 40 s at the measured batch size.
  */
-const DEFAULT_HOLDER_PAIR_CAP = 2_000;
+const DEFAULT_HOLDER_PAIR_CAP = 600;
 
 /**
  * Timeout for ONE balanceOf read inside computeHolderDeltas below (fix round 1, MAJOR-2 —
