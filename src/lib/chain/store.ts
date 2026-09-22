@@ -302,18 +302,34 @@ async function upsertCandlesFromFold(db: Db, candles: readonly CandleState[]): P
 
 /**
  * Holder-count upkeep's one write (holder-count upkeep, 2026-09-22 —
- * .superpowers/sdd/2026-09-21-chain-reader/holder-count-report.md): adds each named token's signed
- * delta (run.ts's computeHolderDeltas) to holders_count, clamped at 0 with `greatest` so it can never
- * go negative regardless of what order unknowns and knowns happen to land in over time. Zero-delta
- * entries are dropped before the query even runs — an explicit "add 0" would be a harmless no-op, but
- * skipping it keeps this from touching rows this cycle has nothing to say about.
+ * .superpowers/sdd/2026-09-21-chain-reader/holder-count-report.md, and its "Fix round 1" section for
+ * the review below): adds each named token's signed delta (run.ts's computeHolderDeltas) to
+ * holders_count, clamped at 0 with `greatest` so it can never go negative regardless of what order
+ * unknowns and knowns happen to land in over time. Zero-delta entries are dropped before the query even
+ * runs — an explicit "add 0" would be a harmless no-op, but skipping it keeps this from touching rows
+ * this cycle has nothing to say about.
  *
- * The ONLY statement in this file — or anywhere else that writes market.tokens — that mentions
+ * The only statement in THIS file, or in the chain reader's write path generally, that mentions
  * holders_count. upsertTokensFromFold's insert still seeds a brand-new token at 0 (unchanged by this
  * task, and it runs before this in applyFold below, so a token created and given its first holder in
  * the same cycle has a row to update rather than a no-op update against a not-yet-inserted id) and its
- * own update statement still never mentions the column (see that function's doc comment): this is
- * deliberately the single writer, named for the tokens this cycle actually touched, never a scan.
+ * own update statement still never mentions the column (see that function's doc comment).
+ *
+ * Fix round 1, MINOR-4 (holder-count-review.md): this is NOT the only statement anywhere in the repo
+ * that writes holders_count — `src/lib/sync/writers.ts`'s `upsertTokens` does too, on conflict, from
+ * whatever `holdersCount` its caller supplies. Its callers are `src/lib/seed/seed.ts` (the one-off
+ * snapshot seed) and `src/lib/sync/market.ts` (the old, now-superseded market job); neither is reached
+ * by any route today (`src/app/api/internal/sync/route.ts` calls `runChainSync`, not `sync/market`), so
+ * this is latent, not live, and produces no wrong count as things stand. It stays worth naming here: a
+ * re-seed, or any revival of the old market job, would silently overwrite every drifted count this
+ * statement has moved with the old indexer's frozen 17 Sep snapshot, undoing this feature without
+ * touching a line of it.
+ *
+ * Fix round 1, MINOR-7: this write is NOT idempotent on its own the way `insertTrades` is (`on conflict
+ * … do nothing` there; a blind `+ delta` here). An overlapping re-fold of the same block range — the
+ * same hazard class `applyFold`'s own doc comment already names for candle volume and pool running
+ * totals — would apply the same deltas twice. The 300s lease (`src/app/api/internal/sync/route.ts`) is
+ * what prevents that overlap for this column too, exactly as it already does for the others.
  */
 async function applyHolderDeltas(db: Db, deltas: ReadonlyMap<string, number>): Promise<void> {
   const entries = [...deltas.entries()].filter(([, delta]) => delta !== 0);

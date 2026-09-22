@@ -10,7 +10,7 @@ import {
   type PublicClient,
 } from "viem";
 import { robinhoodChain } from "@/lib/chain";
-import { createChainClient, readBalances, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
+import { balancePairKey, createChainClient, readBalances, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
 
 // Spies on viem's `http` (delegating to the real implementation) so createChainClient's tests
 // below can assert on the exact transport config it passes — batchSize/wait aren't observable
@@ -456,6 +456,21 @@ function makeBalanceClient(
   return { client, calls };
 }
 
+// Fix round 1, MINOR-6 (holder-count-review.md): one exported key builder, so a caller building a
+// lookup against readBalances' result (run.ts's computeHolderDeltas) cannot drift from how the map
+// itself is keyed.
+describe("balancePairKey", () => {
+  it("lowercases both sides and joins them with a dash", () => {
+    expect(balancePairKey({ token: TOKEN_MIXED, wallet: WALLET_MIXED })).toBe(`${TOKEN}-${WALLET}`);
+  });
+
+  it("is exactly the key readBalances' own map uses", async () => {
+    const { client } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
+    const result = await readBalances(client, [{ token: TOKEN_MIXED, wallet: WALLET_MIXED }]);
+    expect(result.get(balancePairKey({ token: TOKEN_MIXED, wallet: WALLET_MIXED }))).toBe(500n);
+  });
+});
+
 describe("readBalances", () => {
   it("reads balanceOf and keys the result by lowercase token-wallet", async () => {
     const { client } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
@@ -507,6 +522,51 @@ describe("readBalances", () => {
     const result = await readBalances(client, []);
     expect(result.size).toBe(0);
     expect(readContract).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1, MAJOR-2 (holder-count-review.md): a slow RPC must not hold up a whole cycle.
+  describe("timeoutMs", () => {
+    it("times out a read that never resolves, leaving it absent, without affecting a fast pair in the same batch", async () => {
+      vi.useFakeTimers();
+      try {
+        const never = new Promise<bigint>(() => {
+          /* deliberately never settles */
+        });
+        const client: Pick<PublicClient, "readContract"> = {
+          readContract: (async (args: { args: readonly unknown[] }) => {
+            const wallet = String(args.args[0]).toLowerCase();
+            return wallet === WALLET ? never : 42n;
+          }) as unknown as PublicClient["readContract"],
+        };
+        const promise = readBalances(
+          client,
+          [
+            { token: TOKEN, wallet: WALLET },
+            { token: TOKEN, wallet: WALLET_2 },
+          ],
+          undefined,
+          1_000,
+        );
+        await vi.advanceTimersByTimeAsync(1_000);
+        const result = await promise;
+        expect(result.has(`${TOKEN}-${WALLET}`)).toBe(false); // timed out: absent, never 0n
+        expect(result.get(`${TOKEN}-${WALLET_2}`)).toBe(42n); // the other pair's own timer is unaffected
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not time out a read that resolves comfortably inside the deadline", async () => {
+      const { client } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
+      const result = await readBalances(client, [{ token: TOKEN, wallet: WALLET }], undefined, 5_000);
+      expect(result.get(`${TOKEN}-${WALLET}`)).toBe(500n);
+    });
+
+    it("imposes no deadline at all when timeoutMs is omitted", async () => {
+      const { client } = makeBalanceClient({ [`${TOKEN}-${WALLET}`]: 500n });
+      const result = await readBalances(client, [{ token: TOKEN, wallet: WALLET }]);
+      expect(result.get(`${TOKEN}-${WALLET}`)).toBe(500n);
+    });
   });
 });
 

@@ -306,14 +306,15 @@ export async function readQuotePrices(
 }
 
 // ---------------------------------------------------------------------------
-// Wallet balances (holder-count upkeep, 2026-09-22)
+// Wallet balances (holder-count upkeep, 2026-09-22; see holder-count-report.md's "Fix round 1" for
+// the review at .superpowers/sdd/2026-09-21-chain-reader/holder-count-review.md that reshaped this)
 //
 // The chain reader deliberately does not index ERC-20 Transfer (see the design doc's "What is
 // deliberately not indexed"), so holders_count can no longer be derived by summing transfers. It
 // instead drifts forward from its 17 Sep baseline, moved by the wallets that trade: a wallet's
-// balanceOf, read once per (token, wallet) pair a batch's trades touch, tells run.ts's
-// computeHolderDeltas whether that wallet held the token already. See run.ts for the delta rule
-// itself and how "before" vs "after" is chosen.
+// balanceOf, read TWICE per (token, wallet) pair a batch's trades touch — once before the batch, once
+// after — tells run.ts's computeHolderDeltas whether that wallet crossed the zero line. See run.ts for
+// the delta rule itself and why both sides are observed rather than one derived from the other.
 // ---------------------------------------------------------------------------
 
 const ERC20_BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
@@ -321,17 +322,56 @@ const ERC20_BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (u
 export type BalancePair = { token: string; wallet: string };
 
 /**
- * ERC-20 `balanceOf` for each (token, wallet) pair in `pairs`, keyed `${token}-${wallet}` with both
- * lowercased. `blockNumber` reads a historical balance (run.ts's normal "before a trade" case);
- * omitted, it reads the current balance (run.ts's catch-up-mode "after" fallback).
+ * The map key readBalances uses for one pair, and the ONLY place that builds it — exported so a
+ * caller building a lookup against readBalances' own result (run.ts's computeHolderDeltas) uses this
+ * instead of its own copy of the format string. Fix round 1, MINOR-6
+ * (.superpowers/sdd/2026-09-21-chain-reader/holder-count-review.md): before this, run.ts had its own
+ * `holderPairKey` that agreed with this file's inline key only because every caller already happened
+ * to pass lowercase input — a real but silent drift risk (a mismatched key means every lookup misses,
+ * every pair falls into "unknown", and holders_count silently stops moving, with nothing to say why).
+ * Lowercases both sides itself, so neither side of a comparison has to remember to.
+ */
+export function balancePairKey(pair: BalancePair): string {
+  return `${pair.token.toLowerCase()}-${pair.wallet.toLowerCase()}`;
+}
+
+/**
+ * Races `promise` against a `timeoutMs` timer; on timeout, rejects (never resolves to a guessed
+ * value), so `readBalances`' own `Promise.allSettled` treats a timeout exactly like any other per-pair
+ * failure — absent from the map, never `0n`. Does not cancel the underlying `readContract` call (viem
+ * exposes no per-call abort on this path): a slow response keeps running in the background and its
+ * result is simply discarded, so this bounds how long the CALLER waits, not the node's own work.
+ */
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err as Error);
+      },
+    );
+  });
+}
+
+/**
+ * ERC-20 `balanceOf` for each (token, wallet) pair in `pairs`, keyed by balancePairKey (both sides
+ * lowercased). `blockNumber` reads a historical balance; omitted, it reads the current balance.
+ * `timeoutMs`, when given, bounds each individual read (fix round 1, MAJOR-2 — see run.ts's
+ * HOLDER_READ_TIMEOUT_MS for why 5s and why per-pair, not per-batch: viem's client batches up to 100
+ * calls into one HTTP request, so a per-pair race still lets every OTHER in-flight HTTP batch resolve
+ * on its own schedule instead of the slowest one holding up the whole call).
  *
  * Same failure discipline as readTokenMetadata: one pair's read failing — a revert, no code at the
- * address, a transport error, or (during a catch-up) the node no longer holding state that old —
- * never fails the batch. UNLIKE readTokenMetadata, though, there is no safe fallback VALUE for a
- * balance: 0 is a real, meaningful answer here (it is exactly what turns a holder into a
- * non-holder), so a failed read is ABSENT from the returned map rather than defaulted to 0n —
- * guessing it would corrupt the count. The caller must treat a missing key as "unknown," never as
- * "zero."
+ * address, a transport error, a timeout, or (a historical block whose state has been pruned) — never
+ * fails the batch. UNLIKE readTokenMetadata, though, there is no safe fallback VALUE for a balance: 0
+ * is a real, meaningful answer here (it is exactly what turns a holder into a non-holder), so a failed
+ * read is ABSENT from the returned map rather than defaulted to 0n — guessing it would corrupt the
+ * count. The caller must treat a missing key as "unknown," never as "zero."
  *
  * The viem client already batches up to 100 calls into one HTTP request (createChainClient's
  * `batch.batchSize`); every read here fires in parallel and relies entirely on that transport-level
@@ -341,26 +381,28 @@ export async function readBalances(
   client: Pick<PublicClient, "readContract">,
   pairs: readonly BalancePair[],
   blockNumber?: bigint,
+  timeoutMs?: number,
 ): Promise<Map<string, bigint>> {
   const settled = await Promise.allSettled(
     pairs.map(async (pair) => {
       const token = pair.token.toLowerCase();
       const wallet = pair.wallet.toLowerCase();
-      const balance = await client.readContract({
+      const read = client.readContract({
         address: token as `0x${string}`,
         abi: ERC20_BALANCE_ABI,
         functionName: "balanceOf",
         args: [wallet as `0x${string}`],
         blockNumber,
       });
-      return { key: `${token}-${wallet}`, balance };
+      const balance = await (timeoutMs === undefined ? read : withDeadline(read, timeoutMs));
+      return { key: balancePairKey(pair), balance };
     }),
   );
 
   const result = new Map<string, bigint>();
   for (const outcome of settled) {
     if (outcome.status === "fulfilled") result.set(outcome.value.key, outcome.value.balance);
-    // A rejected read is left absent — see the doc comment above.
+    // A rejected read (including a timeout) is left absent — see the doc comment above.
   }
   return result;
 }

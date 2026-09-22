@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { acquireLease, readState, saveCursors } from "@/lib/sync/state";
 import { testDb } from "@/test/db";
@@ -92,15 +92,18 @@ type QuoteFixture = readonly [bigint, bigint, bigint, bigint, bigint]; // roundI
  * readQuotePrices, AND readBalances — an address (or, for balances, a token-wallet pair) with no
  * fixture throws, which all three already treat as a normal per-item failure (their own tests cover
  * that; this file is about run.ts's orchestration, not their decode logic). `balances` is keyed
- * `${token}-${wallet}`, both lowercase, matching readBalances' own map convention; `onBalanceCall` (if
- * given) is invoked with each call's `blockNumber` so a test can assert whether a historical block was
- * asked for (normal mode) or not (the catch-up fallback).
+ * `${token}-${wallet}`, both lowercase, matching readBalances' own map convention; a fixture is either
+ * a plain `bigint` (returned regardless of `blockNumber` — fine when a test does not care which of the
+ * now-two reads, before or after, it is answering) or a function of `blockNumber` returning a `bigint`
+ * (a real balance at that block) or `undefined` (no fixture at that block — a per-pair failure, same as
+ * an absent key). `onBalanceCall` (if given) is invoked with each call's `blockNumber` so a test can
+ * assert exactly which blocks were asked for.
  */
 function fakeChainClient(
   opts: {
     tokens?: Record<string, TokenFixture>;
     quotes?: Record<string, QuoteFixture>;
-    balances?: Record<string, bigint>;
+    balances?: Record<string, bigint | ((blockNumber: bigint | undefined) => bigint | undefined)>;
     onBalanceCall?: (blockNumber: bigint | undefined) => void;
   } = {},
 ): ChainClient & { calls: { address: string; functionName: string }[] } {
@@ -122,8 +125,9 @@ function fakeChainClient(
         opts.onBalanceCall?.(args.blockNumber);
         const wallet = String(args.args?.[0]).toLowerCase();
         const key = `${address}-${wallet}`;
-        const balance = balances[key];
-        if (balance === undefined) throw new Error(`fakeChainClient: no balance fixture for ${key}`);
+        const entry = balances[key];
+        const balance = typeof entry === "function" ? entry(args.blockNumber) : entry;
+        if (balance === undefined) throw new Error(`fakeChainClient: no balance fixture for ${key} at block ${String(args.blockNumber)}`);
         return balance;
       }
       const t = tokens[address];
@@ -424,17 +428,25 @@ describe("runChainSync: metadata retry sweep", () => {
   });
 });
 
-describe("runChainSync: holder-count upkeep", () => {
+describe("runChainSync: holder-count upkeep (fix round 1 — observe both balances, derive nothing)", () => {
   const WALLET_2 = addr(0xc2);
   const holdersOf = async (id: string) =>
     (await db.query<{ holders_count: number }>("select holders_count from market.tokens where id = $1", [id]))[0]!.holders_count;
   const tokenFixture = { [AI]: { symbol: "AI", name: "AI Token", decimals: 18, totalSupply: 1_000_000n } };
+  const balanceOfCalls = (client: { calls: { functionName: string }[] }) => client.calls.filter((c) => c.functionName === "balanceOf");
+  const sortedBlocks = (arr: (bigint | undefined)[]) =>
+    [...arr].sort((a, b) => (a === b ? 0 : a === undefined ? -1 : b === undefined ? 1 : a < b ? -1 : 1));
 
-  it("normal mode: a buy from a wallet with a zero balance before the trade is a new holder (+1), applied in the same cycle that creates the token", async () => {
+  it("normal mode: a buy from a wallet with a zero balance before the trade is a new holder (+1), reading BOTH before (cursor 99) and after (this batch's last block, 101)", async () => {
     await seedCursor(db, 99);
-    const events = [initEvent(), swapEvent()]; // swapEvent(): amount0 2_000_000n > 0 -> a buy of AI (currency0) by WALLET
+    const events = [initEvent(), swapEvent()]; // amount0 2_000_000n > 0 -> a buy of AI (currency0) by WALLET
     const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
-    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n } });
+    const blockNumbers: (bigint | undefined)[] = [];
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      balances: { [`${AI}-${WALLET}`]: (b) => (b === 99n ? 0n : b === 101n ? 2_000_000n : undefined) },
+      onBalanceCall: (b) => blockNumbers.push(b),
+    });
     const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
 
     const report = await runChainSync(db, chainDeps({ source, client }), opts);
@@ -444,21 +456,21 @@ describe("runChainSync: holder-count upkeep", () => {
     expect(report.holderReadsUnknown).toBe(0);
     // brand-new token inserted at 0, then this cycle's own +1 delta applied on top (store.test.ts pins the ordering).
     expect(await holdersOf(AI)).toBe(1);
-    // the "before" read is historical, at cursor (99) — the block before this batch, not the current head.
-    const balanceCall = client.calls.find((c) => c.functionName === "balanceOf");
-    expect(balanceCall).toBeDefined();
+    // TEST-3 (review): both sides pinned exactly, not just "some call happened".
+    expect(sortedBlocks(blockNumbers)).toEqual(sortedBlocks([99n, 101n]));
   });
 
-  it("normal mode: a full sell to zero is one fewer holder (-1), derived from the pair's net raw delta without a second chain read", async () => {
+  it("normal mode: a full sell to zero is one fewer holder (-1), from an OBSERVED after balance", async () => {
     await seedToken(db, AI, 1_700_000_000); // AI already exists before this cycle, so its baseline below survives the fold
     await db.query("update market.tokens set holders_count = 3 where id = $1", [AI]);
     await seedCursor(db, 99);
 
-    // A pool for the already-known AI token, then a sell of exactly 500 raw units (tokenIsCurrency0 true,
-    // so the token leg is amount0) by WALLET, whose pre-batch balance is fixed at exactly 500n — a full exit.
     const events = [initEvent(), swapEvent({ txHash: hex(2, 64), amount0: -500n, amount1: 300n })];
     const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
-    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 500n } });
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      balances: { [`${AI}-${WALLET}`]: (b) => (b === 99n ? 500n : b === 101n ? 0n : undefined) },
+    });
     const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
 
     const report = await runChainSync(db, chainDeps({ source, client }), opts);
@@ -468,11 +480,35 @@ describe("runChainSync: holder-count upkeep", () => {
     expect(await holdersOf(AI)).toBe(2); // 3 - 1
   });
 
-  it("a pair whose balance could not be read contributes 0 and is counted unknown, never guessed", async () => {
+  it("MAJOR-3 regression: a router/hook fee taken in the token still resolves correctly, because 'after' is OBSERVED rather than derived from the pool's emitted amount", async () => {
+    await seedToken(db, AI, 1_700_000_000);
+    await db.query("update market.tokens set holders_count = 1 where id = $1", [AI]);
+    await seedCursor(db, 99);
+
+    // The wallet hands the router 500 tokens; the router (or a hook, e.g. our own SVRouter's 0.5% fee)
+    // keeps a cut and the POOL only ever sees 495 leave. The deleted derivation (before + the pool's own
+    // emitted delta) would have computed after = 500 + (-495) = 5n — nonzero, missing the exit entirely.
+    // The wallet's REAL balance is 0: all 500 left it, fee included.
+    const events = [initEvent(), swapEvent({ txHash: hex(2, 64), amount0: -495n, amount1: 300n })];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      balances: { [`${AI}-${WALLET}`]: (b) => (b === 99n ? 500n : b === 101n ? 0n : undefined) },
+    });
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.holderDeltaApplied).toBe(1);
+    expect(await holdersOf(AI)).toBe(0); // 1 - 1: the exit is caught, unlike the deleted derivation
+  });
+
+  it("a pair whose balance could not be read on EITHER side contributes 0 and is counted unknown, never guessed", async () => {
     await seedCursor(db, 99);
     const events = [initEvent(), swapEvent()];
     const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
-    const client = fakeChainClient({ tokens: tokenFixture }); // no `balances` fixture at all: the one read fails
+    const client = fakeChainClient({ tokens: tokenFixture }); // no balances fixture at all: both reads fail
     const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
 
     const report = await runChainSync(db, chainDeps({ source, client }), opts);
@@ -483,26 +519,109 @@ describe("runChainSync: holder-count upkeep", () => {
     expect(await holdersOf(AI)).toBe(0); // never guessed: stays at the brand-new-token default
   });
 
-  it("catch-up mode (stopWhenCaughtUp): reads the current balance instead of a historical one, catches a sell-to-zero exactly, and contributes 0 for a buy from an unknown prior state", async () => {
+  it("a pair whose AFTER balance could not be read is still unknown even though BEFORE succeeded (never guessed off one side alone)", async () => {
+    await seedCursor(db, 99);
+    const events = [initEvent(), swapEvent()];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      balances: { [`${AI}-${WALLET}`]: (b) => (b === 99n ? 0n : undefined) }, // "before" (99) resolves; "after" (101) does not
+    });
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.holderDeltaApplied).toBe(0);
+    expect(report.holderReadsUnknown).toBe(1);
+    expect(await holdersOf(AI)).toBe(0);
+  });
+
+  describe("MINOR-8: a one-line warn when a normal-mode cycle resolves none of a real batch of pairs", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("warns when every pair in the cycle goes unresolved", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await seedCursor(db, 99);
+      const events = [initEvent(), swapEvent()];
+      const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+      const client = fakeChainClient({ tokens: tokenFixture }); // no balances fixture: nothing resolves
+      const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+      await runChainSync(db, chainDeps({ source, client }), opts);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("resolved 0 of 1 balance pair"));
+    });
+
+    it("does not warn when at least one pair resolves", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await seedCursor(db, 99);
+      const events = [initEvent(), swapEvent()];
+      const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+      const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n } });
+      const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+      await runChainSync(db, chainDeps({ source, client }), opts);
+
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("does not warn on a catch-up or window-skip cycle, where applied 0 is expected rather than a signal", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await seedCursor(db, 99);
+      const events = [initEvent(), swapEvent()];
+      const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+      const client = fakeChainClient({ tokens: tokenFixture }); // would fail even if attempted, but must not be attempted at all
+      const opts = baseOpts({ maxSpan: 150, maxRequests: 2, stopWhenCaughtUp: true });
+
+      await runChainSync(db, chainDeps({ source, client }), opts);
+
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  it("several trades for the same wallet and token in one batch still cost exactly one read each way, and the delta reflects only the two OBSERVED ends", async () => {
+    await seedCursor(db, 99);
+    // Buy, sell to zero, buy again — the old netting logic (deleted this round) would have had to get this
+    // right by summing; now it is trivially right, because only the two real balances are ever consulted.
+    const events = [
+      initEvent(),
+      swapEvent({ txHash: hex(2, 64), amount0: 300n, amount1: -150n }),
+      swapEvent({ txHash: hex(3, 64), amount0: -300n, amount1: 150n }),
+      swapEvent({ txHash: hex(4, 64), amount0: 500n, amount1: -250n }),
+    ];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({
+      tokens: tokenFixture,
+      balances: { [`${AI}-${WALLET}`]: (b) => (b === 99n ? 0n : b === 101n ? 500n : undefined) },
+    });
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.trades).toBe(3); // all three trades still recorded
+    expect(report.holderDeltaApplied).toBe(1); // one PAIR, not one per trade
+    expect(await holdersOf(AI)).toBe(1); // 0 -> 1
+    expect(balanceOfCalls(client)).toHaveLength(2); // exactly one before + one after, never three of either
+  });
+
+  it("BLOCKER-1 fix: catch-up mode (stopWhenCaughtUp) applies NO holder deltas at all — every pair unknown, nothing read", async () => {
     await seedToken(db, AI, 1);
     await db.query("update market.tokens set holders_count = 5 where id = $1", [AI]);
     await seedCursor(db, 99);
 
-    // Two wallets trade AI in the same batch: WALLET sells out, WALLET_2 buys in.
     const events = [
       initEvent(),
       swapEvent({ txHash: hex(2, 64), txFrom: WALLET, amount0: -500n, amount1: 300n }),
       swapEvent({ txHash: hex(3, 64), txFrom: WALLET_2, amount0: 200n, amount1: -100n }),
     ];
     const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
-    const blockNumbers: (bigint | undefined)[] = [];
-    const client = fakeChainClient({
-      tokens: tokenFixture,
-      // Current balances only — no historical fixture would even matter, since catch-up mode never asks
-      // for a blockNumber at all (asserted below via onBalanceCall).
-      balances: { [`${AI}-${WALLET}`]: 0n, [`${AI}-${WALLET_2}`]: 999n },
-      onBalanceCall: (b) => blockNumbers.push(b),
-    });
+    // Fixtures exist for both pairs, resolvable at any block: the point is catch-up must never even ask,
+    // not merely that asking would fail.
+    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n, [`${AI}-${WALLET_2}`]: 999n } });
     // stopWhenCaughtUp: true is exactly scripts/chain/catchup.mts's own configuration; this batch is not
     // caught up yet (target 200 > cursor 99), so the loop still runs this one cycle before stopping.
     const opts = baseOpts({ maxSpan: 150, maxRequests: 2, stopWhenCaughtUp: true });
@@ -510,13 +629,59 @@ describe("runChainSync: holder-count upkeep", () => {
     const report = await runChainSync(db, chainDeps({ source, client }), opts);
 
     expect(report.error).toBeNull();
-    expect(report.holderDeltaApplied).toBe(2);
-    expect(report.holderReadsUnknown).toBe(0);
-    expect(await holdersOf(AI)).toBe(4); // 5 - 1 (WALLET sold to 0) + 0 (WALLET_2's buy is unknown-prior-state)
-    expect(blockNumbers.every((b) => b === undefined)).toBe(true); // current balance, never a historical one
+    expect(report.holderDeltaApplied).toBe(0);
+    expect(report.holderReadsUnknown).toBe(2); // both distinct pairs, uncounted rather than guessed
+    expect(await holdersOf(AI)).toBe(5); // untouched — the 17 Sep baseline stands until the cron takes over
+    expect(balanceOfCalls(client)).toHaveLength(0); // never attempted, not attempted-and-failed
   });
 
-  it("respects the per-cycle pair cap: reads only the first pairCap pairs, counts the rest unknown, and never drops a trade", async () => {
+  it("TEST-4 (BLOCKER-1 regression): the same wallet trading the same token across TWO catch-up cycles is never decremented at all, let alone once per cycle", async () => {
+    await seedToken(db, AI, 1);
+    await db.query("update market.tokens set holders_count = 5 where id = $1", [AI]);
+    await seedCursor(db, 99);
+
+    // Two replay cycles, the same wallet trading the same token in both (the review's own worked example:
+    // a buy in one cycle, a sell in another). The old per-cycle fallback would have produced -1 or worse
+    // here; the fix applies nothing in either cycle.
+    const source = new FakeLogSource({
+      head: 300,
+      batches: {
+        100: { events: [initEvent(), swapEvent({ txHash: hex(2, 64), txFrom: WALLET, amount0: 500n, amount1: -300n })], nextBlock: 102 },
+        102: { events: [swapEvent({ block: 103, txHash: hex(3, 64), txFrom: WALLET, amount0: -500n, amount1: 300n })], nextBlock: 104 },
+      },
+    });
+    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n } });
+    const opts = baseOpts({ maxSpan: 2, maxRequests: 4, stopWhenCaughtUp: true }); // exactly 2 cycles (head+fetch each)
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.cycles).toBe(2);
+    expect(report.holderDeltaApplied).toBe(0);
+    expect(report.holderReadsUnknown).toBe(2); // one pair per cycle, both unknown
+    expect(await holdersOf(AI)).toBe(5); // never touched across either cycle
+    expect(balanceOfCalls(client)).toHaveLength(0);
+  });
+
+  it("MAJOR-2 fix: skips the upkeep entirely once the cron's window is nearly spent — no reads, everything unknown", async () => {
+    await seedCursor(db, 99);
+    const events = [initEvent(), swapEvent()];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const client = fakeChainClient({ tokens: tokenFixture, balances: { [`${AI}-${WALLET}`]: 0n } });
+    // windowSec 8: from the very first cycle, endMs - now() is 8000ms, already under HOLDER_MIN_WINDOW_MS (10s).
+    const opts = baseOpts({ windowSec: 8, maxSpan: 150, maxRequests: 2 });
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.trades).toBe(1); // the fold itself is unaffected — only the upkeep is skipped
+    expect(report.holderDeltaApplied).toBe(0);
+    expect(report.holderReadsUnknown).toBe(1);
+    expect(await holdersOf(AI)).toBe(0);
+    expect(balanceOfCalls(client)).toHaveLength(0); // never attempted
+  });
+
+  it("respects the per-cycle pair cap: reads only the first pairCap pairs (both ways), counts the rest unknown, and never drops a trade", async () => {
     await seedCursor(db, 99);
     const events = [
       initEvent(),
@@ -526,7 +691,7 @@ describe("runChainSync: holder-count upkeep", () => {
     const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
     const client = fakeChainClient({
       tokens: tokenFixture,
-      balances: { [`${AI}-${WALLET}`]: 0n, [`${AI}-${WALLET_2}`]: 0n }, // both fixtures exist; the cap alone decides
+      balances: { [`${AI}-${WALLET}`]: 0n, [`${AI}-${WALLET_2}`]: 0n }, // flat: both fixtures resolve either way; the cap alone decides
     });
     const opts = baseOpts({ maxSpan: 150, maxRequests: 2, holderPairCap: 1 });
 
@@ -536,6 +701,7 @@ describe("runChainSync: holder-count upkeep", () => {
     expect(report.trades).toBe(2); // the cap never drops a trade
     expect(report.holderDeltaApplied).toBe(1);
     expect(report.holderReadsUnknown).toBe(1);
+    expect(balanceOfCalls(client)).toHaveLength(2); // 1 pair x 2 reads (before + after), not 2 pairs x 2
   });
 
   it("surfaces holderDeltaApplied and holderReadsUnknown on the onCycle callback, alongside orphanedTokens", async () => {
