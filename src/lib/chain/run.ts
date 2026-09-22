@@ -86,7 +86,7 @@ export type ChainRunOpts = {
   quoteRefreshSec?: number;
   /** Token ids read per invocation's metadata retry sweep. Default 50. */
   metadataRetryLimit?: number;
-  /** Distinct (token, wallet) pairs read for holder-count upkeep per cycle. Default 2_000 — see DEFAULT_HOLDER_PAIR_CAP. */
+  /** Distinct (token, wallet) pairs read for holder-count upkeep per cycle. Default 600 — see DEFAULT_HOLDER_PAIR_CAP. */
   holderPairCap?: number;
   /**
    * When caught up (the fetch target is at or behind the cursor), stop the loop instead of sleeping and
@@ -165,7 +165,7 @@ const DEFAULT_HOLDER_PAIR_CAP = 600;
  * to ~40s. A timed-out read is passed through `readBalances`' own `timeoutMs`, which treats it exactly
  * like any other per-pair failure: absent from the map, counted unknown, never guessed.
  */
-const HOLDER_READ_TIMEOUT_MS = 5_000;
+const HOLDER_READ_TIMEOUT_MS = 8_000;
 
 /**
  * Holder-count upkeep is skipped for the rest of THIS cycle — every pair counted unknown, nothing read
@@ -377,6 +377,7 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
       if (deps.source.requests - requestsStart >= maxRequests) break;
 
       const before = deps.source.requests;
+      const cycleStartMs = opts.now();
       try {
         const target = (await deps.source.head()) - safetyBlocks;
         if (target <= cursor) {
@@ -463,6 +464,19 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
           await upsertQuotes(db, [], prices);
           report.quotesRefreshed += prices.length;
           lastQuoteRefreshMs = opts.now();
+        }
+
+        // Pace the steady state. Measured on the live cron, 22 Sep 2026: with no pause after a successful
+        // cycle, a caught-up reader ran 23 cycles in one 50 s window, because the chain adds ~20 blocks in
+        // the ~2 s a tiny cycle takes, so there was always "more to do". That cost 47 HyperSync requests a
+        // minute against a design of about two, and it hammered the chain node with holder-balance reads
+        // in 23 tiny batches, which the node then refused: 416 of 418 reads failed. So when this cycle
+        // reached the target — we are caught up — wait until intervalSec after it began, clamped to the
+        // window, exactly as the old market job paced itself. A size-capped fetch (cursor < target) means
+        // we are behind, and the catch-up path loops straight away as before.
+        if (cursor >= target) {
+          const nextMs = Math.min(cycleStartMs + opts.intervalSec * 1000, endMs);
+          await opts.sleep(Math.max(0, nextMs - opts.now()));
         }
       } catch (err) {
         report.error = message(err);
