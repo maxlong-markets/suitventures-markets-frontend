@@ -16,7 +16,7 @@ import VoteButtons from "./VoteButtons";
 const COPIED_MS = 1400;
 
 export default function TokenHeader({ pair }: { pair: TokenPair }) {
-  const { stars, toggleStar, votes, vote } = useAppState();
+  const { stars, toggleStar, votes, vote, votePending } = useAppState();
   const [copied, setCopied] = useState(false);
   const timer = useRef(0);
   const starred = stars.has(pair.id);
@@ -98,6 +98,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             bull={pair.bull}
             bear={pair.bear}
             voted={voted}
+            pending={votePending.has(pair.id)}
             onVote={(dir) => vote(pair.id, dir)}
           />
         </div>
