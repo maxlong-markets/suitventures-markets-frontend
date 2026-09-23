@@ -8,6 +8,7 @@ import {
   DEFAULT_REQUEST_SPACING_MS,
   DEFAULT_SAFETY_BLOCKS,
   HOLDERS_JOB,
+  REQUESTED_SHARE,
   runHoldersBuild,
   type HoldersRunOpts,
   type HoldersRunReport,
@@ -18,7 +19,7 @@ import { refreshRow } from "./store";
 const hex = (n: number, digits: number) => "0x" + n.toString(16).padStart(digits, "0");
 const addr = (n: number) => hex(n, 40);
 
-const T1 = addr(0xb1), T2 = addr(0xb2), T3 = addr(0xb3);
+const T1 = addr(0xb1), T2 = addr(0xb2), T3 = addr(0xb3), T4 = addr(0xb4);
 const W1 = addr(0xc1), W2 = addr(0xc2), W3 = addr(0xc3);
 const POOL = hex(0x11, 64);
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -111,8 +112,8 @@ function baseOpts(over: Partial<HoldersRunOpts> = {}): HoldersRunOpts & { slept:
 const frozenOpts = (over: Partial<HoldersRunOpts> = {}) => baseOpts({ requestSpacingMs: 0, ...over });
 
 const EMPTY_REPORT: HoldersRunReport = {
-  skipped: null, coverage: 0, coverageRecomputed: false, due: 0, tokensTouched: 0, tokensReady: 0, tokensSkipped: 0,
-  slices: 0, requests: 0, transfers: 0, errors: 0, error: null, spacingMs: 0, // frozenOpts: spacing 0; the pacing tests assert their own
+  skipped: null, coverage: 0, coverageRecomputed: false, due: 0, tokensTouched: 0, tokensRequestedTouched: 0, tokensReady: 0,
+  tokensSkipped: 0, slices: 0, requests: 0, transfers: 0, errors: 0, error: null, spacingMs: 0, // frozenOpts: spacing 0; the pacing tests assert their own
 };
 
 let db: Db;
@@ -188,8 +189,8 @@ describe("runHoldersBuild: the due list and one token's slices", () => {
     const report = await runHoldersBuild(db, { source }, frozenOpts());
 
     expect(report).toEqual({
-      ...EMPTY_REPORT, coverage: 1, coverageRecomputed: true, due: 2, tokensTouched: 2, tokensReady: 2,
-      slices: 3, requests: 4, transfers: 4,
+      ...EMPTY_REPORT, coverage: 1, coverageRecomputed: true, due: 2, tokensTouched: 2, tokensRequestedTouched: 1,
+      tokensReady: 2, slices: 3, requests: 4, transfers: 4,
     });
     // The requested token first, its slices in cursor order, and every request carrying the head - safety ceiling.
     expect(source.calls).toEqual([
@@ -344,6 +345,59 @@ describe("runHoldersBuild: pacing and the window", () => {
   });
 });
 
+describe("runHoldersBuild: the opened-token tier's share of the window", () => {
+  it("stops STARTING opened tokens after REQUESTED_SHARE of the window, so the table's own lists still get slices", async () => {
+    // I3: tier 1 is `limit 100` and is not restricted to the coverage set, so a caller looping the public
+    // holders GET over many ids could keep it full and the table's own lists would never refresh. Here three
+    // opened tokens each need two slices and one covered token needs one; without the cap the third opened
+    // token eats the rest of the window and the covered token is never reached at all.
+    expect(REQUESTED_SHARE).toBe(0.5);
+    for (const t of [T1, T2, T3, T4]) await seedToken(t);
+    await refresh(T1, { requestedAt: NOW });
+    await refresh(T2, { requestedAt: NOW - 1 });
+    await refresh(T3, { requestedAt: NOW - 2 });
+    await swap(T4, NOW - 100); // the only token in the coverage set: due list 3
+
+    const two = { 0: { transfers: [mint(10, W1, 5n)], nextBlock: 3000 }, 3000: { transfers: [], nextBlock: PAST_CEILING } };
+    const one = { 0: { transfers: [mint(10, W2, 6n)], nextBlock: PAST_CEILING } };
+    const opts = baseOpts({ windowSec: 6, requestSpacingMs: 1_000 });
+    const source = new FakeTransferSource(opts.now, { [T1]: two, [T2]: two, [T3]: two, [T4]: one });
+
+    const report = await runHoldersBuild(db, { source }, opts);
+
+    // head at 0 s, T1 at 1 s and 2 s, T2 at 3 s and 4 s. T3 would start at 4 s — past half of the six-second
+    // window — so it is passed over, and the covered token gets its slice in this same invocation.
+    expect(source.calls.map((c) => c.token)).toEqual([T1, T1, T2, T2, T4]);
+    expect(report).toMatchObject({
+      due: 4, tokensTouched: 3, tokensRequestedTouched: 2, tokensReady: 3, slices: 5, requests: 6, error: null,
+    });
+    expect(await refreshRow(db, T4)).toMatchObject({ status: "ready", cursorBlock: PAST_CEILING });
+    expect(await refreshRow(db, T3)).toMatchObject({ status: "building", cursorBlock: 0 }); // never started
+    expect((await lastReport()).tokensRequestedTouched).toBe(2);
+  });
+
+  it("lets an opened token that started inside the share finish its slices, bounded only by the window", async () => {
+    // The cap is on STARTING a tier-1 token, never on one already in progress: its cursor is what makes the
+    // work resumable, and abandoning it mid-token would only re-fold the same range next minute.
+    await seedToken(T1);
+    await refresh(T1, { requestedAt: NOW });
+    const opts = baseOpts({ windowSec: 6, requestSpacingMs: 1_000 });
+    const source = new FakeTransferSource(opts.now, {
+      [T1]: {
+        0: { transfers: [mint(10, W1, 5n)], nextBlock: 3000 },
+        3000: { transfers: [], nextBlock: 6000 },
+        6000: { transfers: [], nextBlock: PAST_CEILING },
+      },
+    });
+
+    const report = await runHoldersBuild(db, { source }, opts);
+
+    // Its third slice goes out at 3 s, past half the window, because the token was started at 0 s.
+    expect(source.requestTimes).toEqual([NOW_MS, NOW_MS + 1_000, NOW_MS + 2_000, NOW_MS + 3_000]);
+    expect(report).toMatchObject({ tokensTouched: 1, tokensRequestedTouched: 1, tokensReady: 1, slices: 3 });
+  });
+});
+
 describe("runHoldersBuild: failures and the safety valve", () => {
   it("counts a source failure, leaves that token's cursor alone and carries on with the next due token", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -492,8 +546,8 @@ describe("runHoldersBuild: what it records through finishRun", () => {
     await runHoldersBuild(db, { source }, frozenOpts());
 
     expect(await lastReport()).toEqual({
-      at: NOW, coverage: 0, coverageRecomputed: 1, due: 1, tokensTouched: 1, tokensReady: 1, tokensSkipped: 0,
-      slices: 1, requests: 2, transfers: 2, errors: 0, spacingMs: 0,
+      at: NOW, coverage: 0, coverageRecomputed: 1, due: 1, tokensTouched: 1, tokensRequestedTouched: 1, tokensReady: 1,
+      tokensSkipped: 0, slices: 1, requests: 2, transfers: 2, errors: 0, spacingMs: 0,
     });
     const state = await readState(db, HOLDERS_JOB);
     expect(state).toMatchObject({ lastError: null, lastOkAt: NOW, lastRunAt: NOW, rowsWritten: 2, queriesUsed: 2, leaseOwner: null });

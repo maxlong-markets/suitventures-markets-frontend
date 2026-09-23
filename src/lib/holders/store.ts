@@ -10,6 +10,12 @@ import type { Db } from "@/lib/db/client";
 
 export type HolderStatus = "building" | "ready" | "skipped";
 export type RefreshRow = { tokenId: string; refreshedAt: number; cursorBlock: number; requestedAt: number; status: HolderStatus; transfers: number };
+/**
+ * A due row with the tier that claimed it (design section 4's three due lists): 1 opened-and-stale, 2 covered
+ * and traded since a stale list, 3 the full pass. The runner needs the number because tier 1 is the only tier
+ * a stranger can fill on demand, and it is capped to a share of each window (REQUESTED_SHARE in run.ts, I3).
+ */
+export type DueRow = RefreshRow & { tier: 1 | 2 | 3 };
 
 /** Tokens on the markets table: the top N by trades in the last 24 h (design section 4, coverage set). */
 export const COVERAGE_LIMIT = 500;
@@ -105,23 +111,28 @@ const TRADED_SINCE_SQL = `select r.token_id from market.holder_refresh r
 /**
  * The builder's work list for one invocation, in the order of design section 4: opened-and-stale first, then
  * covered tokens that traded since a list older than STALE_SEC (in coverage order, most traded first), then
- * covered tokens older than FULL_PASS_SEC (oldest first). Each token once; skipped never. Covered tokens with
- * no row must have been inserted by ensureRows before this is called.
+ * covered tokens older than FULL_PASS_SEC (oldest first). Each token once, tagged with the tier that claimed
+ * it; skipped never. Covered tokens with no row must have been inserted by ensureRows before this is called.
+ *
+ * One benign state has no exit here: a token that got a `building` row from ensureRows and then left the top
+ * 500 before it was ever built is in no tier at all — tiers 2 and 3 read the coverage set, tier 1 needs a
+ * request stamp — so it simply waits, costing one row, until somebody opens its page or the nightly's 7-day
+ * cleanup (KEEP_REQUESTED_SEC) drops it.
  */
-export async function dueTokens(db: Db, coverage: readonly string[], now: number): Promise<RefreshRow[]> {
-  const out: RefreshRow[] = [];
+export async function dueTokens(db: Db, coverage: readonly string[], now: number): Promise<DueRow[]> {
+  const out: DueRow[] = [];
   const seen = new Set<string>();
-  const push = (r: RefreshRow) => { if (!seen.has(r.tokenId)) { seen.add(r.tokenId); out.push(r); } };
-  for (const r of await db.query<Row>(REQUESTED_SQL, [now - STALE_SEC])) push(shape(r));
+  const push = (r: RefreshRow, tier: 1 | 2 | 3) => { if (!seen.has(r.tokenId)) { seen.add(r.tokenId); out.push({ ...r, tier }); } };
+  for (const r of await db.query<Row>(REQUESTED_SQL, [now - STALE_SEC])) push(shape(r), 1);
   if (coverage.length === 0) return out;
   const byId = new Map<string, RefreshRow>();
   for (const r of await db.query<Row>(COVERAGE_ROWS_SQL, [coverage])) byId.set(r.token_id, shape(r));
   const staleIds = coverage.filter((id) => { const r = byId.get(id); return r && r.status === "ready" && r.refreshedAt < now - STALE_SEC; });
   const traded = new Set((await db.query<{ token_id: string }>(TRADED_SINCE_SQL, [staleIds, now - FULL_PASS_SEC])).map((r) => r.token_id));
-  for (const id of staleIds) if (traded.has(id)) push(byId.get(id)!);
+  for (const id of staleIds) if (traded.has(id)) push(byId.get(id)!, 2);
   const full = coverage.map((id) => byId.get(id)).filter((r): r is RefreshRow => !!r && r.status !== "skipped" && r.refreshedAt < now - FULL_PASS_SEC);
   full.sort((a, b) => a.refreshedAt - b.refreshedAt);
-  for (const r of full) push(r);
+  for (const r of full) push(r, 3);
   return out;
 }
 

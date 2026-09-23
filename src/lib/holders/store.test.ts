@@ -303,11 +303,13 @@ it("dueTokens lists opened, then traded-since, then full-pass tokens, each once"
   const due = await dueTokens(db, coverage, NOW);
   const ids = due.map((r) => r.tokenId);
   expect(ids).toEqual([T8, T1, T9, T3, T4, T5]);
+  // I3: which tier claimed each row travels with it, so the runner can cap what tier 1 may start.
+  expect(due.map((r) => r.tier)).toEqual([1, 1, 1, 2, 3, 3]);
   expect(ids).not.toContain(T2); // stale but no trade since, and inside the full pass
   expect(ids).not.toContain(T6); // refreshed five minutes ago
   expect(ids).not.toContain(T7); // skipped
   expect(due[0]).toEqual({
-    tokenId: T8, refreshedAt: 0, cursorBlock: 0, requestedAt: NOW - 5, status: "building", transfers: 0,
+    tokenId: T8, refreshedAt: 0, cursorBlock: 0, requestedAt: NOW - 5, status: "building", transfers: 0, tier: 1,
   });
 
   // With no coverage set at all, only the opened tokens are due.

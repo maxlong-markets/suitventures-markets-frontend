@@ -35,6 +35,16 @@ export const DEFAULT_SAFETY_BLOCKS = 30;
  * list's first tier without ever consulting the coverage set.
  */
 export const COVERAGE_TTL_SEC = 300;
+/**
+ * The share of each window in which the builder may START a due-list tier-1 token — one opened from a token
+ * page (store.ts's dueTokens). Review 24 Sep 2026 (I3): tier 1 is `limit 100` and, unlike tiers 2 and 3, is
+ * not restricted to the coverage set, so a caller looping the public holders GET over many token ids can keep
+ * it full indefinitely; the runner works the due list in order, so the table's own lists would then never
+ * refresh. Past this share the runner skips tier-1 rows and goes on to the first tier-2/3 one. A tier-1 token
+ * already in progress is never abandoned — its cursor is what makes the work resumable — so it finishes its
+ * slice loop under the window's own bound, as before.
+ */
+export const REQUESTED_SHARE = 0.5;
 
 export type HoldersRunDeps = { source: Pick<LogSource, "head" | "transfers" | "requests" | "rateLimitPerMinute"> };
 export type HoldersRunOpts = {
@@ -43,7 +53,10 @@ export type HoldersRunOpts = {
 };
 export type HoldersRunReport = {
   skipped: "lease" | "nightly" | null; coverage: number; coverageRecomputed: boolean; due: number;
-  tokensTouched: number; tokensReady: number; tokensSkipped: number;
+  tokensTouched: number;
+  /** Of `tokensTouched`, the ones that came from the opened-token tier — what REQUESTED_SHARE caps (I3). */
+  tokensRequestedTouched: number;
+  tokensReady: number; tokensSkipped: number;
   slices: number; requests: number; transfers: number; errors: number; error: string | null;
   /**
    * The LAST spacing this invocation paced at, after the key's advertised budget (READER_RESERVE_PER_MINUTE)
@@ -69,8 +82,8 @@ function parseCoverage(text: string): string[] | null {
 
 export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: HoldersRunOpts): Promise<HoldersRunReport> {
   const report: HoldersRunReport = {
-    skipped: null, coverage: 0, coverageRecomputed: false, due: 0, tokensTouched: 0, tokensReady: 0, tokensSkipped: 0,
-    slices: 0, requests: 0, transfers: 0, errors: 0, error: null, spacingMs: opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS,
+    skipped: null, coverage: 0, coverageRecomputed: false, due: 0, tokensTouched: 0, tokensRequestedTouched: 0, tokensReady: 0,
+    tokensSkipped: 0, slices: 0, requests: 0, transfers: 0, errors: 0, error: null, spacingMs: opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS,
   };
   const startMs = opts.now();
   if (!(await acquireLease(db, HOLDERS_JOB, opts.owner, sec(startMs), opts.leaseSec))) return { ...report, skipped: "lease" };
@@ -123,9 +136,15 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     await ensureRows(db, coverage);
     const due = await dueTokens(db, coverage, sec(opts.now()));
     report.due = due.length;
+    // Past this instant no NEW opened token is started; see REQUESTED_SHARE for what that protects.
+    const requestedUntilMs = startMs + REQUESTED_SHARE * opts.windowSec * 1000;
     for (const row of due) {
       if (opts.now() >= endMs) break;
+      // `continue`, not `break`: the due list is tier-ordered, so skipping past the remaining tier-1 rows is
+      // exactly how the first tier-2/3 token is reached.
+      if (row.tier === 1 && opts.now() >= requestedUntilMs) continue;
       report.tokensTouched += 1;
+      if (row.tier === 1) report.tokensRequestedTouched += 1;
       await buildToken(row);
       await renewLease(db, HOLDERS_JOB, opts.owner, sec(opts.now()), opts.leaseSec);
     }
@@ -142,7 +161,8 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
   function cycleReport(): Record<string, number> {
     return {
       at: sec(opts.now()), coverage: report.coverage, coverageRecomputed: report.coverageRecomputed ? 1 : 0, due: report.due,
-      tokensTouched: report.tokensTouched, tokensReady: report.tokensReady, tokensSkipped: report.tokensSkipped,
+      tokensTouched: report.tokensTouched, tokensRequestedTouched: report.tokensRequestedTouched,
+      tokensReady: report.tokensReady, tokensSkipped: report.tokensSkipped,
       slices: report.slices, requests: used(), transfers: report.transfers, errors: report.errors, spacingMs: report.spacingMs,
     };
   }
