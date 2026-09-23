@@ -114,8 +114,10 @@ export async function finishRun(
        last_ok_at = case when $3::boolean then $2::int else last_ok_at end,
        last_error = case when $3::boolean then null else $4::text end,
        rows_written = rows_written + $5::int, queries_used = queries_used + $6::int,
-       last_report = coalesce($7::jsonb, last_report)
+       last_report = coalesce($7::text::jsonb, last_report)
      where job = $1`,
+    // Bound as text and cast in SQL: a parameter described as jsonb gets JSON-encoded by the production
+    // driver itself, so an already-encoded string would land double-encoded (as a JSON string, not an object).
     [job, r.now, r.ok, r.error ?? null, r.rows, r.queries, r.report ? JSON.stringify(r.report) : null],
   );
 }

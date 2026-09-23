@@ -25,7 +25,7 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 type QuoteCols = { usd_price: number | null; usd_updated_at: number | null; aggregator: string | null };
 type ListedRow = { symbol: string; pool_id: string; quote_id: string } & QuoteCols;
 type TokenCols = { decimals: number; total_supply: string; holders_count: number };
-type StateRow = { job: string; cursor: number; phase: string; last_ok_at: number | null; last_error: string | null; last_report: Record<string, unknown> | null };
+type StateRow = { job: string; cursor: number; phase: string; last_ok_at: number | null; last_error: string | null; last_report: Record<string, unknown> | string | null };
 type PoolKeyCols = {
   pool_id: string; hooks: string; fee: number; tick_spacing: number; token_is_currency0: boolean; price_quote: number;
   token_address: string; token_decimals: number; quote_address: string; quote_decimals: number;
@@ -135,8 +135,13 @@ export type DbBackendOpts = {
  * health's `sync.lastCycle`, or null when there is none yet or it lacks the fields — a report from an
  * older build, or an empty default, must not surface as zeros that read like "nothing resolved".
  */
-function lastCycleFrom(report: Record<string, unknown> | null, at: number): NonNullable<HealthReport["sync"]>["lastCycle"] | null {
-  if (!report) return null;
+function lastCycleFrom(stored: Record<string, unknown> | string | null, at: number): NonNullable<HealthReport["sync"]>["lastCycle"] | null {
+  let report = stored;
+  if (typeof report === "string") {
+    // A report written double-encoded (the first build of this, 23 Sep 2026) is a JSON string holding the object.
+    try { report = JSON.parse(report) as Record<string, unknown>; } catch { return null; }
+  }
+  if (!report || typeof report !== "object") return null;
   const num = (key: string) => (typeof report[key] === "number" ? (report[key] as number) : null);
   const [reportedAt, blocks, trades, holderPairs, holderDeltaApplied, holderReadsUnknown] =
     ["at", "blocks", "trades", "holderPairs", "holderDeltaApplied", "holderReadsUnknown"].map(num);

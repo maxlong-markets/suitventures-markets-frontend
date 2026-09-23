@@ -71,6 +71,7 @@ describe("sync_state", () => {
     await finishRun(db, "chain", { now: NOW, ok: true, rows: 1, queries: 1, report: { at: NOW, holderPairs: 12, holderDeltaApplied: 10, holderReadsUnknown: 2 } });
     const read = async () => (await db.query<{ last_report: Record<string, unknown> }>("select last_report from market.sync_state where job = 'chain'"))[0]!.last_report;
     expect(await read()).toEqual({ at: NOW, holderPairs: 12, holderDeltaApplied: 10, holderReadsUnknown: 2 });
+    expect((await db.query<{ t: string }>("select jsonb_typeof(last_report) as t from market.sync_state where job = 'chain'"))[0]!.t).toBe("object");
     await finishRun(db, "chain", { now: NOW + 1, ok: false, error: "boom", rows: 0, queries: 0 });
     expect(await read()).toEqual({ at: NOW, holderPairs: 12, holderDeltaApplied: 10, holderReadsUnknown: 2 }); // omitted: kept
     expect((await db.query<{ last_report: unknown }>("select last_report from market.sync_state where job = 'market'"))[0]?.last_report ?? {}).toEqual({});
