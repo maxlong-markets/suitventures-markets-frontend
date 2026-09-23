@@ -270,6 +270,31 @@ describe("runHoldersBuild: pacing and the window", () => {
     expect(stored[0]!.last_report.spacingMs).toBe(3_000);
   });
 
+  it("re-reads the budget on every request, so a limit first advertised by a /query response paces the rest of the invocation", async () => {
+    // Review 24 Sep 2026 (I1): head() is GET /height and carries no rate-limit headers — they come only on
+    // POST /query — so a source that learns its budget from the FIRST SLICE is the real shape. Read once
+    // after head(), the budget would stay null here and every request below would go out 750 ms apart.
+    await seedToken(T1);
+    await refresh(T1, { requestedAt: NOW });
+    const opts = baseOpts();
+    const source = new FakeTransferSource(opts.now, {
+      [T1]: {
+        0: { transfers: [mint(10, W1, 5n)], nextBlock: 3000 },
+        3000: { transfers: [], nextBlock: 6000 },
+        6000: { transfers: [], nextBlock: PAST_CEILING },
+      },
+    });
+    source.onTransfers = async () => { source.rateLimitPerMinute = 30; };
+
+    const report = await runHoldersBuild(db, { source }, opts);
+
+    expect(report).toMatchObject({ tokensReady: 1, slices: 3, requests: 4, spacingMs: 3_000, error: null });
+    // head and the first slice at the default pace (nothing had answered with a budget yet), then 3 s apart.
+    expect(source.requestTimes).toEqual([NOW_MS, NOW_MS + 750, NOW_MS + 3_750, NOW_MS + 6_750]);
+    expect(opts.slept).toEqual([750, 3_000, 3_000]);
+    expect((await lastReport()).spacingMs).toBe(3_000); // the LAST effective spacing, not the opening one
+  });
+
   it("keeps the default spacing when the key advertises no budget (the paid package) or one wider than the default", async () => {
     await seedToken(T1);
     await refresh(T1, { requestedAt: NOW });

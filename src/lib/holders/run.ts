@@ -21,7 +21,8 @@ export const DEFAULT_REQUEST_SPACING_MS = 750;
  * Requests a minute left to the reader (its steady state is ~4, a backlog cycle more) when the key advertises a
  * budget (24 Sep 2026): the builder then spaces itself to `limit - reserve` a minute. The free key advertises
  * 30, so the builder drops to 20 a minute and the reader keeps working; the paid key advertises nothing and the
- * default spacing stands. This is what keeps a mis-set key on Vercel from starving the reader.
+ * default spacing stands. This is what keeps a mis-set key on Vercel from starving the reader. The budget is
+ * re-read before every request rather than once an invocation — see pace() for why that matters.
  */
 export const READER_RESERVE_PER_MINUTE = 10;
 export const DEFAULT_SAFETY_BLOCKS = 30;
@@ -44,7 +45,11 @@ export type HoldersRunReport = {
   skipped: "lease" | "nightly" | null; coverage: number; coverageRecomputed: boolean; due: number;
   tokensTouched: number; tokensReady: number; tokensSkipped: number;
   slices: number; requests: number; transfers: number; errors: number; error: string | null;
-  /** The spacing this invocation paced at, after the key's advertised budget (READER_RESERVE_PER_MINUTE) was applied. */
+  /**
+   * The LAST spacing this invocation paced at, after the key's advertised budget (READER_RESERVE_PER_MINUTE)
+   * was applied. It can differ from the opening one: the budget is only advertised on a `/query` response, so
+   * an invocation typically opens at the default and widens from its first slice onwards (I1, pace() below).
+   */
   spacingMs: number;
 };
 
@@ -78,15 +83,31 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     return { ...report, skipped: "nightly" };
   }
   const endMs = startMs + opts.windowSec * 1000;
-  let spacing = opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS;
+  const baseSpacing = opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS;
   const safety = opts.safetyBlocks ?? DEFAULT_SAFETY_BLOCKS;
   const maxTransfers = opts.maxTransfersPerToken ?? MAX_TRANSFERS_PER_TOKEN;
   const requestsStart = deps.source.requests;
   const used = () => deps.source.requests - requestsStart;
   let lastRequestMs = -Infinity;
   let head = 0;
+  /**
+   * Waits out the spacing owed before the next request, at the budget the key advertises RIGHT NOW.
+   *
+   * Review 24 Sep 2026 (I1): the budget used to be read once, straight after head(). head() is
+   * `GET /height`, which carries no rate-limit headers — measured 23 Sep, they come only on `POST /query` —
+   * so that one read always saw null and the builder never left DEFAULT_REQUEST_SPACING_MS, whatever the key
+   * later advertised. Resolving it here instead means the first slice's response is what widens the pace, and
+   * every request after it is spaced against the reader's reserve as designed. `report.spacingMs` is the LAST
+   * effective spacing, which is the one the next invocation will open at.
+   */
   const pace = async (): Promise<void> => {
-    const wait = lastRequestMs + spacing - opts.now();
+    const advertised = deps.source.rateLimitPerMinute;
+    const eff =
+      typeof advertised === "number" && advertised > 0
+        ? Math.max(baseSpacing, Math.ceil(60_000 / Math.max(1, advertised - READER_RESERVE_PER_MINUTE)))
+        : baseSpacing;
+    report.spacingMs = eff;
+    const wait = lastRequestMs + eff - opts.now();
     if (wait > 0) await opts.sleep(wait);
     lastRequestMs = opts.now();
   };
@@ -97,14 +118,6 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     // ready check below fire for every due token at once and stamp a half-built list as exact with a holder
     // count to match. Refuse it here: the invocation ends on the ok:false path and the next minute tries again.
     if (!Number.isInteger(head) || head <= 0) throw new Error(`holders: HyperSync head is not a positive integer: ${head}`);
-    // The head answer is the first response of the invocation, so the key's advertised budget (if any) is known
-    // from here on: never pace faster than `limit - READER_RESERVE_PER_MINUTE` a minute.
-    const advertised = deps.source.rateLimitPerMinute;
-    if (typeof advertised === "number" && advertised > 0) {
-      const allowed = Math.max(1, advertised - READER_RESERVE_PER_MINUTE);
-      spacing = Math.max(spacing, Math.ceil(60_000 / allowed));
-    }
-    report.spacingMs = spacing;
     const coverage = await resolveCoverage();
     report.coverage = coverage.length;
     await ensureRows(db, coverage);
