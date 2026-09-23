@@ -54,6 +54,9 @@ export type ModifyLiquidityEvent = ChainEventBase & {
 
 export type ChainEvent = InitializeEvent | SwapEvent | ModifyLiquidityEvent;
 
+/** One ERC-20 Transfer of one token, from HyperSync (LogSource.transfers): addresses lowercase, value as emitted. */
+export type TransferEvent = { block: number; logIndex: number; from: string; to: string; value: bigint };
+
 /** Where events come from. HyperSync is the first implementation; a plain-RPC one can follow behind the same interface. */
 export interface LogSource {
   /** The newest block this source can serve right now. */
@@ -65,6 +68,12 @@ export interface LogSource {
    * the call throws: a fetch that makes no progress must never look like an empty range.
    */
   fetch(fromBlock: number, toBlock: number): Promise<{ events: ChainEvent[]; nextBlock: number }>;
+  /**
+   * `token`'s ERC-20 Transfer events from `fromBlock` on, ascending by (block, logIndex), as many blocks as one
+   * response covers (top holders, 23 Sep 2026): `nextBlock` is the first block NOT covered and is always
+   * greater than `fromBlock`, or the call throws — the same contract as fetch().
+   */
+  transfers(token: string, fromBlock: number): Promise<{ transfers: TransferEvent[]; nextBlock: number }>;
   /** Requests issued so far, for budgets and reports. */
   readonly requests: number;
 }

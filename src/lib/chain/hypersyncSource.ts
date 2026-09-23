@@ -1,6 +1,6 @@
 import { POOL_MANAGER, TOPIC0 } from "./abi";
 import { decodeLog, type RawLog } from "./decode";
-import type { ChainEvent, LogSource } from "./types";
+import type { ChainEvent, LogSource, TransferEvent } from "./types";
 
 export type HyperSyncSourceOptions = {
   url?: string;
@@ -63,6 +63,11 @@ type HyperSyncLog = {
 type HyperSyncChunk = { logs?: HyperSyncLog[]; blocks?: HyperSyncBlock[]; transactions?: HyperSyncTransaction[] };
 type HyperSyncQueryResponse = { data: HyperSyncChunk[]; next_block: number; archive_height?: number };
 type HyperSyncHeightResponse = { height: number };
+
+/** keccak256("Transfer(address,address,uint256)"). */
+const TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const topicAddress = (topic: unknown): string | null =>
+  typeof topic === "string" && topic.length === 66 ? `0x${topic.slice(26).toLowerCase()}` : null;
 
 /**
  * Topics in the order HyperSync sent them, from whichever of topic0..topic3 are present, stopping
@@ -227,6 +232,38 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
         throw new Error(`HyperSync made no progress past block ${fromBlock} (next_block=${String(response.next_block)})`);
       }
       return { events, nextBlock };
+    },
+
+    async transfers(token: string, fromBlock: number) {
+      const queryBody = {
+        from_block: fromBlock,
+        logs: [{ address: [token.toLowerCase()], topics: [[TRANSFER_TOPIC0]] }],
+        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "data"] },
+      };
+      const response = (await request(
+        "/query",
+        "POST",
+        { "Content-Type": "application/json" },
+        JSON.stringify(queryBody),
+      )) as HyperSyncQueryResponse;
+      if (!Array.isArray(response.data) || !Number.isInteger(response.next_block)) {
+        throw new Error(`HyperSync transfers response malformed for block ${fromBlock}: missing data array or next_block`);
+      }
+      if (response.next_block <= fromBlock) throw new Error(`HyperSync transfers made no progress from block ${fromBlock}`);
+      const transfers: TransferEvent[] = [];
+      for (const chunk of response.data) {
+        for (const log of chunk.logs ?? []) {
+          // An ERC-721 Transfer carries the token id as a fourth topic; it is not a balance movement.
+          if (log.topic3 != null) continue;
+          const from = topicAddress(log.topic1);
+          const to = topicAddress(log.topic2);
+          if (!from || !to) continue;
+          const data = typeof log.data === "string" && log.data.length > 2 ? log.data : "0x0";
+          transfers.push({ block: Number(log.block_number), logIndex: Number(log.log_index), from, to, value: BigInt(data) });
+        }
+      }
+      transfers.sort((a, b) => a.block - b.block || a.logIndex - b.logIndex);
+      return { transfers, nextBlock: response.next_block };
     },
 
     get requests() {
