@@ -5,10 +5,11 @@ import { gql } from "@/lib/envio/client";
 import { AI, NOW as ENVIO_NOW, NVDA as ENVIO_NVDA, POOL as ENVIO_POOL, aiToken } from "@/lib/envio/fixtures";
 import { TOKEN_QUERY, type CandleRow, type PoolRow, type QuotePriceRow, type QuoteRow, type SwapRow, type TokenRow, type WindowRow } from "@/lib/envio/queries";
 import { shapeCandles, shapeHolders, shapePairs, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
+import { STALE_SEC } from "@/lib/holders/store";
 import { NotRoutableError, type Quoter } from "@/lib/quote/quoter";
 import type { BalanceRec, CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "@/lib/sync/source";
 import { finishRun, readState, saveCursors } from "@/lib/sync/state";
-import { insertSwaps, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
+import { insertSwaps, recomputeListedPools, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "@/lib/sync/writers";
 import { testDb } from "@/test/db";
 import { createDbBackend } from "./dbBackend";
 import { createEnvioBackend } from "./envioBackend";
@@ -84,7 +85,6 @@ const swap = (n: number, ts: number, side: "buy" | "sell"): SwapRec => ({
 const swaps = [swap(1, NOW - 90, "buy"), swap(2, NOW - 30, "sell"), swap(3, NOW - 60, "buy")];
 const bal = (holder: string, balance: string): BalanceRec => ({ id: `${A}-${holder}`, token_id: A, holder, balance, updatedAt: NOW - 100 });
 const stored = [bal(addr("6"), "500000000000000000000000000"), bal(POOL_MANAGER, "100000000000000000000000000")];
-const pulled = [bal(addr("7"), "900000000000000000000000000"), bal(addr("6"), "400000000000000000000000000")];
 
 // The same fixtures as M1 receives them from Hasura, so shapePairs() can be the oracle.
 const quoteOf = new Map(quotes.map((q) => [q.id, { symbol: q.symbol, decimals: q.decimals }]));
@@ -110,23 +110,31 @@ const expected = shapePairs([tokenRow(tokens[0]!), tokenRow(tokens[1]!, PB), tok
 describe("createDbBackend reads", () => {
   let db: Db;
   let now = NOW;
-  // Task 6: the holders read-through refresh is an injected callback, not an EnvioSource method. `pulled`
-  // already represents exactly token A's top holders (the only token these tests ever ask for), so the fake
-  // can hand it back directly rather than re-implementing FakeSource's generic filter/sort. `topHoldersCalled`
-  // accumulates across this whole describe block, like the FakeSource it replaces did — tests below read it
-  // as a delta (`before` / `before + 1`), never an absolute count.
-  let topHoldersCalled = 0;
-  let topHoldersFailOnce: Error | null = null;
-  async function fakeTopHolders(): Promise<BalanceRec[]> {
-    topHoldersCalled += 1;
-    if (topHoldersFailOnce) {
-      const err = topHoldersFailOnce;
-      topHoldersFailOnce = null;
-      throw err;
+  const backend = () => createDbBackend(db, { now: () => now });
+
+  /**
+   * Stands in for the builder (`src/lib/holders/run.ts`), which is the only writer of these two tables
+   * since 23 Sep 2026 — `replaceHolders` is gone. `holders()` reads them and never writes a balance, so a
+   * plain insert is the whole fixture it needs.
+   */
+  async function seedBalances(tokenId: string, rows: readonly BalanceRec[]) {
+    await db.query("delete from market.token_balances where token_id = $1", [tokenId]);
+    for (const b of rows) {
+      await db.query(
+        "insert into market.token_balances (token_id, holder, balance, updated_at) values ($1, $2, $3::numeric, $4)",
+        [tokenId, b.holder, b.balance, b.updatedAt],
+      );
     }
-    return pulled;
   }
-  const backend = () => createDbBackend(db, { topHolders: fakeTopHolders, now: () => now });
+  async function seedRefresh(tokenId: string, row: { refreshedAt?: number; requestedAt?: number; status?: string } = {}) {
+    await db.query(
+      `insert into market.holder_refresh (token_id, refreshed_at, requested_at, status) values ($1, $2, $3, $4)
+       on conflict (token_id) do update set refreshed_at = excluded.refreshed_at, requested_at = excluded.requested_at, status = excluded.status`,
+      [tokenId, row.refreshedAt ?? 0, row.requestedAt ?? 0, row.status ?? "building"],
+    );
+  }
+  const refreshState = async (tokenId: string) =>
+    (await db.query("select refreshed_at, requested_at, status from market.holder_refresh where token_id = $1", [tokenId]))[0] ?? null;
 
   beforeAll(async () => {
     db = await testDb();
@@ -135,7 +143,7 @@ describe("createDbBackend reads", () => {
     await upsertPools(db, pools, NOW);
     await insertSwaps(db, swaps);
     await upsertCandles(db, candles);
-    await replaceHolders(db, A, stored, NOW - 10); // refreshed just now
+    await seedBalances(A, stored);
     await recomputeListedPools(db, "all");
   });
   afterAll(() => db.end());
@@ -190,36 +198,52 @@ describe("createDbBackend reads", () => {
     expect(await backend().trades(D)).toEqual([]);
   });
 
-  it("holders() serves stored rows without asking the refresh callback while it is fresh", async () => {
-    const before = topHoldersCalled;
-    expect(await backend().holders(A)).toEqual({ holders: shapeHolders(stored.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
-    expect(topHoldersCalled).toBe(before);
-    expect(await backend().holders(addr("f"))).toEqual({ holders: [], count: 0 });
+  // Design section 5: the tab's open is the only thing this method writes — a `requested_at` stamp that puts
+  // the token in the builder's first priority. It never touches a balance and never refreshes a list itself.
+  it("holders() opens a build for a token with no refresh row, answering building and nothing yet", async () => {
+    await db.query("delete from market.holder_refresh where token_id = $1", [A]);
+    expect(await backend().holders(A)).toEqual({ holders: [], count: 42, status: "building", asOf: null });
+    expect(await refreshState(A)).toEqual({ refreshed_at: 0, requested_at: NOW, status: "building" });
   });
 
-  it("holders() re-pulls the top 100 and replaces the rows once the refresh is older than 300 s", async () => {
-    now = NOW + 301; // refreshed at NOW - 10: 311 s ago
-    const before = topHoldersCalled;
-    expect(await backend().holders(A)).toEqual({ holders: shapeHolders(pulled.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
-    expect(topHoldersCalled).toBe(before + 1);
-    expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [A])).toEqual([{ refreshed_at: NOW + 301 }]);
+  it("holders() serves a ready list with its as-of stamp, and queues nothing while it is fresh", async () => {
+    await seedRefresh(A, { refreshedAt: NOW - 10, requestedAt: NOW - 600, status: "ready" });
+    expect(await backend().holders(A)).toEqual({
+      holders: shapeHolders(stored.map(balanceRow), 18, BigInt(SUPPLY)),
+      count: 42, // market.tokens.holders_count, exact once a list is ready (design section 6)
+      status: "ready",
+      asOf: NOW - 10,
+    });
+    expect(await refreshState(A)).toMatchObject({ requested_at: NOW - 600 }); // untouched
   });
 
-  it("holders() serves the stored rows when the refresh callback fails, without stamping a refresh", async () => {
-    now = NOW + 700; // stale again
-    topHoldersFailOnce = new Error("indexer unreachable: fetch failed");
-    expect(await backend().holders(A)).toEqual({ holders: shapeHolders(pulled.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
-    expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [A])).toEqual([{ refreshed_at: NOW + 301 }]);
-    expect(console.warn).toHaveBeenCalledTimes(1);
+  it("holders() queues an opened ready list once it is older than STALE_SEC, re-stamping at most once a minute", async () => {
+    await seedRefresh(A, { refreshedAt: NOW - STALE_SEC - 1, requestedAt: NOW - 600, status: "ready" });
+    // Still served from the stored rows: the stamp is a request for a rebuild, not a rebuild.
+    expect(await backend().holders(A)).toEqual({
+      holders: shapeHolders(stored.map(balanceRow), 18, BigInt(SUPPLY)), count: 42, status: "ready", asOf: NOW - STALE_SEC - 1,
+    });
+    expect(await refreshState(A)).toMatchObject({ requested_at: NOW });
+
+    now = NOW + 30; // re-opened inside the minute: requestBuild throttles the re-stamp
+    await backend().holders(A);
+    expect(await refreshState(A)).toMatchObject({ requested_at: NOW });
+
+    now = NOW + 61; // past it, so a list nobody has rebuilt yet keeps its place at the front of the queue
+    await backend().holders(A);
+    expect(await refreshState(A)).toMatchObject({ requested_at: NOW + 61 });
   });
 
-  it("holders() never calls the refresh callback at all when none is supplied (Task 6: absent by default)", async () => {
-    now = NOW + 700; // stale, but there is no callback to ask
-    const noCallback = createDbBackend(db, { now: () => now });
-    // The stored rows are whatever the last successful refresh above left behind (`pulled`, from the
-    // "re-pulls" test two above this one) — this test's point is only that nothing here asks for fresh ones.
-    expect(await noCallback.holders(A)).toEqual({ holders: shapeHolders(pulled.map(balanceRow), 18, BigInt(SUPPLY)), count: 42 });
-    expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [A])).toEqual([{ refreshed_at: NOW + 301 }]);
+  it("holders() reports a skipped token with no rows, and never queues it again", async () => {
+    // The balances stay in the table on purpose: what keeps them off the wire is the status, not an empty table.
+    await seedRefresh(A, { refreshedAt: 0, requestedAt: NOW - 86_400, status: "skipped" });
+    expect(await backend().holders(A)).toEqual({ holders: [], count: 42, status: "skipped", asOf: null });
+    expect(await refreshState(A)).toMatchObject({ requested_at: NOW - 86_400, status: "skipped" });
+  });
+
+  it("holders() answers an unknown token building and empty, without opening a row for it", async () => {
+    expect(await backend().holders(addr("f"))).toEqual({ holders: [], count: 0, status: "building", asOf: null });
+    expect(await refreshState(addr("f"))).toBeNull();
   });
 });
 

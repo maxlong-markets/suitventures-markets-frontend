@@ -131,6 +131,17 @@ export interface Holder {
   tag?: "Pool" | "Suit";
 }
 
+/** The Holders tab's answer (docs/superpowers/specs/2026-09-23-top-holders-design.md, sections 1 and 5). */
+export type HoldersStatus = "ready" | "building" | "skipped";
+export interface HoldersView {
+  holders: Holder[];
+  /** market.tokens.holders_count: exact once a list is ready, the reader's drifted count before. */
+  count: number;
+  status: HoldersStatus;
+  /** Unix seconds the list was last brought to the chain head; null until it first is. */
+  asOf: number | null;
+}
+
 export interface Quote {
   payAmount: number;
   receiveAmount: number;
@@ -158,7 +169,7 @@ export interface MarketsDataSource {
   pair(id: string): Promise<TokenPair | null>;
   candles(id: string, interval: Interval): Promise<Candle[]>;
   trades(id: string): Promise<Trade[]>;
-  holders(id: string): Promise<Holder[]>;
+  holders(id: string): Promise<HoldersView>;
   /**
    * The typed amount travels as the string the user typed: a float would round it to 17
    * significant digits before `toBase` turned it into the amount Permit2 transfers (Global

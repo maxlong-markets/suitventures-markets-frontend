@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSiweMessage } from "viem/siwe";
-import type { Address, Hex, Quote, SwapCall, TokenPair } from "@/lib/types";
+import type { Address, Hex, HoldersView, Quote, SwapCall, TokenPair } from "@/lib/types";
 import { EnvioDataSource, StoreUnavailableError } from "./envio";
 
 const TOKEN = "0x000000000000000000000000000000000000000a";
@@ -412,5 +412,46 @@ describe("EnvioDataSource sessions and user data", () => {
     routes["GET /api/traders"] = { status: 500, body: { error: "internal error" } };
     await expect(source().traders("volume")).rejects.toThrow("500");
     await expect(source().traders("volume")).rejects.not.toBeInstanceOf(StoreUnavailableError);
+  });
+});
+
+describe("EnvioDataSource.holders", () => {
+  /** What GET /api/tokens/{address}/holders answers. */
+  let holdersAnswer: { status: number; body: unknown };
+  const holdersFetch = vi.fn(async (input: string) => {
+    const url = String(input);
+    if (!url.endsWith("/holders")) throw new Error(`unexpected request ${url}`);
+    return { ok: holdersAnswer.status < 400, status: holdersAnswer.status, json: async () => holdersAnswer.body } as unknown as Response;
+  });
+
+  beforeEach(() => {
+    holdersAnswer = { status: 200, body: null };
+    holdersFetch.mockClear();
+    vi.stubGlobal("fetch", holdersFetch);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  // The tab needs the status and the as-of stamp, not only the rows (design section 5), so this
+  // hands the route's answer through whole rather than unwrapping `.holders` as it used to.
+  it("answers the route's whole view, on the token's own holders path", async () => {
+    const view: HoldersView = {
+      holders: [{ wallet: "0x1111111111111111111111111111111111111111" as Address, balance: 12.5, share: 1.25 }],
+      count: 42,
+      status: "ready",
+      asOf: 1_789_547_000,
+    };
+    holdersAnswer = { status: 200, body: view };
+    await expect(source().holders(TOKEN)).resolves.toEqual(view);
+    expect(holdersFetch.mock.calls.map(([input]) => String(input))).toEqual([`/api/tokens/${TOKEN}/holders`]);
+  });
+
+  it.each(["building", "skipped"] as const)("carries a %s list through untouched", async (status) => {
+    holdersAnswer = { status: 200, body: { holders: [], count: 0, status, asOf: null } };
+    await expect(source().holders(TOKEN)).resolves.toEqual({ holders: [], count: 0, status, asOf: null });
+  });
+
+  it("throws when the route fails, so the tab can show the query's error rather than an empty list", async () => {
+    holdersAnswer = { status: 503, body: { error: "database unavailable" } };
+    await expect(source().holders(TOKEN)).rejects.toThrow("503");
   });
 });

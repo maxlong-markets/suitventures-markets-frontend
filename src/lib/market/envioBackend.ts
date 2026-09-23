@@ -137,12 +137,23 @@ export function createEnvioBackend(opts: { quoter?: Quoter } = {}): MarketBacken
       const rows = await gql<{ Swap: SwapRow[] }>(TRADES_QUERY, { pool: pool.id });
       return shapeTrades(rows.Swap, usdMap(t.QuotePrice, nowSec()).get(pool.quote_id) ?? null, token.symbol);
     },
+    /**
+     * The indexer's own balances, which carry no build state: always `ready`, and `asOf` null because
+     * nothing here knows when that list was last current (the tab then simply shows no "as of" line).
+     * The four states of the top-holders design belong to the store backend; this one is the parity
+     * path, kept for `scripts/db/parity.mts`.
+     */
     async holders(id) {
       const t = await gql<TokenRows>(TOKEN_QUERY, { id });
       const token = t.Token[0];
-      if (!token) return { holders: [], count: 0 };
+      if (!token) return { holders: [], count: 0, status: "ready", asOf: null };
       const rows = await gql<{ TokenBalance: BalanceRow[] }>(HOLDERS_QUERY, { token: id });
-      return { holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)), count: token.holdersCount };
+      return {
+        holders: shapeHolders(rows.TokenBalance, token.decimals, BigInt(token.totalSupply)),
+        count: token.holdersCount,
+        status: "ready",
+        asOf: null,
+      };
     },
     // One trading-pool rule, identical to dbBackend's (MarketBackend.poolKey): the token's primary
     // pool when it prices sanely, no swap-count floor — a freshly launched token can have liquidity

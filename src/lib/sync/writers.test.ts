@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
-import { POOL_A, QUOTE, T0, TOKEN_A, TOKEN_B, addr, balanceRec, candleRec, poolId, poolRec, priceRec, quoteRec, swapRec, tokenRec, txHash } from "./testRows";
-import { dedupe, insertSwaps, markSynced, recomputeListedPools, replaceHolders, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
+import { POOL_A, QUOTE, T0, TOKEN_A, TOKEN_B, addr, candleRec, poolId, poolRec, priceRec, quoteRec, swapRec, tokenRec, txHash } from "./testRows";
+import { dedupe, insertSwaps, markSynced, recomputeListedPools, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
 
 let db: Db;
 beforeAll(async () => { db = await testDb(); });
@@ -126,25 +126,8 @@ describe("upsertCandles", () => {
   });
 });
 
-describe("replaceHolders", () => {
-  it("replaces one token's rows, drops zero balances and stamps holder_refresh", async () => {
-    await replaceHolders(db, TOKEN_A, [balanceRec(), balanceRec({ holder: addr(0xc2), balance: "7" })], T0);
-    await replaceHolders(db, TOKEN_B, [balanceRec({ token_id: TOKEN_B, holder: addr(0xc9) })], T0);
-    expect(await replaceHolders(db, TOKEN_A, [balanceRec({ holder: addr(0xc3), balance: "9" }), balanceRec({ holder: addr(0xc4), balance: "0" })], T0 + 300)).toBe(1);
-    expect(await db.query("select token_id, holder, balance from market.token_balances order by token_id, holder")).toEqual([
-      { token_id: TOKEN_A, holder: addr(0xc3), balance: "9" },
-      { token_id: TOKEN_B, holder: addr(0xc9), balance: "5000000000000000000" },
-    ]);
-    expect(await db.query("select refreshed_at from market.holder_refresh where token_id = $1", [TOKEN_A])).toEqual([{ refreshed_at: T0 + 300 }]);
-  });
-  it("keeps the old rows and stamp when the transaction fails after the delete", async () => {
-    await replaceHolders(db, TOKEN_A, [balanceRec()], T0);
-    // updated_at is int4: 2^31 overflows it inside the transaction, after the delete has run.
-    await expect(replaceHolders(db, TOKEN_A, [balanceRec({ updatedAt: 2 ** 31 })], T0 + 300)).rejects.toThrow();
-    expect(await db.query("select holder from market.token_balances")).toEqual([{ holder: balanceRec().holder }]);
-    expect(await db.query("select refreshed_at from market.holder_refresh")).toEqual([{ refreshed_at: T0 }]);
-  });
-});
+// `replaceHolders` and its two cases lived here until 23 Sep 2026; the holder builder owns
+// market.token_balances now and is tested in src/lib/holders/.
 
 describe("recomputeListedPools", () => {
   const seed = async () => {
