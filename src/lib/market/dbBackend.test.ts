@@ -366,6 +366,41 @@ describe("createDbBackend health", () => {
     });
   });
 
+  it("surfaces the holder builder's last cycle and the balances table's footprint, null until a full report exists (design section 8)", async () => {
+    // Nothing has written a `holders` sync_state row at all yet: the block is still there (the table's size is
+    // worth knowing before the first build), but the cycle reads null rather than a row of zeros.
+    const cold = await backend().health();
+    expect(cold.holders!.lastCycle).toBeNull();
+    expect(cold.holders!.table.rows).toBe(0); // PGlite's reltuples is -1 before the first analyze; clamped
+    expect(cold.holders!.table.bytes).toBeGreaterThan(0);
+
+    // A run that recorded no report, and one from an older build whose report lacks the fields, are both
+    // "nothing to show" — never zeros that would read like a cycle that resolved nothing.
+    await finishRun(db, "holders", { now: NOW - 40, ok: true, rows: 0, queries: 0 });
+    expect((await backend().health()).holders!.lastCycle).toBeNull();
+    await finishRun(db, "holders", { now: NOW - 40, ok: true, rows: 0, queries: 0, report: { at: NOW - 40, coverage: 500 } });
+    expect((await backend().health()).holders!.lastCycle).toBeNull();
+
+    // The real thing: runHoldersBuild's cycleReport(), field for field (src/lib/holders/run.ts).
+    await finishRun(db, "holders", {
+      now: NOW - 40, ok: true, rows: 4800, queries: 66,
+      report: {
+        at: NOW - 40, coverage: 500, coverageRecomputed: 1, due: 12, tokensTouched: 9, tokensReady: 7,
+        tokensSkipped: 1, slices: 21, requests: 66, transfers: 4800, errors: 0, spacingMs: 750,
+      },
+    });
+    const built = await backend().health();
+    expect(built.holders!.lastCycle).toEqual({
+      ageSec: 40, coverage: 500, due: 12, tokensTouched: 9, tokensReady: 7, tokensSkipped: 1,
+      slices: 21, requests: 66, transfers: 4800, errors: 0, spacingMs: 750,
+    });
+    // An invocation that ended on the ok:false path shows its reason beside the cycle, like the other two
+    // jobs; a cycle whose per-token failures were merely counted (report.errors) is not an error for the job.
+    expect(built.holders!.lastError).toBeNull();
+    await finishRun(db, "holders", { now: NOW - 5, ok: false, error: "holders: HyperSync head is not a positive integer: 0", rows: 0, queries: 1 });
+    expect((await backend().health()).holders!.lastError).toBe("holders: HyperSync head is not a positive integer: 0");
+  });
+
   it("reports lag null when no chainHead callback is supplied at all (Task 6: absent by default)", async () => {
     const noCallback = createDbBackend(db, { now: () => now });
     expect(await noCallback.health()).toMatchObject({ ok: true, lag: null });
@@ -392,17 +427,20 @@ describe("createDbBackend health", () => {
     const long = `relation "market.pools" does not exist; ${"x".repeat(200)}`;
     await finishRun(db, "chain", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
     await finishRun(db, "nightly", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
+    await finishRun(db, "holders", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
     const h = await backend().health();
     expect(h.sync!.lastError).toBe(long.slice(0, 120));
     expect(h.sync!.lastError).toHaveLength(120);
     expect(h.nightly!.lastError).toBe(long.slice(0, 120));
+    expect(h.holders!.lastError).toBe(long.slice(0, 120));
     expect(console.warn).toHaveBeenCalledWith(`chain last_error: ${long}`);
     expect(console.warn).toHaveBeenCalledWith(`nightly last_error: ${long}`);
+    expect(console.warn).toHaveBeenCalledWith(`holders last_error: ${long}`);
     // A short error travels whole, and is not logged again by the health check.
     vi.mocked(console.warn).mockClear();
     await finishRun(db, "chain", { now: NOW, ok: false, error: "HyperSync responded 429", rows: 0, queries: 1 });
     expect((await backend().health()).sync!.lastError).toBe("HyperSync responded 429");
-    expect(console.warn).toHaveBeenCalledTimes(1); // the nightly's long one
+    expect(console.warn).toHaveBeenCalledTimes(2); // the nightly's and the builder's long ones
   });
 });
 

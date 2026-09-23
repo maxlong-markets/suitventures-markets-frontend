@@ -101,8 +101,11 @@ uncommitted slice, and the next invocation resumes from the stored cursor.
 `holders` the top rows shaped as today, `count` the token's `holders_count`, `status` one of the four,
 `asOf` = `refreshed_at` or null. When the token has no refresh row, or has one with `status = 'building'`
 and `requested_at` older than 60 s, the route stamps `requested_at = now` (inserting the row as `building`
-when absent) — that is what puts a token in the builder's first priority. The route's 60-second memo stays
-for `ready`; anything else is memoised for 5 s so the tab's polling sees progress.
+when absent) — that is what puts a token in the builder's first priority. The route's in-process memo is 5 s
+for every status, not 60 s for `ready` as this section first said (superseded by the implementation, Task 4):
+the backend call behind the memo is also what stamps the build request, and a longer memo would swallow the
+re-stamps of a tab left open. The CDN TTL is what differs — 60 s for `ready`, 5 s for anything else, so the
+tab's polling sees progress.
 
 The dead read-through (`DbBackendOpts.topHolders`, `HOLDER_REFRESH_SEC`, `HOLDERS_PULLED`) is removed: the
 builder is the only writer of `token_balances`.
