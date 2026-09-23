@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db/client";
 
-export type SyncJob = "market" | "nightly" | "chain";
+export type SyncJob = "market" | "nightly" | "chain" | "holders";
 export type SyncState = {
   job: SyncJob; cursor: number; cursor2: number; cursorText: string; phase: string;
   lastRunAt: number | null; lastOkAt: number | null; lastError: string | null;

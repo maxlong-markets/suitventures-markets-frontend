@@ -2,6 +2,7 @@
   "framework": "nextjs",
   "crons": [
     { "path": "/api/internal/sync", "schedule": "* * * * *" },
+    { "path": "/api/internal/holders", "schedule": "* * * * *" },
     { "path": "/api/internal/sync/nightly", "schedule": "0 3 * * *" }
   ]
 }
