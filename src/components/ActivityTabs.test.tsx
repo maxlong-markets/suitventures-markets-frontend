@@ -161,7 +161,7 @@ describe("ActivityTabs holders", () => {
   it("explains a token too large to fold, with no skeleton to wait on", () => {
     h.holders = { holders: [], count: 0, status: "skipped", asOf: null };
     const { container } = show("holders");
-    expect(screen.getByText("Holder list unavailable for tokens with over a million holders.")).toBeTruthy();
+    expect(screen.getByText("Holder list unavailable for a token this large.")).toBeTruthy();
     expect(container.querySelector("[aria-busy]")).toBeNull();
   });
 

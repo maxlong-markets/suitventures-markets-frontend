@@ -136,7 +136,7 @@ function HoldersTable({ pair, now }: { pair: TokenPair; now: number }) {
       {isPending ? (
         <RowsSkeleton rows={8} />
       ) : !data ? null : data.status === "skipped" ? (
-        <div className={HOLDER_NOTE}>Holder list unavailable for tokens with over a million holders.</div>
+        <div className={HOLDER_NOTE}>Holder list unavailable for a token this large.</div>
       ) : data.status === "building" ? (
         <>
           <RowsSkeleton rows={8} />

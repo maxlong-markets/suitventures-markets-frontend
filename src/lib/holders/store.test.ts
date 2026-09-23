@@ -19,6 +19,7 @@ import {
   pruneHolders,
   refreshRow,
   requestBuild,
+  MAX_TRANSFERS_PER_TOKEN,
 } from "./store";
 
 // Ids in the shape the reader writes them: lowercase hex, tokens 40 digits, pools and tx hashes 64.
@@ -236,7 +237,7 @@ it("markSkipped throws and keeps the balances when there is no refresh row", asy
 });
 
 it("markSkipped drops the token's rows and rewinds its cursor", async () => {
-  await refresh(T1, { status: "building", cursorBlock: 5_000, transfers: 5_000_000 });
+  await refresh(T1, { status: "building", cursorBlock: 5_000, transfers: MAX_TRANSFERS_PER_TOKEN });
   await balance(T1, W1, "100");
   await balance(T1, W2, "7");
   await balance(T2, W1, "9");

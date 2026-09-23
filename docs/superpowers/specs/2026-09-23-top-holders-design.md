@@ -17,7 +17,7 @@ Four states, all rendered by the tab:
 |---|---|---|
 | `ready` | the fold reached the chain head at `asOf` | rows, "as of N min ago" (or "No holders yet." when empty) |
 | `building` | a fold is queued or in progress | skeleton rows and "Building this token's holder list. Usually under a minute." — the tab polls every 5 s |
-| `skipped` | too large to fold (over a million holders) | "Holder list unavailable for tokens with over a million holders." |
+| `skipped` | too large to fold (over a million holders, or a transfer history past the safety valve) | "Holder list unavailable for a token this large." |
 | `none` | never requested | never reaches the tab: the holders route turns it into `building` |
 
 ## 2. Where the data comes from, and why
@@ -86,8 +86,10 @@ Each invocation:
 6. Writes its cycle report through `finishRun` (`last_report`): tokens touched, tokens made ready, requests,
    transfers, errors.
 
-Safety valve: a token whose fold passes 5,000,000 transfers without reaching the head is marked `skipped`
-and its rows deleted. No token on the table today is near that.
+Safety valve: a token whose fold passes 10,000,000 transfers without reaching the head is marked `skipped`
+and its rows deleted (raised from 5,000,000 on the first live night: WETH, a listed token here, tripped the
+valve as intended, while PONS, a listing whose list matters, was on course to; ten million bounds one token
+at about 2,100 requests once).
 
 Why slices, not whole histories in memory: a slice is one request's transfers (a few thousand rows), applied
 and committed with its cursor. Any interruption — the window, a crash, a redeploy — loses at most one

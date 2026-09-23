@@ -24,7 +24,11 @@ export const REQUEST_STAMP_MIN_SEC = 60;
 /** The nightly keeps an off-table token's rows this long after its last request (design section 7). */
 export const KEEP_REQUESTED_SEC = 7 * 86_400;
 /** Safety valve (design section 4): a fold past this many transfers without reaching the head is skipped. */
-export const MAX_TRANSFERS_PER_TOKEN = 5_000_000;
+export const MAX_TRANSFERS_PER_TOKEN = 10_000_000;
+// Was 5,000,000 until the first live night (24 Sep 2026): WETH, a listed token here rather than a quote asset,
+// hit it after ~1,050 requests and was skipped as designed, but PONS — a listing whose list matters — was on
+// course to pass it too. Ten million bounds a single token at roughly 2,100 requests, half an hour of the
+// builder once, which is acceptable for a real listing and still refuses a chain-wide asset like WETH.
 /** Rows per upsert statement inside applySlice; a slice is ~4,800 transfers, so usually one or two. */
 export const DELTA_CHUNK = 5_000;
 
