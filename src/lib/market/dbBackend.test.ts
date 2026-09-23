@@ -307,6 +307,22 @@ describe("createDbBackend health", () => {
     expect(await backend().health()).toMatchObject({ ok: true, lag: null });
   });
 
+  it("surfaces the chain job's last cycle (holder-count reads) and the RPC hosts, and neither when absent (23 Sep 2026)", async () => {
+    await finishRun(db, "chain", { now: NOW - 20, ok: true, rows: 10, queries: 4 });
+    const plain = await backend().health();
+    expect(plain.sync).not.toHaveProperty("lastCycle"); // an empty default report is not "zero pairs resolved"
+    expect(plain).not.toHaveProperty("rpc");
+    await finishRun(db, "chain", {
+      now: NOW - 20, ok: true, rows: 10, queries: 4,
+      report: { at: NOW - 20, cursor: 990, blocks: 30, trades: 280, holderPairs: 190, holderDeltaApplied: 150, holderReadsUnknown: 40 },
+    });
+    const withRpc = createDbBackend(db, { chainHead: async () => 1000, now: () => now, rpc: { primary: "rpc.mainnet.chain.robinhood.com", backup: null } });
+    expect(await withRpc.health()).toMatchObject({
+      sync: { lastOkAgeSec: 20, lastCycle: { ageSec: 20, blocks: 30, trades: 280, holderPairs: 190, holderDeltaApplied: 150, holderReadsUnknown: 40 } },
+      rpc: { primary: "rpc.mainnet.chain.robinhood.com", backup: null },
+    });
+  });
+
   it("reports lag null when no chainHead callback is supplied at all (Task 6: absent by default)", async () => {
     const noCallback = createDbBackend(db, { now: () => now });
     expect(await noCallback.health()).toMatchObject({ ok: true, lag: null });

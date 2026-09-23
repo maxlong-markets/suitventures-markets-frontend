@@ -608,6 +608,38 @@ describe("runChainSync: holder-count upkeep (fix round 1 — observe both balanc
     expect(balanceOfCalls(client)).toHaveLength(2); // exactly one before + one after, never three of either
   });
 
+  it("stops the balance reads 1.5 s before the window ends: pairs no chunk was started for are counted unknown, never guessed, and the cycle's trades still land (23 Sep 2026)", async () => {
+    await seedCursor(db, 99);
+    // 25 distinct wallets = 25 pairs = two chunks of 20 pairs; each readContract call costs 100 ms of clock.
+    const wallets = Array.from({ length: 25 }, (_, i) => `0x${(i + 0x100).toString(16).padStart(40, "0")}`);
+    const events = [initEvent(), ...wallets.map((w, i) => swapEvent({ txHash: hex(10 + i, 64), txFrom: w, amount0: 300n, amount1: -150n }))];
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events, nextBlock: 102 } } });
+    const balances = Object.fromEntries(wallets.map((w) => [`${AI}-${w}`, (b: bigint | undefined) => (b === 99n ? 0n : b === 101n ? 500n : undefined)]));
+    const opts = baseOpts({ maxSpan: 150, maxRequests: 2, windowSec: 20 }); // deadline at +18.5 s
+    const client = fakeChainClient({ tokens: tokenFixture, balances });
+    // The clock: 100 ms per chain read, and the 40th balance read (the end of the first chunk) costs
+    // 15 s, so the second chunk finds the deadline (+18.5 s of a 20 s window) already passed.
+    let t = NOW_MS;
+    let balanceReads = 0;
+    const inner = client.readContract;
+    client.readContract = (async (args) => {
+      t += 100;
+      if ((args as { functionName: string }).functionName === "balanceOf" && ++balanceReads === 40) t += 15_000;
+      return inner(args);
+    }) as typeof client.readContract;
+    opts.now = () => t;
+    opts.sleep = async (ms) => { t += ms; };
+
+    const report = await runChainSync(db, chainDeps({ source, client }), opts);
+
+    expect(report.error).toBeNull();
+    expect(report.trades).toBe(25);
+    expect(report.holderDeltaApplied).toBe(20); // the first chunk, both sides read
+    expect(report.holderReadsUnknown).toBe(5); // the second chunk was never started
+    expect(await holdersOf(AI)).toBe(20); // 0 -> 20, the five unread pairs left for a later day, never guessed
+    expect(balanceOfCalls(client)).toHaveLength(40); // 20 before + 20 after; the remaining 10 never issued
+  });
+
   it("BLOCKER-1 fix: catch-up mode (stopWhenCaughtUp) applies NO holder deltas at all — every pair unknown, nothing read", async () => {
     await seedToken(db, AI, 1);
     await db.query("update market.tokens set holders_count = 5 where id = $1", [AI]);

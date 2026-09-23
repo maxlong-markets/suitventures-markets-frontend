@@ -25,7 +25,7 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 type QuoteCols = { usd_price: number | null; usd_updated_at: number | null; aggregator: string | null };
 type ListedRow = { symbol: string; pool_id: string; quote_id: string } & QuoteCols;
 type TokenCols = { decimals: number; total_supply: string; holders_count: number };
-type StateRow = { job: string; cursor: number; phase: string; last_ok_at: number | null; last_error: string | null };
+type StateRow = { job: string; cursor: number; phase: string; last_ok_at: number | null; last_error: string | null; last_report: Record<string, unknown> | null };
 type PoolKeyCols = {
   pool_id: string; hooks: string; fee: number; tick_spacing: number; token_is_currency0: boolean; price_quote: number;
   token_address: string; token_decimals: number; quote_address: string; quote_decimals: number;
@@ -115,7 +115,7 @@ function poolKeyParts(row: PoolKeyCols): PoolKeyParts {
 }
 const QUOTES_SQL = `select id, address, symbol, name, decimals, usd_price, usd_updated_at, aggregator from market.quotes order by id`;
 // "chain", not "market" (Task 6): the chain reader's sync_state row is what health now watches for lastOkAgeSec/lastError.
-const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error from market.sync_state where job in ('chain', 'nightly')`;
+const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error, last_report from market.sync_state where job in ('chain', 'nightly')`;
 const QUOTE_AGES_SQL = `select id, usd_updated_at, aggregator from market.quotes where usd_updated_at is not null order by id`;
 
 export type DbBackendOpts = {
@@ -125,8 +125,24 @@ export type DbBackendOpts = {
   /** The node's own current block height, for health's `lag` (node head minus the chain cursor, in blocks).
    * Absent by default, which reports `lag: null` rather than guessing at a vendor's number. */
   chainHead?: () => Promise<number>;
+  /** Hostnames of the server's RPC endpoints, echoed on health as-is (never URLs). */
+  rpc?: { primary: string; backup: string | null };
   now?: () => number;
 };
+
+/**
+ * The chain job's stored `last_report` (written by runChainSync through finishRun, 23 Sep 2026) as
+ * health's `sync.lastCycle`, or null when there is none yet or it lacks the fields — a report from an
+ * older build, or an empty default, must not surface as zeros that read like "nothing resolved".
+ */
+function lastCycleFrom(report: Record<string, unknown> | null, at: number): NonNullable<HealthReport["sync"]>["lastCycle"] | null {
+  if (!report) return null;
+  const num = (key: string) => (typeof report[key] === "number" ? (report[key] as number) : null);
+  const [reportedAt, blocks, trades, holderPairs, holderDeltaApplied, holderReadsUnknown] =
+    ["at", "blocks", "trades", "holderPairs", "holderDeltaApplied", "holderReadsUnknown"].map(num);
+  if (reportedAt === null || blocks === null || trades === null || holderPairs === null || holderDeltaApplied === null || holderReadsUnknown === null) return null;
+  return { ageSec: at - reportedAt, blocks, trades, holderPairs, holderDeltaApplied, holderReadsUnknown };
+}
 
 /** SQL readers with M1's semantics (spec section 8). `now` is injectable for the tests. */
 export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend {
@@ -224,9 +240,11 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
           console.warn(`chain head unavailable: ${message(err)}`); // informational: the store still serves
         }
       }
+      const lastCycle = lastCycleFrom(chain?.last_report ?? null, at);
       const sync = {
         lastOkAgeSec: chain?.last_ok_at != null ? at - chain.last_ok_at : null,
         lastError: shortError("chain", chain?.last_error ?? null),
+        ...(lastCycle ? { lastCycle } : {}),
       };
       const night = {
         lastOkAgeSec: nightly?.last_ok_at != null ? at - nightly.last_ok_at : null,
@@ -234,7 +252,7 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
         phase: nightly?.phase ?? "",
       };
       const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && quotes.every((q) => !q.stale);
-      return { ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night };
+      return { ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night, ...(opts.rpc ? { rpc: opts.rpc } : {}) };
     },
   };
   return backend;

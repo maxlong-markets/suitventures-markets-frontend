@@ -7,34 +7,66 @@ import {
   IntegerOutOfRangeError,
   SizeExceedsPaddingSizeError,
   createPublicClient,
+  fallback,
   hexToString,
   http,
   parseAbi,
   type PublicClient,
 } from "viem";
 import { robinhoodChain } from "@/lib/chain";
+import { pacedHttp } from "./pacing";
 
 /**
  * Reads from the chain: ERC-20 token metadata and Chainlink quote prices
  * (docs/superpowers/plans/2026-09-21-chain-reader.md, Task 5).
  *
- * No Multicall3 deployment is assumed. The public RPC accepts JSON-RPC batches of 100 and
- * refuses rapid unbatched bursts with HTTP 429, so `createChainClient` uses viem's `http`
- * transport with `batch: { batchSize: 100, wait: 16 }`: every read below fires in parallel and
- * the transport itself coalesces concurrent calls into a handful of HTTP requests.
+ * No Multicall3 deployment is assumed. The public RPC meters 40 calls per address per rolling
+ * second (src/lib/chain/pacing.ts has the measurements), so `createChainClient` uses `pacedHttp`:
+ * every read below still fires in parallel, the transport coalesces what is released together into
+ * one JSON-RPC batch of at most 40, and the limiter spaces the batches a second apart. A read here
+ * never has to know the budget; it only has to tolerate waiting for its turn.
  *
  * One bad token or feed never fails the batch: every per-item (and, for tokens, per-field) read
  * is caught internally and resolves to a fallback rather than rejecting, and the batch-level
  * `Promise.allSettled` calls are a second line of defense should a read somehow reject anyway.
  */
 
-/** A viem public client on Robinhood Chain. URL: `rpcUrl`, else `CHAIN_RPC_URL`, else the chain's own default RPC. */
-export function createChainClient(rpcUrl?: string) {
-  const url = rpcUrl ?? process.env.CHAIN_RPC_URL;
-  return createPublicClient({
-    chain: robinhoodChain,
-    transport: http(url, { batch: { batchSize: 100, wait: 16 }, retryCount: 3 }),
-  });
+/** The public node's measured ceiling: calls per address per rolling second (pacing.ts). */
+export const PUBLIC_RPC_CALLS_PER_SECOND = 40;
+/** Calls per JSON-RPC batch, equal to that budget so one released burst is exactly one HTTP request. */
+export const BALANCE_READ_CHUNK = 40;
+
+/**
+ * A viem public client on Robinhood Chain.
+ *
+ * Primary URL: `rpcUrl`, else `CHAIN_RPC_URL`, else the chain's own default (the public node). It is
+ * always paced at PUBLIC_RPC_CALLS_PER_SECOND with batches of the same size — a paid endpoint set as
+ * the primary simply never waits, since nothing here approaches 40 calls a second for long.
+ *
+ * Backup URL: `fallbackUrl`, else `CHAIN_RPC_FALLBACK_URL` (23 Sep 2026: the public node first, the
+ * Alchemy app as the backup, per Kobe). When set and different from the primary, a call the primary
+ * refuses — a 429 once the shared Vercel egress address is over budget, a timeout, a 5xx — is retried
+ * on the backup by viem's `fallback` transport before it is reported as failed; execution reverts and
+ * other answers that are the CHAIN's, not the node's, are never retried elsewhere (viem's default
+ * `shouldThrow`). The backup gets the same batch size and no pacing of its own.
+ */
+export function createChainClient(rpcUrl?: string, fallbackUrl?: string) {
+  const primary = rpcUrl || process.env.CHAIN_RPC_URL || robinhoodChain.rpcUrls.default.http[0]!;
+  const backup = fallbackUrl || process.env.CHAIN_RPC_FALLBACK_URL || undefined;
+  const paced = pacedHttp(primary, { callsPerSecond: PUBLIC_RPC_CALLS_PER_SECOND, batchSize: BALANCE_READ_CHUNK });
+  const transport =
+    backup && backup !== primary
+      ? fallback([paced, http(backup, { batch: { batchSize: BALANCE_READ_CHUNK, wait: 16 }, retryCount: 0 })], { retryCount: 3 })
+      : paced;
+  return createPublicClient({ chain: robinhoodChain, transport });
+}
+
+/** Hostnames of the RPC endpoints a client would use (never the URLs: a paid endpoint's key is in its path). */
+export function chainRpcHosts(): { primary: string; backup: string | null } {
+  const host = (url: string | undefined) => { try { return url ? new URL(url).host : null; } catch { return null; } };
+  const primary = host(process.env.CHAIN_RPC_URL) ?? host(robinhoodChain.rpcUrls.default.http[0])!;
+  const backup = host(process.env.CHAIN_RPC_FALLBACK_URL);
+  return { primary, backup: backup && backup !== primary ? backup : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -373,9 +405,10 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
  * read is ABSENT from the returned map rather than defaulted to 0n — guessing it would corrupt the
  * count. The caller must treat a missing key as "unknown," never as "zero."
  *
- * The viem client already batches up to 100 calls into one HTTP request (createChainClient's
- * `batch.batchSize`); every read here fires in parallel and relies entirely on that transport-level
- * batching — this function never chunks or throttles the list itself.
+ * Reads go out in sequential chunks of BALANCE_READ_CHUNK (one JSON-RPC batch each); the paced
+ * transport spaces those batches a second apart. Callers that need BOTH a before and an after
+ * balance for the same pairs use readBalancesBothSides below, which keeps each chunk's two sides in
+ * ONE batch — two of these running side by side would double up in the transport's batching window.
  */
 export async function readBalances(
   client: Pick<PublicClient, "readContract">,
@@ -384,36 +417,76 @@ export async function readBalances(
   timeoutMs?: number,
 ): Promise<Map<string, bigint>> {
   const result = new Map<string, bigint>();
-  // Sequential chunks of BALANCE_READ_CHUNK, never everything at once. The transport batches every read
-  // issued within its 16 ms window into ONE JSON-RPC batch, and the public node counts each call in a
-  // batch toward its rate limit: measured 22 Sep 2026, a batch of 50 balanceOf calls resolves in ~400 ms
-  // while 60 or more answers HTTP 429 "Too Many Requests" for the WHOLE batch, so a busy cycle's pairs
-  // issued together resolved zero of them and every holder count stayed frozen. Awaiting each chunk
-  // keeps at most BALANCE_READ_CHUNK calls in one batch and spaces the batches out.
   for (let i = 0; i < pairs.length; i += BALANCE_READ_CHUNK) {
-    const chunk = pairs.slice(i, i + BALANCE_READ_CHUNK);
-    const settled = await Promise.allSettled(
-      chunk.map(async (pair) => {
-        const token = pair.token.toLowerCase();
-        const wallet = pair.wallet.toLowerCase();
-        const read = client.readContract({
-          address: token as `0x${string}`,
-          abi: ERC20_BALANCE_ABI,
-          functionName: "balanceOf",
-          args: [wallet as `0x${string}`],
-          blockNumber,
-        });
-        const balance = await (timeoutMs === undefined ? read : withDeadline(read, timeoutMs));
-        return { key: balancePairKey(pair), balance };
-      }),
-    );
-    for (const outcome of settled) {
-      if (outcome.status === "fulfilled") result.set(outcome.value.key, outcome.value.balance);
-      // A rejected read (including a timeout) is left absent — see the doc comment above.
-    }
+    await readBalanceChunk(client, pairs.slice(i, i + BALANCE_READ_CHUNK), blockNumber, timeoutMs, result);
   }
   return result;
 }
 
-/** Reads per JSON-RPC batch for balanceOf: the measured ceiling on the public node is 50 before it answers 429 for the whole batch. */
-export const BALANCE_READ_CHUNK = 40;
+/** One JSON-RPC batch of balanceOf reads for `chunk` at `blockNumber`, merged into `into`; failed reads stay absent. */
+async function readBalanceChunk(
+  client: Pick<PublicClient, "readContract">,
+  chunk: readonly BalancePair[],
+  blockNumber: bigint | undefined,
+  timeoutMs: number | undefined,
+  into: Map<string, bigint>,
+): Promise<void> {
+  const settled = await Promise.allSettled(
+    chunk.map(async (pair) => {
+      const token = pair.token.toLowerCase();
+      const wallet = pair.wallet.toLowerCase();
+      const read = client.readContract({
+        address: token as `0x${string}`,
+        abi: ERC20_BALANCE_ABI,
+        functionName: "balanceOf",
+        args: [wallet as `0x${string}`],
+        blockNumber,
+      });
+      const balance = await (timeoutMs === undefined ? read : withDeadline(read, timeoutMs));
+      return { key: balancePairKey(pair), balance };
+    }),
+  );
+  for (const outcome of settled) {
+    if (outcome.status === "fulfilled") into.set(outcome.value.key, outcome.value.balance);
+    // A rejected read (including a timeout) is left absent — see readBalances' doc comment.
+  }
+}
+
+/** Optional stop for a long read: no further chunk is started once `now()` reaches `untilMs`. */
+export type ReadDeadline = { untilMs: number; now: () => number };
+
+/**
+ * Both sides of a holder transition for each pair — `balanceOf` at `beforeBlock` and at `afterBlock`
+ * — read TOGETHER: each chunk of BALANCE_READ_CHUNK / 2 pairs issues its before and after reads in the
+ * same batch, so a chunk that completes yields pairs with both sides known, and a cycle cut short by
+ * `deadline` has spent its budget on whole pairs rather than on a before-side no after-side will
+ * ever join. `skipped` counts the pairs no chunk was started for; a pair whose chunk ran but whose
+ * read failed is simply absent from the map(s), exactly as in readBalances.
+ *
+ * Why not two readBalances calls side by side (what this replaced, 23 Sep 2026): the transport
+ * batches everything released within 16 ms, so the two calls' first chunks became one 80-call batch,
+ * the public node refused it whole, and so on for every chunk — a busy cycle resolved nothing.
+ */
+export async function readBalancesBothSides(
+  client: Pick<PublicClient, "readContract">,
+  pairs: readonly BalancePair[],
+  beforeBlock: bigint,
+  afterBlock: bigint,
+  timeoutMs?: number,
+  deadline?: ReadDeadline,
+): Promise<{ before: Map<string, bigint>; after: Map<string, bigint>; skipped: number }> {
+  const before = new Map<string, bigint>();
+  const after = new Map<string, bigint>();
+  const perChunk = Math.max(1, Math.floor(BALANCE_READ_CHUNK / 2));
+  let started = 0;
+  while (started < pairs.length) {
+    if (deadline && deadline.now() >= deadline.untilMs) break;
+    const chunk = pairs.slice(started, started + perChunk);
+    await Promise.all([
+      readBalanceChunk(client, chunk, beforeBlock, timeoutMs, before),
+      readBalanceChunk(client, chunk, afterBlock, timeoutMs, after),
+    ]);
+    started += chunk.length;
+  }
+  return { before, after, skipped: pairs.length - started };
+}

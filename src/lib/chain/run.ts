@@ -4,7 +4,7 @@ import { acquireLease, finishRun, readState, releaseLease } from "@/lib/sync/sta
 import { upsertQuotes } from "@/lib/sync/writers";
 import { foldEvents, newTokenCandidates } from "./fold";
 import { holderDelta } from "./math/holders";
-import { balancePairKey, readBalances, readQuotePrices, readTokenMetadata, type BalancePair, type QuoteFeedConfig } from "./onchain";
+import { balancePairKey, readBalancesBothSides, readQuotePrices, readTokenMetadata, type BalancePair, type QuoteFeedConfig, type ReadDeadline } from "./onchain";
 import { applyFold, dueForMetadata, loadFoldState, readChainCursor, refreshTokenMetadata } from "./store";
 import type { LogSource, TradeRow } from "./types";
 
@@ -170,15 +170,25 @@ const HOLDER_READ_TIMEOUT_MS = 8_000;
 /**
  * Holder-count upkeep is skipped for the rest of THIS cycle — every pair counted unknown, nothing read
  * — once less than this much of the cron's window remains (fix round 1, MAJOR-2). computeHolderDeltas
- * below does two reads, before and after, raced in parallel (`Promise.all`) and each individually
- * bounded by HOLDER_READ_TIMEOUT_MS, so the upkeep itself is bounded to roughly that same ~5s in the
- * worst case; 10,000ms leaves a few seconds of margin above that for the rest of the cycle's own work
+ * below reads both sides of each pair chunk by chunk under HOLDER_READ_DEADLINE_MARGIN_MS, each read
+ * individually bounded by HOLDER_READ_TIMEOUT_MS, so the upkeep itself never runs past the window;
+ * 10,000ms is the least window worth starting those paced reads in, leaving margin for the rest of the cycle's own work
  * (`applyFold`, `finishRun`) to still land inside the window, rather than trading one kind of overrun
  * (an unbounded read) for a smaller one (a bounded read that still eats whatever is left of the
  * window). A cycle skipped for this reason is exactly as safe as one skipped for any other: nothing is
  * guessed, the pairs are simply left for a later cycle once there is enough window in hand.
  */
 const HOLDER_MIN_WINDOW_MS = 10_000;
+
+/**
+ * How long before the window's end the balance reads stop starting new chunks (23 Sep 2026). The reads
+ * are now paced at the public node's 40 calls a second (pacing.ts): a typical minute's 280 distinct
+ * pairs is 14 s of reads, a busy one's 520 pairs 26 s, so a cycle that starts late in the window can
+ * no longer count on finishing every pair. readBalancesBothSides stops at this deadline and reports
+ * the pairs it never started, which are counted unknown — the cycle's other writes still land inside
+ * the window, and nothing is guessed. The margin covers `applyFold` and `finishRun` for that cycle.
+ */
+const HOLDER_READ_DEADLINE_MARGIN_MS = 1_500;
 
 const sec = (ms: number) => Math.floor(ms / 1000);
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -266,6 +276,7 @@ async function computeHolderDeltas(
   hasWindowForReads: boolean,
   pairCap: number,
   readTimeoutMs: number,
+  deadline?: ReadDeadline,
 ): Promise<{ deltas: Map<string, number>; applied: number; unknown: number }> {
   const pairs = collectHolderPairs(trades);
   const deltas = new Map<string, number>();
@@ -283,10 +294,11 @@ async function computeHolderDeltas(
   };
 
   if (capped.length > 0) {
-    const [beforeMap, afterMap] = await Promise.all([
-      readBalances(client, capped, BigInt(cursor), readTimeoutMs),
-      readBalances(client, capped, BigInt(afterBlock), readTimeoutMs),
-    ]);
+    // Both sides of each pair in ONE batch, chunk by chunk, under the deadline (readBalancesBothSides):
+    // two side-by-side readBalances calls used to merge into 80-call batches the public node refused.
+    const { before: beforeMap, after: afterMap } = await readBalancesBothSides(
+      client, capped, BigInt(cursor), BigInt(afterBlock), readTimeoutMs, deadline,
+    );
     for (const pair of capped) {
       const key = balancePairKey(pair);
       const before = beforeMap.get(key);
@@ -422,6 +434,7 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
         const holderOutcome = await computeHolderDeltas(
           deps.client, result.trades, cursor, nextBlock - 1, opts.stopWhenCaughtUp ?? false,
           holderWindowRemainingMs >= HOLDER_MIN_WINDOW_MS, holderPairCap, HOLDER_READ_TIMEOUT_MS,
+          { untilMs: endMs - HOLDER_READ_DEADLINE_MARGIN_MS, now: opts.now },
         );
         await applyFold(db, result, nextBlock - 1, sec(opts.now()), { newTokenSupply, holderDeltas: holderOutcome.deltas });
 
@@ -451,6 +464,13 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
           now: sec(opts.now()), ok: true,
           rows: result.pools.length + result.tokens.length + result.trades.length + result.candles.length,
           queries,
+          // The cycle's holder-count upkeep, for /api/health (23 Sep 2026): the one signal that says
+          // whether balance reads are getting through, visible without a manual cron call or the logs.
+          report: {
+            at: sec(opts.now()), cursor, blocks, trades: result.trades.length,
+            holderPairs: holderOutcome.applied + holderOutcome.unknown,
+            holderDeltaApplied: holderOutcome.applied, holderReadsUnknown: holderOutcome.unknown,
+          },
         });
 
         // Quote prices: after this cycle's own work, not inside it, and gated to at most once per

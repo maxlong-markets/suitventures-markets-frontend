@@ -1,19 +1,35 @@
 import { defineChain } from "viem";
 import type { Address, Origin, TokenPair } from "./types";
 
+/** The chain's own public JSON-RPC node: 40 calls per address per rolling second (src/lib/chain/pacing.ts). */
+export const PUBLIC_RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
+
+/**
+ * The browser's RPC endpoints in the order wagmi tries them (src/lib/wagmi.ts): the public node first,
+ * then NEXT_PUBLIC_RPC_URL as the backup when the public one refuses a visitor's burst. An unset
+ * `NEXT_PUBLIC_*` reaches the bundle as the empty string, and anything that is not an http(s) URL or
+ * that is the public node itself adds nothing. The one exception is the local fork harness
+ * (scripts/fork/deploy-local.mts writes a 127.0.0.1 anvil URL into .env.fork): a loopback endpoint
+ * is the ONLY endpoint, since a fork test that quietly read mainnet first would test nothing.
+ */
+export const BROWSER_RPC_URLS: readonly string[] = (() => {
+  const url = process.env.NEXT_PUBLIC_RPC_URL || "";
+  if (!/^https?:\/\//.test(url) || url === PUBLIC_RPC_URL) return [PUBLIC_RPC_URL];
+  const host = new URL(url).hostname;
+  return host === "localhost" || host === "127.0.0.1" ? [url] : [PUBLIC_RPC_URL, url];
+})();
+
 /** Robinhood Chain — Arbitrum Orbit L2, chain id 4663, gas in ETH. */
 export const robinhoodChain = defineChain({
   id: 4663,
   name: "Robinhood Chain",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: {
-    default: {
-      // An empty NEXT_PUBLIC_RPC_URL means "use the public RPC".
-      http: [
-        process.env.NEXT_PUBLIC_RPC_URL ||
-          "https://rpc.mainnet.chain.robinhood.com",
-      ],
-    },
+    // The public node is the chain's default everywhere (23 Sep 2026, per Kobe: public first, the
+    // paid endpoint only as a backup). The browser's wagmi transport (src/lib/wagmi.ts) adds
+    // NEXT_PUBLIC_RPC_URL behind it; the server's client (src/lib/chain/onchain.ts) reads
+    // CHAIN_RPC_URL / CHAIN_RPC_FALLBACK_URL and never touches NEXT_PUBLIC_RPC_URL.
+    default: { http: [BROWSER_RPC_URLS[0]!] },
   },
   blockExplorers: {
     default: {

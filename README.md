@@ -82,7 +82,8 @@ Live mode needs these variables; all but the first are server-only:
 | `CRON_SECRET` | 32 random bytes; Vercel sends it as a Bearer token to the cron routes |
 | `HYPERSYNC_API_TOKEN` | the chain reader's HyperSync token, from Envio's HyperSync dashboard (`ENVIO_API_TOKEN` is a fallback) |
 | `HYPERSYNC_URL` | optional; defaults to `https://4663.hypersync.xyz` |
-| `CHAIN_RPC_URL` | optional; RPC for token metadata and Chainlink prices, defaults to the chain's public RPC |
+| `CHAIN_RPC_URL` | optional; primary RPC for the reader's chain reads (metadata, Chainlink prices, holder-count balances, health), defaults to the chain's public node; always paced at 40 calls a second |
+| `CHAIN_RPC_FALLBACK_URL` | optional; backup RPC (a paid endpoint, server-only) tried once when the primary refuses, times out or errors |
 | `SYNC_INTERVAL_SEC` | optional; seconds between sync cycles inside one invocation, default 30 |
 
 Preview deployments get no database variable and stay on the mock source. The live source

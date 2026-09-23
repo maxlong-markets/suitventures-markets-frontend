@@ -67,6 +67,14 @@ describe("sync_state", () => {
     await finishRun(db, "market", { now: NOW + 1, ok: true, rows: 2_000_000_000, queries: 2_000_000_000 });
     expect(await readState(db, "market")).toMatchObject({ rowsWritten: 4_000_000_000, queriesUsed: 4_000_000_000 });
   });
+  it("stores a cycle report as last_report when given and keeps the stored one when omitted (23 Sep 2026)", async () => {
+    await finishRun(db, "chain", { now: NOW, ok: true, rows: 1, queries: 1, report: { at: NOW, holderPairs: 12, holderDeltaApplied: 10, holderReadsUnknown: 2 } });
+    const read = async () => (await db.query<{ last_report: Record<string, unknown> }>("select last_report from market.sync_state where job = 'chain'"))[0]!.last_report;
+    expect(await read()).toEqual({ at: NOW, holderPairs: 12, holderDeltaApplied: 10, holderReadsUnknown: 2 });
+    await finishRun(db, "chain", { now: NOW + 1, ok: false, error: "boom", rows: 0, queries: 0 });
+    expect(await read()).toEqual({ at: NOW, holderPairs: 12, holderDeltaApplied: 10, holderReadsUnknown: 2 }); // omitted: kept
+    expect((await db.query<{ last_report: unknown }>("select last_report from market.sync_state where job = 'market'"))[0]?.last_report ?? {}).toEqual({});
+  });
   it("keeps the highest head block ever reported on the market row, from a database that has never seen the job", async () => {
     expect(await readHeadBlock(db)).toBe(0);
     await raiseHeadBlock(db, 100);

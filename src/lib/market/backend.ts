@@ -1,5 +1,5 @@
 import type { PublicClient } from "viem";
-import { createChainClient } from "@/lib/chain/onchain";
+import { chainRpcHosts, createChainClient } from "@/lib/chain/onchain";
 import type { PairsScope } from "@/lib/envio/pairs";
 import type { IndexerInterval } from "@/lib/sync/ids";
 import type { Candle, Holder, QuoteAsset, TokenPair, Trade } from "@/lib/types";
@@ -12,7 +12,13 @@ export type HealthReport = {
   lag: number | null; // node head minus the chain cursor, in blocks (Task 6); null without a chainHead callback
   quotes: { id: string; ageSec: number; stale: boolean }[];
   db?: { latencyMs: number };
-  sync?: { lastOkAgeSec: number | null; lastError: string | null };
+  sync?: {
+    lastOkAgeSec: number | null; lastError: string | null;
+    /** The chain job's last cycle (23 Sep 2026): its holder-count upkeep, and how many of its pairs' balance reads got through. Absent until the reader has written one. */
+    lastCycle?: { ageSec: number; blocks: number; trades: number; holderPairs: number; holderDeltaApplied: number; holderReadsUnknown: number };
+  };
+  /** Hostnames only, never URLs (a paid endpoint's key is in its path): where the server's chain reads go. */
+  rpc?: { primary: string; backup: string | null };
   nightly?: { lastOkAgeSec: number | null; lastError: string | null; phase: string }; // phase "" is a finished re-pull
   error?: string;
 };
@@ -74,7 +80,7 @@ export function chainHeadFrom(client: Pick<PublicClient, "getBlockNumber">): () 
  */
 export function getBackend(): MarketBackend {
   if (instance) return instance;
-  instance = createDbBackend(getDb(), { chainHead: chainHeadFrom(createChainClient()) });
+  instance = createDbBackend(getDb(), { chainHead: chainHeadFrom(createChainClient()), rpc: chainRpcHosts() });
   return instance;
 }
 

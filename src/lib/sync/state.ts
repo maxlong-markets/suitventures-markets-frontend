@@ -99,14 +99,23 @@ export async function raiseHeadBlock(db: Db, block: number): Promise<void> {
   await db.query("update market.sync_state set head_block = greatest(head_block, $1::int) where job = 'market'", [block]);
 }
 
-export async function finishRun(db: Db, job: SyncJob, r: { now: number; ok: boolean; error?: string; rows: number; queries: number }): Promise<void> {
+/**
+ * `report`, when given, replaces the job's `last_report` (a small JSON object for /api/health — the chain
+ * job writes its cycle's holder-count upkeep there, 23 Sep 2026); omitted, the stored one is kept.
+ */
+export async function finishRun(
+  db: Db,
+  job: SyncJob,
+  r: { now: number; ok: boolean; error?: string; rows: number; queries: number; report?: Record<string, number | string | null> },
+): Promise<void> {
   await ensureRow(db, job);
   await db.query(
     `update market.sync_state set last_run_at = $2::int,
        last_ok_at = case when $3::boolean then $2::int else last_ok_at end,
        last_error = case when $3::boolean then null else $4::text end,
-       rows_written = rows_written + $5::int, queries_used = queries_used + $6::int
+       rows_written = rows_written + $5::int, queries_used = queries_used + $6::int,
+       last_report = coalesce($7::jsonb, last_report)
      where job = $1`,
-    [job, r.now, r.ok, r.error ?? null, r.rows, r.queries],
+    [job, r.now, r.ok, r.error ?? null, r.rows, r.queries, r.report ? JSON.stringify(r.report) : null],
   );
 }

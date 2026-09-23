@@ -10,7 +10,10 @@ import {
   type PublicClient,
 } from "viem";
 import { robinhoodChain } from "@/lib/chain";
-import { balancePairKey, createChainClient, readBalances, readQuotePrices, readTokenMetadata, type QuoteFeedConfig } from "./onchain";
+import {
+  BALANCE_READ_CHUNK, balancePairKey, chainRpcHosts, createChainClient, PUBLIC_RPC_CALLS_PER_SECOND,
+  readBalances, readBalancesBothSides, readQuotePrices, readTokenMetadata, type QuoteFeedConfig,
+} from "./onchain";
 
 // Spies on viem's `http` (delegating to the real implementation) so createChainClient's tests
 // below can assert on the exact transport config it passes — batchSize/wait aren't observable
@@ -574,6 +577,9 @@ describe("readBalances", () => {
 // createChainClient
 // ---------------------------------------------------------------------------
 
+/** createChainClient returns a paced client or a fallback one, so `url` lives on the transport's value only for the former. */
+const transportUrl = (client: ReturnType<typeof createChainClient>) => (client.transport as { url?: string }).url;
+
 describe("createChainClient", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -592,26 +598,153 @@ describe("createChainClient", () => {
 
   it("falls back to the chain's own default RPC when nothing is configured", () => {
     const client = createChainClient();
-    expect(client.transport.url).toBe(robinhoodChain.rpcUrls.default.http[0]);
+    expect(transportUrl(client)).toBe(robinhoodChain.rpcUrls.default.http[0]);
   });
 
   it("uses CHAIN_RPC_URL when no explicit URL is passed", () => {
     vi.stubEnv("CHAIN_RPC_URL", "https://chain-rpc.example");
     const client = createChainClient();
-    expect(client.transport.url).toBe("https://chain-rpc.example");
+    expect(transportUrl(client)).toBe("https://chain-rpc.example");
   });
 
   it("prefers an explicit rpcUrl over CHAIN_RPC_URL", () => {
     vi.stubEnv("CHAIN_RPC_URL", "https://chain-rpc.example");
     const client = createChainClient("https://explicit.example");
-    expect(client.transport.url).toBe("https://explicit.example");
+    expect(transportUrl(client)).toBe("https://explicit.example");
   });
 
-  it("configures the http transport with the 100-call/16ms batch window and three retries the public RPC's rate limit requires", () => {
-    createChainClient("https://batch.example");
-    expect(http).toHaveBeenCalledWith("https://batch.example", {
-      batch: { batchSize: 100, wait: 16 },
-      retryCount: 3,
-    });
+  // 23 Sep 2026: the public node meters 40 calls per address per second (pacing.ts), so the primary
+  // is always a paced transport whose batches are exactly that size, never a bare http().
+  it("paces the primary at the public node's 40 calls a second, batched 40 to a request, with no inner retries", () => {
+    const client = createChainClient("https://batch.example");
+    expect(client.transport.type).toBe("pacedHttp");
+    expect((client.transport as { callsPerSecond?: number }).callsPerSecond).toBe(PUBLIC_RPC_CALLS_PER_SECOND);
+    expect(PUBLIC_RPC_CALLS_PER_SECOND).toBe(40);
+    expect(BALANCE_READ_CHUNK).toBe(40);
+    expect(http).toHaveBeenCalledWith("https://batch.example", { batch: { batchSize: 40, wait: 16 }, retryCount: 0 });
+  });
+
+  it("has no backup transport unless CHAIN_RPC_FALLBACK_URL (or fallbackUrl) is set", () => {
+    const client = createChainClient("https://primary.example");
+    expect(client.transport.type).toBe("pacedHttp");
+    expect(client.transport.transports).toBeUndefined();
+  });
+
+  it("puts the paced primary first and the backup second when CHAIN_RPC_FALLBACK_URL is set", () => {
+    vi.stubEnv("CHAIN_RPC_URL", "https://primary.example");
+    vi.stubEnv("CHAIN_RPC_FALLBACK_URL", "https://backup.example/v2/key");
+    const client = createChainClient();
+    expect(client.transport.type).toBe("fallback");
+    const transports = client.transport.transports as { config: { type: string }; value?: { url?: string } }[];
+    expect(transports.map((t) => t.config.type)).toEqual(["pacedHttp", "http"]);
+    expect(transports[0]?.value?.url).toBe("https://primary.example");
+    expect(transports[1]?.value?.url).toBe("https://backup.example/v2/key");
+    expect(http).toHaveBeenCalledWith("https://backup.example/v2/key", { batch: { batchSize: 40, wait: 16 }, retryCount: 0 });
+  });
+
+  it("an explicit fallbackUrl wins over CHAIN_RPC_FALLBACK_URL", () => {
+    vi.stubEnv("CHAIN_RPC_FALLBACK_URL", "https://env-backup.example");
+    const client = createChainClient("https://primary.example", "https://explicit-backup.example");
+    const transports = client.transport.transports as { value?: { url?: string } }[];
+    expect(transports[1]?.value?.url).toBe("https://explicit-backup.example");
+  });
+
+  it("ignores a backup equal to the primary (falling back to the same node buys nothing)", () => {
+    const client = createChainClient("https://same.example", "https://same.example");
+    expect(client.transport.type).toBe("pacedHttp");
+  });
+});
+
+describe("chainRpcHosts", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("reports hostnames only, never the URL (a paid endpoint's key is in its path)", () => {
+    vi.stubEnv("CHAIN_RPC_URL", "https://rpc.mainnet.chain.robinhood.com");
+    vi.stubEnv("CHAIN_RPC_FALLBACK_URL", "https://robinhood-mainnet.g.alchemy.com/v2/SECRET-KEY");
+    expect(chainRpcHosts()).toEqual({ primary: "rpc.mainnet.chain.robinhood.com", backup: "robinhood-mainnet.g.alchemy.com" });
+  });
+
+  it("names the chain default and no backup when nothing is configured", () => {
+    vi.stubEnv("CHAIN_RPC_URL", "");
+    vi.stubEnv("CHAIN_RPC_FALLBACK_URL", "");
+    expect(chainRpcHosts()).toEqual({ primary: new URL(robinhoodChain.rpcUrls.default.http[0]!).host, backup: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readBalancesBothSides (23 Sep 2026): both sides of a pair in one batch, under a deadline
+// ---------------------------------------------------------------------------
+
+describe("readBalancesBothSides", () => {
+  const pairsOf = (n: number) => Array.from({ length: n }, (_, i) => ({ token: TOKEN, wallet: `0x${(i + 1).toString(16).padStart(40, "0")}` }));
+  const balancesFor = (pairs: { token: string; wallet: string }[], value: bigint) =>
+    Object.fromEntries(pairs.map((p) => [`${p.token}-${p.wallet}`, value]));
+
+  it("reads every pair at both blocks and returns the two maps with nothing skipped", async () => {
+    const pairs = pairsOf(3);
+    const { client, calls } = makeBalanceClient(balancesFor(pairs, 7n));
+    const { before, after, skipped } = await readBalancesBothSides(client, pairs, 100n, 101n);
+    expect(before.size).toBe(3);
+    expect(after.size).toBe(3);
+    expect(skipped).toBe(0);
+    expect(calls.filter((c) => c.blockNumber === 100n)).toHaveLength(3);
+    expect(calls.filter((c) => c.blockNumber === 101n)).toHaveLength(3);
+  });
+
+  it("issues each chunk's before AND after reads together, never more than BALANCE_READ_CHUNK calls at once", async () => {
+    const pairs = pairsOf(BALANCE_READ_CHUNK + 5); // 45 pairs = 90 calls
+    let inFlight = 0;
+    let peak = 0;
+    const client: Pick<PublicClient, "readContract"> = {
+      readContract: (async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        inFlight -= 1;
+        return 1n;
+      }) as unknown as PublicClient["readContract"],
+    };
+    const { before, after } = await readBalancesBothSides(client, pairs, 100n, 101n);
+    expect(peak).toBe(BALANCE_READ_CHUNK); // 20 pairs x 2 sides per chunk
+    expect(before.size).toBe(pairs.length);
+    expect(after.size).toBe(pairs.length);
+  });
+
+  it("stops starting chunks at the deadline, counts the rest skipped, and never leaves a started chunk half-read", async () => {
+    const pairs = pairsOf(BALANCE_READ_CHUNK); // 40 pairs = 2 chunks of 20
+    const { client, calls } = makeBalanceClient(balancesFor(pairs, 1n));
+    let tick = 0;
+    const deadline = { untilMs: 1, now: () => tick++ }; // the clock is read once per chunk: 0 starts the first, 1 is the deadline before the second
+    const { before, after, skipped } = await readBalancesBothSides(client, pairs, 100n, 101n, undefined, deadline);
+    expect(before.size).toBe(20);
+    expect(after.size).toBe(20);
+    expect(skipped).toBe(20);
+    expect(calls).toHaveLength(40); // one chunk: 20 before + 20 after, none of the second chunk
+  });
+
+  it("a failed read leaves that pair absent from that side only; the other side and the other pairs still resolve", async () => {
+    const pairs = pairsOf(2);
+    let n = 0;
+    const client: Pick<PublicClient, "readContract"> = {
+      readContract: (async (args: { blockNumber?: bigint; args: readonly unknown[] }) => {
+        n += 1;
+        if (args.blockNumber === 101n && String(args.args[0]) === pairs[0]!.wallet) throw new Error("revert");
+        return 5n;
+      }) as unknown as PublicClient["readContract"],
+    };
+    const { before, after, skipped } = await readBalancesBothSides(client, pairs, 100n, 101n);
+    expect(n).toBe(4);
+    expect(before.size).toBe(2);
+    expect(after.has(balancePairKey(pairs[0]!))).toBe(false);
+    expect(after.get(balancePairKey(pairs[1]!))).toBe(5n);
+    expect(skipped).toBe(0);
+  });
+
+  it("returns empty maps for no pairs without calling the client", async () => {
+    const readContract = vi.fn();
+    const client = { readContract } as unknown as Pick<PublicClient, "readContract">;
+    const result = await readBalancesBothSides(client, [], 1n, 2n);
+    expect(result).toEqual({ before: new Map(), after: new Map(), skipped: 0 });
+    expect(readContract).not.toHaveBeenCalled();
   });
 });
