@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { QUOTES } from "@/lib/chain/math/quotes";
+import { QUOTE_IDS } from "@/lib/chain/math/quotes";
 import { runHoldersBuild } from "@/lib/holders/run";
 import { holdersDeps } from "@/lib/sync/deps";
 import { isCronAuthorized } from "../../_lib/cron";
@@ -11,9 +11,6 @@ export const maxDuration = 300;
 
 const NO_STORE = { "Cache-Control": "no-store" };
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/** The quote assets are never given a holder list of their own (design section 4, step 2). */
-const QUOTE_IDS = QUOTES.map((q) => q.address);
 
 /**
  * The top-holder builder's minute cron (docs/superpowers/specs/2026-09-23-top-holders-design.md, section 4).

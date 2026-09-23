@@ -31,6 +31,10 @@ first duplicate key. A fresh start is, in the Supabase SQL editor,
 
 (quotes, tokens and pools are upserted and may stay), then delete `.seed/checkpoint.json` and run the seed again.
 
+Never run the seed's `balances` or `finish` phases against a database the top-holder builder owns: both write
+Envio's stale top-N holder rows over the exact balance maps the builder folds from the chain, and neither
+touches `market.holder_refresh`, so every overwritten list still reads as `ready` and nothing ever rebuilds it.
+
 Run `npm run db:parity` once the sync has run for an hour (rollout step R5) and again a day after the flip.
 Expected differences: tokens that traded after the last sync cycle (a field difference or a token missing on
 either side), and `missing on Envio` lines for tokens beyond M1's recovery window (its 1000-candidate, 7-day

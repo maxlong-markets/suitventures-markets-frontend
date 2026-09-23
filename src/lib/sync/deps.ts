@@ -33,7 +33,6 @@ function deadEnvioSource(): EnvioSource {
     swapsFor: fail("swapsFor"),
     candlesFor: fail("candlesFor"),
     tokensById: fail("tokensById"),
-    topHolders: fail("topHolders"),
     topHoldersBatch: fail("topHoldersBatch"),
     chainMeta: fail("chainMeta"),
     tokensPage: fail("tokensPage"),

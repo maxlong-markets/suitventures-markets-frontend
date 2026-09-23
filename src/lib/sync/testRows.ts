@@ -1,5 +1,5 @@
 import { bucketStart, candleId, type IndexerInterval } from "./ids";
-import type { BalanceRec, CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "./source";
+import type { CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "./source";
 
 /** Rows in the shape FakeSource serves and the writers consume. Ids are lowercase like the indexer's. */
 export const hex = (n: number, digits: number) => "0x" + n.toString(16).padStart(digits, "0");
@@ -50,9 +50,4 @@ export function candleRec(o: Partial<CandleRec> & { interval?: IndexerInterval }
     id: candleId(pool, interval, t), pool_id: pool, t, open: "0.0008", high: "0.0009", low: "0.0007", close: "0.000866",
     volumeQuote: "1.2", volumeToken: "1500", trades: 2, ...rest,
   };
-}
-export function balanceRec(o: Partial<BalanceRec> = {}): BalanceRec {
-  const holder = o.holder ?? WALLET;
-  const token = o.token_id ?? TOKEN_A;
-  return { id: `${token}-${holder}`, token_id: token, holder, balance: "5000000000000000000", updatedAt: T0 + 400, ...o };
 }

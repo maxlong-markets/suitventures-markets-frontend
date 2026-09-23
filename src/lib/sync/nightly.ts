@@ -1,4 +1,4 @@
-import { QUOTES } from "@/lib/chain/math/quotes";
+import { QUOTE_IDS } from "@/lib/chain/math/quotes";
 import type { Db } from "@/lib/db/client";
 import { coverageSet, pruneHolders } from "@/lib/holders/store";
 import type { Quoter } from "@/lib/quote/quoter";
@@ -22,9 +22,6 @@ export type NightlyResult = {
 
 const PHASES = ["listed", "prune", "holders", "probe"] as const;
 type Phase = (typeof PHASES)[number];
-
-/** The quote assets never get a top-holder list of their own, so the coverage set must not claim to keep one (design section 4, step 2). */
-const QUOTE_IDS = QUOTES.map((q) => q.address);
 
 /**
  * Phases in order, persisted in sync_state.nightly.phase: "listed" (recomputeListedPools "all"), "prune"

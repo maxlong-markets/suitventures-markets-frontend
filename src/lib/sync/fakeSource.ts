@@ -95,10 +95,6 @@ export class FakeSource implements EnvioSource {
     const wanted = new Set(ids);
     return this.data.tokens.filter((t) => wanted.has(t.id));
   }
-  async topHolders(tokenId: string, limit: number) {
-    this.hit("topHolders");
-    return holdersOf(this.data.balances, tokenId, limit);
-  }
   async topHoldersBatch(tokenIds: readonly string[], limit: number) {
     this.hit("topHoldersBatch");
     return tokenIds.flatMap((id) => holdersOf(this.data.balances, id, limit));

@@ -116,12 +116,12 @@ function asOfText(asOf: number, now: number): string {
 }
 
 /**
- * The four states of the top-holders design, section 1. `building` still shows the skeleton because the
- * list really is on its way — the hook polls every 5 s — while `skipped` shows no skeleton at all: nothing
- * is coming for that token, and a permanent skeleton would promise otherwise.
+ * The four states of the top-holders design, section 1, plus the failed request. `building` still shows the
+ * skeleton because the list really is on its way — the hook polls while it waits — while `skipped` shows no
+ * skeleton at all: nothing is coming for that token, and a permanent skeleton would promise otherwise.
  */
 function HoldersTable({ pair, now }: { pair: TokenPair; now: number }) {
-  const { data, isPending } = useHolders(pair.id);
+  const { data, isPending, isError } = useHolders(pair.id);
   return (
     <>
       <div
@@ -132,15 +132,19 @@ function HoldersTable({ pair, now }: { pair: TokenPair; now: number }) {
         <div className="text-right">Balance</div>
         <div className="text-right">Share</div>
       </div>
-      {/* No data once the query has settled is a failed request: the header alone, exactly as before. */}
+      {/* A failed request says so in one muted line (review 24 Sep 2026): the header on its own reads as
+          "this token has no holders" rather than "we could not ask". */}
       {isPending ? (
         <RowsSkeleton rows={8} />
+      ) : isError ? (
+        <div className={HOLDER_NOTE}>Holder list unavailable right now.</div>
       ) : !data ? null : data.status === "skipped" ? (
         <div className={HOLDER_NOTE}>Holder list unavailable for a token this large.</div>
       ) : data.status === "building" ? (
         <>
           <RowsSkeleton rows={8} />
-          <div className={HOLDER_NOTE}>Building this token&apos;s holder list. Usually under a minute.</div>
+          {/* A busy token is a quarter of an hour of the builder's paced slices, not "under a minute". */}
+          <div className={HOLDER_NOTE}>Building this token&apos;s holder list. A few minutes for a busy token.</div>
         </>
       ) : data.holders.length === 0 ? (
         <div className={HOLDER_NOTE}>No holders yet.</div>

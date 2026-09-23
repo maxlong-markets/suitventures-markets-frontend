@@ -102,16 +102,13 @@ describe("createEnvioSource", () => {
     expect(g.calls).toHaveLength(2);
   });
 
-  it("looks tokens up by id and holders by token", async () => {
-    const g = fakeGql([{ Token: [{ id: "t" }] }, { TokenBalance: [{ id: "b" }] }]);
+  it("looks tokens up by id", async () => {
+    const g = fakeGql([{ Token: [{ id: "t" }] }]);
     const source = createEnvioSource({ gql: g.fn, limiter: countingLimiter() });
     expect(await source.tokensById([])).toEqual([]);
     expect(await source.tokensById(["0xa", "0xb"])).toEqual([{ id: "t" }]);
     expect(norm(g.calls[0].query)).toContain(`Token(where: { id: { _in: $ids } }) { ${TOKEN_FIELDS} }`);
     expect(g.calls[0].variables).toEqual({ ids: ["0xa", "0xb"] });
-    expect(await source.topHolders("0xa", 100)).toEqual([{ id: "b" }]);
-    expect(norm(g.calls[1].query)).toContain(`TokenBalance(where: { token_id: { _eq: $token }, balance: { _gt: "0" } }, order_by: { balance: desc }, limit: $limit) { ${BALANCE_FIELDS} }`);
-    expect(g.calls[1].variables).toEqual({ token: "0xa", limit: 100 });
   });
 
   it("fetches top holders for a batch of tokens in one request, one aliased selection per token, flattened in request order", async () => {
