@@ -33,6 +33,9 @@ export default defineConfig({
           // Ten PGlite instances booting at once exceeded the 10 s hook default twice on a
           // loaded laptop; the boot is real work.
           hookTimeout: 60_000,
+          // A few files (seed.test.ts, dbBackend.test.ts) boot PGlite inside a test body rather than a
+          // hook, and the top-holder tasks add more; the same boot cost applies, so the same allowance.
+          testTimeout: 60_000,
         },
       },
       {
