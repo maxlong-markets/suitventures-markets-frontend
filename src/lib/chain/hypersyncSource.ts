@@ -86,6 +86,15 @@ const topicAddress = (topic: unknown): string | null =>
   typeof topic === "string" && topic.length === 66 ? `0x${topic.slice(26).toLowerCase()}` : null;
 
 /**
+ * A transfer log's block number or index as a number, NaN for anything that is not one. Number(null),
+ * Number("") and Number(false) are all 0, so those must be rejected before they reach Number at all — a
+ * present-but-empty position must never decode to block 0, the same rule parseBlockTimestamp above enforces on
+ * an empty timestamp. The caller turns the NaN into a throw.
+ */
+const logPosition = (value: unknown): number =>
+  typeof value === "number" || (typeof value === "string" && value.trim() !== "") ? Number(value) : NaN;
+
+/**
  * Topics in the order HyperSync sent them, from whichever of topic0..topic3 are present, stopping
  * at the first missing one: a log's absent topics are simply missing keys (verified against the
  * live service 21 Sep 2026), so topic3 is routinely absent and must not become a "0x0..0" topic.
@@ -250,9 +259,12 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
       return { events, nextBlock };
     },
 
-    async transfers(token: string, fromBlock: number) {
+    async transfers(token: string, fromBlock: number, toBlock?: number) {
       const queryBody = {
         from_block: fromBlock,
+        // HyperSync's to_block is exclusive, as in fetch(). Left out of the body entirely when the caller sets
+        // no ceiling: the source then covers whatever one response reaches.
+        ...(toBlock === undefined ? {} : { to_block: toBlock + 1 }),
         logs: [{ address: [token.toLowerCase()], topics: [[TRANSFER_TOPIC0]] }],
         // topic3 is selected only so the ERC-721 guard below can see it: an absent topic is a missing key, so
         // an unselected topic3 would read as undefined on every log and that guard would never fire.
@@ -265,9 +277,16 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
         JSON.stringify(queryBody),
       )) as HyperSyncTransferResponse;
       if (!Array.isArray(response.data) || !Number.isInteger(response.next_block)) {
-        throw new Error(`HyperSync transfers response malformed for block ${fromBlock}: missing data array or next_block`);
+        throw new Error(
+          `HyperSync transfers response malformed for block ${fromBlock}: missing data array or next_block (next_block=${String(response.next_block)})`,
+        );
       }
-      if (response.next_block <= fromBlock) throw new Error(`HyperSync transfers made no progress from block ${fromBlock}`);
+      // Clamped exactly as fetch() clamps its own: a response may report a next_block past the range asked for,
+      // and storing that as the token's cursor would skip every block between the ceiling and it.
+      const nextBlock = toBlock === undefined ? response.next_block : Math.min(response.next_block, toBlock + 1);
+      if (nextBlock <= fromBlock) {
+        throw new Error(`HyperSync transfers made no progress from block ${fromBlock} (next_block=${String(response.next_block)})`);
+      }
       const transfers: TransferEvent[] = [];
       for (const chunk of response.data) {
         for (const log of chunk.logs ?? []) {
@@ -276,12 +295,21 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
           const from = topicAddress(log.topic1);
           const to = topicAddress(log.topic2);
           if (!from || !to) continue;
+          // A malformed position must never become a NaN block: it would sort unpredictably against every other
+          // transfer and, worse, look like an ordinary row once written.
+          const block = logPosition(log.block_number);
+          const logIndex = logPosition(log.log_index);
+          if (!Number.isInteger(block) || !Number.isInteger(logIndex)) {
+            throw new Error(
+              `HyperSync transfer log has a malformed position: block_number=${String(log.block_number)} log_index=${String(log.log_index)}`,
+            );
+          }
           const data = typeof log.data === "string" && log.data.length > 2 ? log.data : "0x0";
-          transfers.push({ block: Number(log.block_number), logIndex: Number(log.log_index), from, to, value: BigInt(data) });
+          transfers.push({ block, logIndex, from, to, value: BigInt(data) });
         }
       }
       transfers.sort((a, b) => a.block - b.block || a.logIndex - b.logIndex);
-      return { transfers, nextBlock: response.next_block };
+      return { transfers, nextBlock };
     },
 
     get requests() {

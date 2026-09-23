@@ -71,9 +71,11 @@ export interface LogSource {
   /**
    * `token`'s ERC-20 Transfer events from `fromBlock` on, ascending by (block, logIndex), as many blocks as one
    * response covers (top holders, 23 Sep 2026): `nextBlock` is the first block NOT covered and is always
-   * greater than `fromBlock`, or the call throws — the same contract as fetch().
+   * greater than `fromBlock`, or the call throws — the same contract as fetch(). `toBlock`, when given, is an
+   * inclusive ceiling: no event past it comes back and `nextBlock` never passes `toBlock + 1`, so the builder can
+   * hand the source its `head - safety` line and never fold past it. Omitted, the source covers what it likes.
    */
-  transfers(token: string, fromBlock: number): Promise<{ transfers: TransferEvent[]; nextBlock: number }>;
+  transfers(token: string, fromBlock: number, toBlock?: number): Promise<{ transfers: TransferEvent[]; nextBlock: number }>;
   /** Requests issued so far, for budgets and reports. */
   readonly requests: number;
 }
