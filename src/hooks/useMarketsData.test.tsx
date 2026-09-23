@@ -158,6 +158,9 @@ describe("useChartCandles", () => {
 });
 
 describe("useHolders", () => {
+  // The poll-backoff case below freezes Date.now; restore it so the cases after it see a moving clock.
+  afterEach(() => vi.restoreAllMocks());
+
   /**
    * Resolves `refetchInterval` exactly as React Query does — it is a function of the query — rather than
    * waiting five real seconds for a tick. The returned thunk can be called again after the clock moves,

@@ -132,13 +132,14 @@ function HoldersTable({ pair, now }: { pair: TokenPair; now: number }) {
         <div className="text-right">Balance</div>
         <div className="text-right">Share</div>
       </div>
-      {/* A failed request says so in one muted line (review 24 Sep 2026): the header on its own reads as
-          "this token has no holders" rather than "we could not ask". */}
+      {/* A failed request with nothing cached says so in one muted line (review 24 Sep 2026): the header on
+          its own reads as "this token has no holders" rather than "we could not ask". A failed REFETCH keeps
+          showing the list it already has — a stale list beats an apology. */}
       {isPending ? (
         <RowsSkeleton rows={8} />
-      ) : isError ? (
-        <div className={HOLDER_NOTE}>Holder list unavailable right now.</div>
-      ) : !data ? null : data.status === "skipped" ? (
+      ) : !data ? (
+        isError ? <div className={HOLDER_NOTE}>Holder list unavailable right now.</div> : null
+      ) : data.status === "skipped" ? (
         <div className={HOLDER_NOTE}>Holder list unavailable for a token this large.</div>
       ) : data.status === "building" ? (
         <>
