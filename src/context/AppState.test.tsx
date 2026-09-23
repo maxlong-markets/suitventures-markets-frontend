@@ -90,7 +90,7 @@ function fakeVotes(live: { bull: number; bear: number; voted?: VoteDir }, cached
     return { dir: live.voted ?? null, bull: live.bull, bear: live.bear };
   };
   h.ds.pairs.mockImplementation(async () => [pairRow(cached[0], cached[1])]);
-  h.ds.votes.mockImplementation(async () => (live.voted ? { [TOKEN]: live.voted } : {}));
+  h.ds.votes.mockImplementation(async (): Promise<Record<string, VoteDir>> => (live.voted ? { [TOKEN]: live.voted } : {}));
   h.ds.vote.mockImplementation(async (_id, dir) => write(dir));
   /** Holds the next write open until `release()`, with the store still moving when it lands. */
   const hold = () => {

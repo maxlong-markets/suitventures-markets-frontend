@@ -14,6 +14,7 @@ import type {
   TraderRow,
   TradersBy,
   VoteDir,
+  VoteResult,
 } from "@/lib/types";
 import { hash } from "@/lib/format";
 import { localQuote } from "@/lib/quote";
@@ -358,7 +359,7 @@ export class MockDataSource implements MarketsDataSource {
     return address ? { ...this.loadVotes(address) } : {};
   }
 
-  async vote(id: string, dir: VoteDir): Promise<VoteDir | null> {
+  async vote(id: string, dir: VoteDir): Promise<VoteResult> {
     const address = requireSession(this.signedAddress);
     const pair = this.pairOrThrow(id);
     const book = { ...this.loadVotes(address) };
@@ -375,7 +376,9 @@ export class MockDataSource implements MarketsDataSource {
     this.voteBook.set(address.toLowerCase(), book);
     writeStore(storageKey("votes", address), book);
     await this.delay();
-    return now;
+    // The counts travel back with the write here too: the demo's own `pairs` answers from the same
+    // objects, but the contract is the live source's, and the client paints this answer.
+    return { dir: now, bull: pair.bull, bear: pair.bear };
   }
 
   // --- Session ----------------------------------------------------------

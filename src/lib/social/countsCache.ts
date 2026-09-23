@@ -35,17 +35,32 @@ export async function countsFor(db: Db, ids: readonly string[], now: number): Pr
   for (const id of misses) {
     const value = fresh[id] ?? { bull: 0, bear: 0 };
     out[id] = value;
-    if (!cache.has(id) && cache.size >= MAX_ENTRIES) {
-      // Only a genuinely new id can grow the cache past its cap; refreshing one already present
-      // (stale or not) must evict nothing. `keys().next().value` is the oldest entry precisely
-      // because every set below is a delete-then-set, which keeps Map order equal to recency.
-      const oldest = cache.keys().next().value;
-      if (oldest !== undefined) cache.delete(oldest);
-    }
-    cache.delete(id);
-    cache.set(id, { value, at: now });
+    rememberCounts(id, value, now);
   }
   return out;
+}
+
+/**
+ * One id's counts, as of `now`, replacing whatever was cached for it. The write path calls this
+ * with the counts its own transaction read (`toggleVote`), so the thirty seconds an entry lives
+ * can no longer outlive the vote that changed it: before this, a wallet's vote committed and every
+ * reader — the pairs list, `/api/votes`, the token page — kept answering the pre-vote number, so
+ * the client's own refetch painted the count back to where it had been (the 23 Sep report).
+ *
+ * It is the write path's half of `countsFor`, and deliberately shares its insert: a fresh entry
+ * still evicts the oldest at the cap, and replacing one that is already there still evicts
+ * nothing.
+ */
+export function rememberCounts(id: string, value: VoteCount, now: number): void {
+  if (!cache.has(id) && cache.size >= MAX_ENTRIES) {
+    // Only a genuinely new id can grow the cache past its cap; refreshing one already present
+    // (stale or not) must evict nothing. `keys().next().value` is the oldest entry precisely
+    // because every set here is a delete-then-set, which keeps Map order equal to recency.
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.delete(id);
+  cache.set(id, { value, at: now });
 }
 
 /** Tests only: forget every cached id. */
