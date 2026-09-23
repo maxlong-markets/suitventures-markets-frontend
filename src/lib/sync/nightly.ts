@@ -39,7 +39,9 @@ const QUOTE_IDS = QUOTES.map((q) => q.address);
  * "holders" sits between prune and probe for the same reason prune does: it is the second thing protecting
  * the store from unbounded growth (balances, not swaps), it carries no chain request and no cursor of its
  * own — a plain re-scan, so an interrupted run just finds the same victims next time — and it must never be
- * starved by a probe that can legitimately take weeks. It runs whether or not opts.quoter was supplied.
+ * starved by a probe that can legitimately take weeks. It runs whether or not opts.quoter was supplied, and
+ * it stops at the deadline exactly as prune does, leaving its own name stored so the next invocation re-enters
+ * it with a full window rather than falling through to probe (fix round 1; see the block itself).
  *
  * Prune runs before probe (reordered from the original listed/probe/prune — final review BLOCKER, fixed
  * before CRON_SECRET is ever set): probe is capped at PROBE_RUN_CAP candidates a run (probe.ts) and, once
@@ -122,9 +124,25 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     await saveCursors(db, "nightly", { phase, cursorText: "" });
   }
   if (phase === "holders") {
-    // Design section 7: keep the table's tokens and anything opened in the last week, drop the rest. One token
-    // per statement pair inside pruneHolders, so no single delete approaches the pooler's statement timeout.
+    // Design section 7: keep the table's tokens and anything opened in the last week, drop the rest.
+    //
+    // What is bounded and what is not. pruneHolders takes each victim token in its own statement pair, so no
+    // one victim's delete goes near the pooler's statement timeout however many holders it had — but it then
+    // finishes with a single orphan sweep over the whole of market.token_balances (an anti-join against
+    // market.holder_refresh, deleting rows whose refresh row is already gone). That last statement is bounded
+    // by the size of the balances table, not by the victim count, and coverageSet before it groups over a
+    // day of market.swaps — 2.2 s warm and 6.5 s cold on production (COVERAGE_TTL_SEC in holders/run.ts).
+    // So the phase as a whole has no per-token bound: it can take real time on a bad night.
+    //
+    // Hence a deadline check before each of the two halves (fix round 1). Neither touches the stored cursor,
+    // because the phase has none of its own — it is a plain re-scan, like prune — and the transition into
+    // "holders" was already saved above: the next invocation re-enters here with a full window and finds the
+    // same victims. Without these checks a run that entered the phase late would be killed by maxDuration
+    // with "holders" already stored, and every later night would resume at "holders", silently skipping
+    // "listed" and "prune" for good.
+    if (Date.now() >= opts.deadlineMs) return finish(false, "holders");
     const kept = await coverageSet(db, opts.now, QUOTE_IDS);
+    if (Date.now() >= opts.deadlineMs) return finish(false, "holders");
     const pruned = await pruneHolders(db, kept, opts.now);
     r.prunedHolders = pruned.tokens;
     phase = "probe";

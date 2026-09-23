@@ -291,6 +291,7 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
       // through Number(), the same way every other bigint this app reads does.
       const size = (await db.query<{ rows: number | string; bytes: number | string }>(HOLDERS_TABLE_SQL))[0];
       const holders = {
+        lastError: shortError("holders", holdersState?.last_error ?? null),
         lastCycle: holdersCycleFrom(holdersState?.last_report ?? null, at),
         table: { rows: Number(size?.rows ?? 0), bytes: Number(size?.bytes ?? 0) },
       };

@@ -22,12 +22,14 @@ export type HealthReport = {
   nightly?: { lastOkAgeSec: number | null; lastError: string | null; phase: string }; // phase "" is a finished re-pull
   /**
    * The top-holder builder (top-holders design section 8): its last cycle from the `holders` job's own
-   * `last_report`, and what `market.token_balances` costs — so pace, progress and the storage ceiling are
-   * visible without the logs. `lastCycle` is null until the builder has written a full report; `table` is
-   * always there, because the footprint is worth knowing before the first build. Absent only when the
-   * database did not answer at all.
+   * `last_report`, the error that ended its last invocation, and what `market.token_balances` costs — so
+   * pace, progress, failure and the storage ceiling are visible without the logs. `lastCycle` is null until
+   * the builder has written a full report; `table` is always there, because the footprint is worth knowing
+   * before the first build. Absent only when the database did not answer at all.
    */
   holders?: {
+    /** Cut to the same 120 characters as the chain and nightly jobs'; the full text goes to the server log. */
+    lastError: string | null;
     lastCycle: {
       ageSec: number; coverage: number; due: number; tokensTouched: number; tokensReady: number;
       tokensSkipped: number; slices: number; requests: number; transfers: number; errors: number; spacingMs: number;

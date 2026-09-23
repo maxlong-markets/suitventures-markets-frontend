@@ -77,8 +77,8 @@ at every refresh. The route handlers under `src/app/api` read that store.
   token outside the 500-row list, so deep links work. `GET /api/health` reports
   the backend, database latency, sync age and last error, indexer lag (chain
   head minus last processed block), which quote-asset USD prices are stale, and
-  the holder builder's last cycle next to `market.token_balances`'s row estimate
-  and total size.
+  the holder builder's last cycle and last error next to `market.token_balances`'s
+  row estimate and total size.
 - **Scripts** (`scripts/`, see `scripts/README.md`): `npm run db:migrate`,
   `npm run db:smoke`, `npm run seed` (the resumable one-off load) and
   `npm run db:parity`. They read `DATABASE_URL_DIRECT` (session pooler) from

@@ -370,10 +370,16 @@ describe("createDbBackend health", () => {
         tokensSkipped: 1, slices: 21, requests: 66, transfers: 4800, errors: 0, spacingMs: 750,
       },
     });
-    expect((await backend().health()).holders!.lastCycle).toEqual({
+    const built = await backend().health();
+    expect(built.holders!.lastCycle).toEqual({
       ageSec: 40, coverage: 500, due: 12, tokensTouched: 9, tokensReady: 7, tokensSkipped: 1,
       slices: 21, requests: 66, transfers: 4800, errors: 0, spacingMs: 750,
     });
+    // An invocation that ended on the ok:false path shows its reason beside the cycle, like the other two
+    // jobs; a cycle whose per-token failures were merely counted (report.errors) is not an error for the job.
+    expect(built.holders!.lastError).toBeNull();
+    await finishRun(db, "holders", { now: NOW - 5, ok: false, error: "holders: HyperSync head is not a positive integer: 0", rows: 0, queries: 1 });
+    expect((await backend().health()).holders!.lastError).toBe("holders: HyperSync head is not a positive integer: 0");
   });
 
   it("reports lag null when no chainHead callback is supplied at all (Task 6: absent by default)", async () => {
@@ -402,17 +408,20 @@ describe("createDbBackend health", () => {
     const long = `relation "market.pools" does not exist; ${"x".repeat(200)}`;
     await finishRun(db, "chain", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
     await finishRun(db, "nightly", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
+    await finishRun(db, "holders", { now: NOW, ok: false, error: long, rows: 0, queries: 1 });
     const h = await backend().health();
     expect(h.sync!.lastError).toBe(long.slice(0, 120));
     expect(h.sync!.lastError).toHaveLength(120);
     expect(h.nightly!.lastError).toBe(long.slice(0, 120));
+    expect(h.holders!.lastError).toBe(long.slice(0, 120));
     expect(console.warn).toHaveBeenCalledWith(`chain last_error: ${long}`);
     expect(console.warn).toHaveBeenCalledWith(`nightly last_error: ${long}`);
+    expect(console.warn).toHaveBeenCalledWith(`holders last_error: ${long}`);
     // A short error travels whole, and is not logged again by the health check.
     vi.mocked(console.warn).mockClear();
     await finishRun(db, "chain", { now: NOW, ok: false, error: "HyperSync responded 429", rows: 0, queries: 1 });
     expect((await backend().health()).sync!.lastError).toBe("HyperSync responded 429");
-    expect(console.warn).toHaveBeenCalledTimes(1); // the nightly's long one
+    expect(console.warn).toHaveBeenCalledTimes(2); // the nightly's and the builder's long ones
   });
 });
 

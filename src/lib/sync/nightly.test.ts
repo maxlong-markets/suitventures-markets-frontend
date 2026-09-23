@@ -35,8 +35,11 @@ const WALLET_H = addr(0xc9);
 /** One top-holder list per token: a refresh row with its request stamp, and one balance row to delete with it. */
 async function seedHolderList(tokenId: string, requestedAt: number): Promise<void> {
   await db.query("insert into market.holder_refresh (token_id, refreshed_at, requested_at, status) values ($1, $2, $3, 'ready')", [tokenId, T0, requestedAt]);
-  await db.query("insert into market.token_balances (token_id, holder, balance, updated_at) values ($1, $2, 7, $3)", [tokenId, WALLET_H, T0]);
+  await seedOrphanBalance(tokenId);
 }
+/** A balance row on its own. Without a refresh row beside it, only pruneHolders's closing anti-join reaches it. */
+const seedOrphanBalance = (tokenId: string) =>
+  db.query("insert into market.token_balances (token_id, holder, balance, updated_at) values ($1, $2, 7, $3)", [tokenId, WALLET_H, T0]);
 const holderTokens = () => db.query("select token_id from market.holder_refresh order by token_id");
 const balanceTokens = () => db.query("select distinct token_id from market.token_balances order by token_id");
 
@@ -238,6 +241,51 @@ describe("runNightly", () => {
       .filter((params): params is unknown[] => Array.isArray(params) && params[0] === "nightly" && params.length === 3)
       .map((params) => params[2]);
     expect(phases).toEqual(["prune", "holders", "probe", ""]);
+  });
+
+  it("sweeps balance rows whose refresh row is already gone, leaving the covered and recently opened lists alone", async () => {
+    await seedHolderCleanupCase();
+    // No refresh row of their own, so neither is a victim of the per-token deletes: pruneHolders's closing
+    // anti-join over the whole balances table is the only thing that can reach them (TOKEN_B is a real token
+    // with no list, addr(0xb5) a token the store has never seen at all).
+    await seedOrphanBalance(TOKEN_B);
+    await seedOrphanBalance(addr(0xb5));
+    // prunedHolders counts victim TOKENS — only TOKEN_D — and never the swept rows: an orphan has no refresh
+    // row to lose, so it was never on anybody's list to begin with.
+    expect(await nightly()).toMatchObject({ done: true, phase: "", prunedHolders: 1 });
+    expect(await balanceTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }]);
+    expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }]);
+  });
+
+  it('resumes a stored "holders" phase directly, skipping "listed" and "prune", then continues into "probe"', async () => {
+    await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    await seedHolderCleanupCase();
+    await db.query("update market.tokens set listed_pool_id = null"); // proves "listed" really did not re-run below
+    const cutoff = retentionCutoff(T0 + 1000);
+    await insertSwaps(db, [swapRec({ txHash: txHash(0xf2), timestamp: cutoff - 10 })]); // stale, but "prune" is skipped this cycle
+    await saveCursors(db, "nightly", { phase: "holders", cursorText: "" });
+    const quoter: Quoter = { exactIn: async () => 1n, exactOut: async () => { throw new Error("unused by probePools"); } };
+    const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
+    expect(result).toMatchObject({ done: true, phase: "", listed: 0, pruned: 0, prunedCandles: 0, prunedHolders: 1, probed: 2, routable: 2 });
+    expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }]);
+    // The stale swap survives (prune skipped this cycle), and the run still finishes through probe.
+    expect(await db.query("select tx_hash from market.swaps order by tx_hash")).toEqual([{ tx_hash: txHash(0xf1) }, { tx_hash: txHash(0xf2) }]);
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "" });
+  });
+
+  it('stops in "holders" when the deadline has already passed, deletes nothing, and the next run finishes the cleanup', async () => {
+    await seedHolderCleanupCase();
+    await saveCursors(db, "nightly", { phase: "holders", cursorText: "" });
+    // Already past on entry. The phase must not start work it cannot finish, and must leave its OWN name
+    // stored: falling through to "probe" here would store "probe", and every later night would resume there —
+    // skipping listed, prune and this cleanup for good (fix round 1).
+    const stopped = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() - 1 });
+    expect(stopped).toMatchObject({ done: false, phase: "holders", listed: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0 });
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "holders", cursorText: "" });
+    expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }, { token_id: TOKEN_D }]);
+    // A full window re-enters the phase and finds exactly the same victim.
+    expect(await nightly()).toMatchObject({ done: true, phase: "", prunedHolders: 1 });
+    expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }]);
   });
 
   it('resumes into "holders" on the next run when the deadline stopped the previous one inside "prune"', async () => {
