@@ -57,8 +57,11 @@ const CANDLES_SQL = `select t, open, high, low, close, volume_quote as "volumeQu
   where pool_id = $1 and interval = $2 order by t desc limit ${CANDLES_LIMIT}`;
 const TRADES_SQL = `select ts as timestamp, side, amount_token as "amountToken", price_quote as "priceQuote", wallet, tx_hash as "txHash"
   from market.swaps where pool_id = $1 order by ts desc limit ${TRADES_LIMIT}`;
-const HOLDERS_SQL = `select holder, balance::text as balance from market.token_balances
-  where token_id = $1 and balance > 0 order by balance desc limit ${HOLDERS_SHOWN}`;
+// `order by b.balance`, qualified: an unqualified `balance` here would bind to the `balance::text` output alias and
+// sort the digits as text — a 22-digit balance starting with 9 above a 29-digit one — which is exactly what the
+// first live list showed on 24 Sep 2026. The qualified name is the numeric column.
+const HOLDERS_SQL = `select b.holder, b.balance::text as balance from market.token_balances b
+  where b.token_id = $1 and b.balance > 0 order by b.balance desc limit ${HOLDERS_SHOWN}`;
 /**
  * The trading pool for `poolKey()` (MarketBackend.poolKey's own doc comment carries the full "two
  * meanings" story): the token's primary pool, `primary_pool_id`, when it prices sanely and carries

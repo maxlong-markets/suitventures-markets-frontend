@@ -206,6 +206,25 @@ describe("createDbBackend reads", () => {
     expect(await refreshState(A)).toEqual({ refreshed_at: 0, requested_at: NOW, status: "building" });
   });
 
+  it("holders() ranks by numeric balance, not by the digits of the text it ships: a 29-digit balance outranks a 22-digit one that starts with 9 (24 Sep 2026)", async () => {
+    // The query aliases balance::text AS balance; an unqualified ORDER BY balance then binds to that text alias
+    // and sorts lexicographically, which put musebook's 9,998-token wallets above its 15-billion-token contract on
+    // production the night the first list landed.
+    await seedBalances(A, [
+      bal(addr("1"), "9998537629407102330570"), // 22 digits, starts with 9
+      bal(addr("2"), "15006127107397049420774438050"), // 29 digits, starts with 1: the real top holder
+      bal(addr("3"), "9994509215"), // 10 digits
+      bal(addr("4"), "99882978919034534785423"), // 23 digits
+    ]);
+    await seedRefresh(A, { refreshedAt: NOW - 10, requestedAt: NOW - 600, status: "ready" });
+    try {
+      const view = await backend().holders(A);
+      expect(view.holders.map((h) => h.wallet)).toEqual([addr("2"), addr("4"), addr("1"), addr("3")]);
+    } finally {
+      await seedBalances(A, stored); // the suite seeds A's balances once in beforeAll; put them back for the tests after this one
+    }
+  });
+
   it("holders() serves a ready list with its as-of stamp, and queues nothing while it is fresh", async () => {
     await seedRefresh(A, { refreshedAt: NOW - 10, requestedAt: NOW - 600, status: "ready" });
     expect(await backend().holders(A)).toEqual({
