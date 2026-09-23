@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { QUOTE_IDS } from "@/lib/chain/math/quotes";
+import { QUOTE_ADDRESSES } from "@/lib/chain/math/quotes";
 import { runHoldersBuild } from "@/lib/holders/run";
 import { holdersDeps } from "@/lib/sync/deps";
 import { isCronAuthorized } from "../../_lib/cron";
@@ -26,7 +26,7 @@ export async function GET(req: Request) {
     const report = await runHoldersBuild(
       db,
       { source },
-      { owner: randomUUID(), now: Date.now, sleep, windowSec: 50, leaseSec: 300, excludedIds: QUOTE_IDS },
+      { owner: randomUUID(), now: Date.now, sleep, windowSec: 50, leaseSec: 300, excludedIds: QUOTE_ADDRESSES },
     );
     return NextResponse.json(report, { headers: NO_STORE });
   } catch (err) {

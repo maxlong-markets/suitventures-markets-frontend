@@ -55,17 +55,13 @@ validateQuotes(QUOTES);
 
 const BY_ADDRESS = new Map(QUOTES.map((q) => [q.address, q]));
 
-export const QUOTE_ADDRESSES: string[] = QUOTES.map((q) => q.address);
-
 /**
- * The quote assets as market.tokens ids — a token's id IS its lowercased address in this store. The single
- * home for the list every store-side caller excludes: the top-holder coverage set must never claim to keep a
- * list for a quote asset (design section 4, step 2). Review 24 Sep 2026: src/lib/sync/nightly.ts and
- * src/app/api/internal/holders/route.ts each kept their own copy of this map, which could drift apart and
- * leave the nightly keeping lists the builder never builds. `QUOTE_ADDRESSES` above is the same list under
- * the name the chain and feed code uses for it.
+ * Every quote asset's address, lowercased (QUOTES above already lowercases them). This is also the exclusion
+ * list the top-holder builder and the nightly cleanup pass as token ids — a token's id IS its lowercased
+ * address in this store, and a quote asset must never be given a holder list of its own (top-holders design
+ * section 4, step 2) — so it must stay lowercase; quotes.test.ts pins that.
  */
-export const QUOTE_IDS: string[] = QUOTES.map((q) => q.address.toLowerCase());
+export const QUOTE_ADDRESSES: string[] = QUOTES.map((q) => q.address);
 
 export function isQuote(address: string): boolean {
   return BY_ADDRESS.has(address.toLowerCase());

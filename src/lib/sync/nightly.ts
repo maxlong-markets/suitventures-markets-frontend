@@ -1,4 +1,4 @@
-import { QUOTE_IDS } from "@/lib/chain/math/quotes";
+import { QUOTE_ADDRESSES } from "@/lib/chain/math/quotes";
 import type { Db } from "@/lib/db/client";
 import { coverageSet, pruneHolders } from "@/lib/holders/store";
 import type { Quoter } from "@/lib/quote/quoter";
@@ -139,7 +139,7 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     // with "holders" already stored, and every later night would resume at "holders", silently skipping
     // "listed" and "prune" for good.
     if (Date.now() >= opts.deadlineMs) return finish(false, "holders");
-    const kept = await coverageSet(db, opts.now, QUOTE_IDS);
+    const kept = await coverageSet(db, opts.now, QUOTE_ADDRESSES);
     if (Date.now() >= opts.deadlineMs) return finish(false, "holders");
     // The pruner carries the same bounded contract as pruneSwaps/pruneCandles now (I2): it stops between
     // victims and before its closing sweep, so a phase entered with only seconds left drops what it can and

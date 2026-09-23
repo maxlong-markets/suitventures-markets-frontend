@@ -270,9 +270,13 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
       // report. Each gets its own catch, a one-line warn and an empty answer — health's reason for existing
       // is to say whether the jobs are running, and that part still stands.
       let ages: { id: string; usd_updated_at: number; aggregator: string | null }[] = [];
+      // An empty `quotes` makes the "no quote is stale" half of `ok` below vacuously true, which would turn a
+      // broken query into a clean bill of health. The flag is what keeps the report answering AND honest.
+      let quotesFailed = false;
       try {
         ages = await db.query<{ id: string; usd_updated_at: number; aggregator: string | null }>(QUOTE_AGES_SQL);
       } catch (err) {
+        quotesFailed = true;
         console.warn(`health: quote ages unavailable: ${message(err)}`);
       }
       const quotes = ages.map((q) => ({ id: q.id, ageSec: at - q.usd_updated_at, stale: isStale({ updatedAt: q.usd_updated_at, aggregator: q.aggregator ?? "" }, at) }));
@@ -314,7 +318,7 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
         lastCycle: holdersCycleFrom(holdersState?.last_report ?? null, at),
         table: { rows: Number(size?.rows ?? 0), bytes: Number(size?.bytes ?? 0) },
       };
-      const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && quotes.every((q) => !q.stale);
+      const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && !quotesFailed && quotes.every((q) => !q.stale);
       return { ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night, holders, ...(opts.rpc ? { rpc: opts.rpc } : {}) };
     },
   };

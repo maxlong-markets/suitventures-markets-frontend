@@ -426,10 +426,27 @@ describe("createDbBackend health", () => {
     const h = await createDbBackend(cosmetic, { chainHead: fakeChainHead, now: () => now }).health();
 
     expect(h.error).toBeUndefined();
-    expect(h).toMatchObject({ ok: true, backend: "db", lag: 5, quotes: [], sync: { lastOkAgeSec: 30 }, nightly: { phase: "" } });
+    expect(h).toMatchObject({ backend: "db", lag: 5, quotes: [], sync: { lastOkAgeSec: 30 }, nightly: { phase: "" } });
     expect(h.holders!.table).toEqual({ rows: 0, bytes: 0 });
     expect(h.holders!.lastCycle).toMatchObject({ ageSec: 40, coverage: 500, tokensReady: 7 });
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("market.token_balances"));
+    // An empty `quotes` makes "no quote is stale" vacuously true, so ok must not read the failure as health:
+    // the report still answers, but it answers "not ok" (review round 2).
+    expect(h.ok).toBe(false);
+  });
+
+  it("stays ok when only the table-size query fails: that one says nothing about whether prices are fresh", async () => {
+    await finishRun(db, "chain", { now: NOW - 30, ok: true, rows: 10, queries: 4 });
+    const sizeOnly: Db = {
+      ...db,
+      query<T extends Record<string, unknown>>(text: string, params?: readonly unknown[]): Promise<T[]> {
+        if (text.includes("pg_total_relation_size")) return Promise.reject(new Error("permission denied for pg_class"));
+        return db.query<T>(text, params);
+      },
+    };
+    const h = await createDbBackend(sizeOnly, { chainHead: fakeChainHead, now: () => now }).health();
+    expect(h).toMatchObject({ ok: true, quotes: [{ id: NVDA, ageSec: 60, stale: false }] });
+    expect(h.holders!.table).toEqual({ rows: 0, bytes: 0 });
   });
 
   it("reports lag null when no chainHead callback is supplied at all (Task 6: absent by default)", async () => {
