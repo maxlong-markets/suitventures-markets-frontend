@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QUOTES } from "@/lib/chain/math/quotes";
 import { resetDb } from "@/lib/db/client";
-import { chainDeps, setChainDeps, setSyncDeps, syncDeps } from "./deps";
+import { chainDeps, holdersDeps, setChainDeps, setHoldersDeps, setSyncDeps, syncDeps } from "./deps";
 
 // The real factory: getDb() only needs DATABASE_URL to be some parseable string — postgres.js connects lazily, so
 // this never opens a socket (the same reasoning createQuoter() and createHyperSyncSource()/createChainClient() rely
@@ -14,6 +14,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   setSyncDeps(null);
   setChainDeps(null);
+  setHoldersDeps(null);
 });
 
 describe("syncDeps (I2a: a severed probe is silent unless the wiring itself is tested)", () => {
@@ -68,5 +69,21 @@ describe("chainDeps", () => {
     const fake = { db: {} as never, source: {} as never, client: {} as never, quotes: [] };
     setChainDeps(() => fake);
     expect(chainDeps()).toBe(fake);
+  });
+});
+
+describe("holdersDeps", () => {
+  it("builds a real HyperSync source for the top-holder builder", () => {
+    vi.stubEnv("DATABASE_URL", FAKE_URL);
+    const deps = holdersDeps();
+    expect(typeof deps.source.head).toBe("function");
+    expect(typeof deps.source.transfers).toBe("function");
+    expect(deps.source.requests).toBe(0);
+  });
+
+  it("honours setHoldersDeps for tests", () => {
+    const fake = { db: {} as never, source: {} as never };
+    setHoldersDeps(() => fake);
+    expect(holdersDeps()).toBe(fake);
   });
 });

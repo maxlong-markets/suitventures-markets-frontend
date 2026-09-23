@@ -53,12 +53,31 @@ const shape = (r: Row): RefreshRow => ({
 });
 
 /**
+ * What requireRow throws. A type rather than a message, because the two cases mean opposite things to the
+ * builder (run.ts, fix round 1): a missing `market.tokens` row is a terminal state for that one token — the
+ * holders route can open a refresh row for an id the reader has never seen, and no amount of folding will
+ * ever give it an exact count — while a missing `market.holder_refresh` row is the store refusing to write
+ * what it just read, a broken invariant that must end the invocation. Matching on `table` keeps that
+ * distinction out of the message text, which stays exactly as it was.
+ */
+export class MissingRowError extends Error {
+  constructor(
+    readonly fn: string,
+    readonly table: string,
+    readonly tokenId: string,
+  ) {
+    super(`${fn}: no ${table} row for token ${tokenId}`);
+    this.name = "MissingRowError";
+  }
+}
+
+/**
  * Review round 1: every writer below targets one row by primary key, and Db.query reports no affected-row count.
  * So each update returns its key and this turns "matched nothing" into an error rather than a silent no-op —
  * called inside a db.tx, the throw rolls back whatever the same transaction already wrote.
  */
 function requireRow(rows: readonly unknown[], fn: string, table: string, tokenId: string): void {
-  if (rows.length === 0) throw new Error(`${fn}: no ${table} row for token ${tokenId}`);
+  if (rows.length === 0) throw new MissingRowError(fn, table, tokenId);
 }
 
 export async function refreshRow(db: Db, tokenId: string): Promise<RefreshRow | null> {

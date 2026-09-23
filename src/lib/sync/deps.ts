@@ -3,6 +3,7 @@ import { QUOTES } from "@/lib/chain/math/quotes";
 import { createChainClient, type QuoteFeedConfig } from "@/lib/chain/onchain";
 import type { ChainRunDeps } from "@/lib/chain/run";
 import { getDb, type Db } from "@/lib/db/client";
+import type { HoldersRunDeps } from "@/lib/holders/run";
 import { createQuoter, type Quoter } from "@/lib/quote/quoter";
 import type { EnvioSource } from "./source";
 import type { SyncJob } from "./state";
@@ -103,4 +104,16 @@ export function chainSourceDeps(): Omit<ChainDeps, "db"> {
 /** Tests only: substitute PGlite, a fake LogSource and a fake chain client; null restores the default. */
 export function setChainDeps(factory: ChainFactory | null): void {
   chainOverride = factory;
+}
+
+/** What src/app/api/internal/holders/route.ts runs the top-holder builder against: the process Db and a HyperSync source. */
+export type HoldersDeps = { db: Db } & HoldersRunDeps;
+let holdersOverride: (() => HoldersDeps) | null = null;
+export function holdersDeps(): HoldersDeps {
+  if (holdersOverride) return holdersOverride();
+  return { db: getDb(), source: createHyperSyncSource() };
+}
+/** Tests only. */
+export function setHoldersDeps(factory: (() => HoldersDeps) | null): void {
+  holdersOverride = factory;
 }

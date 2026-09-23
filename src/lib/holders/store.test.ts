@@ -7,6 +7,7 @@ import {
   FULL_PASS_SEC,
   GIANT_HOLDERS,
   KEEP_REQUESTED_SEC,
+  MissingRowError,
   REQUEST_STAMP_MIN_SEC,
   STALE_SEC,
   applySlice,
@@ -197,6 +198,32 @@ it("markReady throws and rolls its stamp back when the token has no market.token
   await expect(markReady(db, T1, NOW)).rejects.toThrow(`markReady: no market.tokens row for token ${T1}`);
 
   expect(await refreshRow(db, T1)).toMatchObject({ status: "building", refreshedAt: 0 }); // the ready stamp rolled back
+});
+
+/**
+ * Fix round 1: the builder tells a missing market.tokens row (a terminal per-token state it skips) from a
+ * missing holder_refresh row (a broken invariant that ends the invocation) by the TYPE and its `table`,
+ * never by matching the message text — so the three fields are part of the contract, not just the wording.
+ */
+it("requireRow throws a MissingRowError carrying the function, the table and the token", async () => {
+  const thrown = (p: Promise<unknown>): Promise<unknown> => p.then(() => null, (err: unknown) => err);
+  await refresh(T1, { status: "building" }); // a refresh row for a token market.tokens has never seen
+
+  const missingToken = await thrown(markReady(db, T1, NOW));
+  expect(missingToken).toBeInstanceOf(MissingRowError);
+  const a = missingToken as MissingRowError;
+  expect(a.name).toBe("MissingRowError");
+  expect(a.fn).toBe("markReady");
+  expect(a.table).toBe("market.tokens");
+  expect(a.tokenId).toBe(T1);
+  expect(a.message).toBe(`markReady: no market.tokens row for token ${T1}`); // unchanged by the new type
+
+  const missingRefresh = await thrown(applySlice(db, T2, new Map([[W1, 5n]]), 900, 1, NOW));
+  expect(missingRefresh).toBeInstanceOf(MissingRowError);
+  const b = missingRefresh as MissingRowError;
+  expect(b.fn).toBe("applySlice");
+  expect(b.table).toBe("market.holder_refresh");
+  expect(b.tokenId).toBe(T2);
 });
 
 it("markSkipped throws and keeps the balances when there is no refresh row", async () => {
