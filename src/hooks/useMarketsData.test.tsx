@@ -1,8 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StoreUnavailableError } from "@/lib/data/envio";
 import type { Address, Candle, HoldersView, Interval, TraderRow } from "@/lib/types";
 import { queryHarness, renderHook, waitFor } from "@/test/dom";
-import { keys, useChartCandles, useHolders, useTraders, useVotes, useWatchlist } from "./useMarketsData";
+import {
+  HOLDERS_FAST_POLL_MS,
+  HOLDERS_POLL_MS,
+  HOLDERS_SLOW_POLL_MS,
+  keys,
+  useChartCandles,
+  useHolders,
+  useTraders,
+  useVotes,
+  useWatchlist,
+} from "./useMarketsData";
 
 const ROW: TraderRow = {
   wallet: "0x1111111111111111111111111111111111111111" as Address,
@@ -38,6 +48,7 @@ describe("useMarketsData", () => {
     h.ds.votes.mockReset().mockResolvedValue({});
     h.ds.candles.mockReset();
   });
+  afterEach(() => vi.restoreAllMocks());
 
   it("keys the traders board by its ordering and asks the source for that ordering", async () => {
     const { wrapper } = queryHarness();
@@ -148,10 +159,11 @@ describe("useChartCandles", () => {
 
 describe("useHolders", () => {
   /**
-   * The interval the live query would actually poll on: `refetchInterval` is a function of the query,
-   * so this resolves it exactly as React Query does rather than waiting five real seconds for a tick.
+   * Resolves `refetchInterval` exactly as React Query does — it is a function of the query — rather than
+   * waiting five real seconds for a tick. The returned thunk can be called again after the clock moves,
+   * which is what the fast-then-slow window below needs.
    */
-  async function pollInterval(status: HoldersView["status"]) {
+  async function pollIntervalAt(status: HoldersView["status"]) {
     h.ds.holders.mockReset().mockResolvedValue({ holders: [], count: 0, status, asOf: null });
     const { client, wrapper } = queryHarness();
     const { result } = renderHook(() => useHolders(TOKEN), { wrapper });
@@ -160,11 +172,26 @@ describe("useHolders", () => {
     // Through the observer, not the cache entry: `refetchInterval` is an observer option, and the
     // observer is what actually schedules the poll.
     const option = query.observers[0]!.options.refetchInterval;
-    return typeof option === "function" ? option(query) : option;
+    return () => (typeof option === "function" ? option(query) : option);
   }
+  const pollInterval = async (status: HoldersView["status"]) => (await pollIntervalAt(status))();
 
   it("polls every 5 s while the list is being built (design section 1)", async () => {
     expect(await pollInterval("building")).toBe(5_000);
+  });
+
+  it("backs off to 30 s once a build has run past the fast window, instead of asking every 5 s forever", async () => {
+    // Review 24 Sep 2026: a busy token takes minutes, not "under a minute", and a tab left open on one was
+    // asking twelve times a minute for as long as it stayed open.
+    expect([HOLDERS_POLL_MS, HOLDERS_SLOW_POLL_MS, HOLDERS_FAST_POLL_MS]).toEqual([5_000, 30_000, 120_000]);
+    const clock = { t: 1_700_000_000_000 };
+    vi.spyOn(Date, "now").mockImplementation(() => clock.t);
+    const interval = await pollIntervalAt("building");
+    expect(interval()).toBe(HOLDERS_POLL_MS);
+    clock.t += HOLDERS_FAST_POLL_MS - 1;
+    expect(interval()).toBe(HOLDERS_POLL_MS); // still inside the first two minutes
+    clock.t += 1;
+    expect(interval()).toBe(HOLDERS_SLOW_POLL_MS);
   });
 
   it("stops polling once the list is ready, and never polls a token that will not get one", async () => {

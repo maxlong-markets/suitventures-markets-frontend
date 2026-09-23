@@ -39,8 +39,6 @@ export interface EnvioSource {
   /** `recent`: candles of the pools with t >= since, ordered (t asc, id asc), strictly after `after`. `open`: the candles whose ids are in openIds, fetched only when `after` is null (first page); otherwise []. */
   candlesFor(poolIds: readonly string[], since: number, openIds: readonly string[], after: CandleCursor | null, limit: number): Promise<{ recent: CandleRec[]; open: CandleRec[] }>;
   tokensById(ids: readonly string[]): Promise<TokenRec[]>;
-  /** Non-zero balances of one token, largest first. */
-  topHolders(tokenId: string, limit: number): Promise<BalanceRec[]>;
   /** Non-zero balances of each of the given tokens, largest first per token, one request, flattened in the order of tokenIds. Empty input returns [] without a request. */
   topHoldersBatch(tokenIds: readonly string[], limit: number): Promise<BalanceRec[]>;
   chainMeta(): Promise<{ latestProcessedBlock: number; blockHeight: number }>;

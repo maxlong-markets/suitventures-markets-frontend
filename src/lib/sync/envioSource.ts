@@ -35,9 +35,6 @@ const CANDLES_FIRST = `query SyncCandlesFirst($pools: [String!]!, $since: Int!, 
 }`;
 const CANDLES_NEXT = `query SyncCandlesNext($pools: [String!]!, $since: Int!, $k: Int!, $kid: String!, $limit: Int!) { ${RECENT_CANDLES} }`;
 const TOKENS_BY_ID = `query SyncTokensById($ids: [String!]!) { Token(where: { id: { _in: $ids } }) { ${TOKEN_FIELDS} } }`;
-const TOP_HOLDERS = `query SyncTopHolders($token: String!, $limit: Int!) {
-  TokenBalance(where: { token_id: { _eq: $token }, balance: { _gt: "0" } }, order_by: { balance: desc }, limit: $limit) { ${BALANCE_FIELDS} }
-}`;
 /**
  * One request for up to n tokens: an aliased TokenBalance selection per token (t0, t1, …), each with its own
  * `$t0`, `$t1`, … variable so no id is ever interpolated into the document, all sharing one `$limit`.
@@ -129,9 +126,6 @@ export function createEnvioSource(opts: { gql?: typeof defaultGql; limiter?: Lim
     async tokensById(ids) {
       if (ids.length === 0) return [];
       return (await request<{ Token: TokenRec[] }>(TOKENS_BY_ID, { ids })).Token;
-    },
-    async topHolders(tokenId, limit) {
-      return (await request<{ TokenBalance: BalanceRec[] }>(TOP_HOLDERS, { token: tokenId, limit })).TokenBalance;
     },
     async topHoldersBatch(tokenIds, limit) {
       if (tokenIds.length === 0) return [];

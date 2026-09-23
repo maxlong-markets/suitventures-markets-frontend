@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import {
@@ -42,6 +42,10 @@ afterAll(async () => {
 beforeEach(() =>
   db.exec("delete from market.token_balances; delete from market.holder_refresh; delete from market.swaps; delete from market.tokens"),
 );
+afterEach(() => vi.restoreAllMocks());
+
+/** A deadline no test's own work can reach, for the pruner's bounded contract (I2). */
+const FAR = () => ({ deadlineMs: Date.now() + 600_000 });
 
 /** The minimal token row the chain store writes (src/lib/chain/store.ts upsertTokensFromFold); only id and holders_count matter here. */
 const seedToken = (id: string, holdersCount = 0) =>
@@ -299,11 +303,13 @@ it("dueTokens lists opened, then traded-since, then full-pass tokens, each once"
   const due = await dueTokens(db, coverage, NOW);
   const ids = due.map((r) => r.tokenId);
   expect(ids).toEqual([T8, T1, T9, T3, T4, T5]);
+  // I3: which tier claimed each row travels with it, so the runner can cap what tier 1 may start.
+  expect(due.map((r) => r.tier)).toEqual([1, 1, 1, 2, 3, 3]);
   expect(ids).not.toContain(T2); // stale but no trade since, and inside the full pass
   expect(ids).not.toContain(T6); // refreshed five minutes ago
   expect(ids).not.toContain(T7); // skipped
   expect(due[0]).toEqual({
-    tokenId: T8, refreshedAt: 0, cursorBlock: 0, requestedAt: NOW - 5, status: "building", transfers: 0,
+    tokenId: T8, refreshedAt: 0, cursorBlock: 0, requestedAt: NOW - 5, status: "building", transfers: 0, tier: 1,
   });
 
   // With no coverage set at all, only the opened tokens are due.
@@ -327,10 +333,48 @@ it("pruneHolders drops tokens neither covered nor recently opened, and orphan ba
   await balance(T5, W1, "8"); // orphan: balances with no refresh row
   await balance(T5, W2, "9");
 
-  expect(await pruneHolders(db, [T1], NOW)).toEqual({ tokens: 2, rows: 6 });
+  expect(await pruneHolders(db, [T1], NOW, FAR())).toEqual({ tokens: 2, rows: 6, done: true });
 
   expect(await db.query("select token_id from market.holder_refresh order by token_id")).toEqual([{ token_id: T1 }, { token_id: T2 }]);
   expect(await countBalances(T1)).toBe(2);
   expect(await countBalances(T2)).toBe(1);
   for (const gone of [T3, T4, T5]) expect(await countBalances(gone)).toBe(0);
+});
+
+it("pruneHolders stops at the deadline, keeping what it dropped and leaving the rest for the next run", async () => {
+  // I2: the same bounded contract pruneSwaps/pruneCandles have (src/lib/sync/retention.ts). Two victims and
+  // one orphan, so the stop can land between the victims and short of the closing anti-join.
+  await refresh(T2, { requestedAt: NOW - KEEP_REQUESTED_SEC - 1 });
+  await balance(T2, W1, "1");
+  await refresh(T3, { requestedAt: NOW - KEEP_REQUESTED_SEC - 1 });
+  await balance(T3, W1, "2");
+  await balance(T4, W1, "3"); // orphan: only the closing sweep can reach it
+
+  // A frozen clock pushed past the deadline the moment the first victim's refresh row is gone: the stop is
+  // a fact of the test, not a wall-clock race.
+  const clock = { t: 1_700_000_000_000 };
+  vi.spyOn(Date, "now").mockImplementation(() => clock.t);
+  const deadlineMs = clock.t + 1;
+  let dropped = 0;
+  const gated: Db = {
+    ...db,
+    async query<T extends Record<string, unknown>>(text: string, params?: readonly unknown[]): Promise<T[]> {
+      const rows = await db.query<T>(text, params);
+      if (text.startsWith("delete from market.holder_refresh") && ++dropped === 1) clock.t = deadlineMs;
+      return rows;
+    },
+  };
+
+  expect(await pruneHolders(gated, [], NOW, { deadlineMs })).toEqual({ tokens: 1, rows: 1, done: false });
+  // Exactly one victim went; the other is untouched, and the orphan survives because the sweep never ran.
+  const left = await db.query<{ token_id: string }>("select token_id from market.holder_refresh");
+  expect(left).toHaveLength(1);
+  expect(await countBalances(left[0]!.token_id)).toBe(1);
+  expect(await countBalances(T4)).toBe(1);
+
+  // The pruner carries no cursor: a full window simply re-scans and finds the same work waiting.
+  vi.restoreAllMocks();
+  expect(await pruneHolders(db, [], NOW, FAR())).toEqual({ tokens: 1, rows: 2, done: true });
+  expect(await db.query("select token_id from market.holder_refresh")).toEqual([]);
+  expect(await countBalances(T4)).toBe(0);
 });

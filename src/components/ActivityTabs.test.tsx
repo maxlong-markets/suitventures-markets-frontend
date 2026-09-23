@@ -56,11 +56,12 @@ const h = vi.hoisted(() => ({
   tradesPending: false,
   holders: undefined as HoldersView | undefined,
   holdersPending: false,
+  holdersError: false,
 }));
 
 vi.mock("@/hooks/useMarketsData", () => ({
   useTrades: () => ({ data: h.trades, isPending: h.tradesPending }),
-  useHolders: () => ({ data: h.holders, isPending: h.holdersPending }),
+  useHolders: () => ({ data: h.holders, isPending: h.holdersPending, isError: h.holdersError }),
 }));
 
 function show(tab: ActivityTab) {
@@ -75,6 +76,7 @@ describe("ActivityTabs", () => {
     h.tradesPending = false;
     h.holders = ready({ holders: [], count: 0 });
     h.holdersPending = false;
+    h.holdersError = false;
   });
 
   it("shows a short wallet under the amount cell at the default (phone) width", () => {
@@ -127,6 +129,7 @@ describe("ActivityTabs holders", () => {
     h.tradesPending = false;
     h.holders = ready();
     h.holdersPending = false;
+    h.holdersError = false;
   });
 
   it("renders a ready list's rows and how old the list is", () => {
@@ -155,7 +158,18 @@ describe("ActivityTabs holders", () => {
     h.holders = { holders: [], count: 0, status: "building", asOf: null };
     const { container } = show("holders");
     expect(container.querySelector("[aria-busy]")).toBeTruthy();
-    expect(screen.getByText("Building this token's holder list. Usually under a minute.")).toBeTruthy();
+    expect(screen.getByText("Building this token's holder list. A few minutes for a busy token.")).toBeTruthy();
+  });
+
+  it("says so in one line when the holders query failed, instead of a bare column header", () => {
+    // Review 24 Sep 2026: a failed request rendered the header and nothing under it, which reads as "this
+    // token has no holders" rather than "we could not ask".
+    h.holders = undefined;
+    h.holdersPending = false;
+    h.holdersError = true;
+    const { container } = show("holders");
+    expect(screen.getByText("Holder list unavailable right now.")).toBeTruthy();
+    expect(container.querySelector("[aria-busy]")).toBeNull();
   });
 
   it("explains a token too large to fold, with no skeleton to wait on", () => {

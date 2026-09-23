@@ -58,15 +58,14 @@ describe("FakeSource", () => {
     expect(next.open).toEqual([]);
     expect(ids((await s.candlesFor([P1, P2], 200, [], null, 1)).recent)).toEqual([C2]);
   });
-  it("looks up tokens, ranks holders as BigInt largest first, and reads chain metadata", async () => {
+  it("looks up tokens and reads chain metadata", async () => {
     const s = source();
     expect(ids(await s.tokensById(["0xa", "0xc", "0xz"]))).toEqual(["0xa", "0xc"]);
-    expect(ids(await s.topHolders("0xt", 10))).toEqual(["0xh2", "0xh4", "0xh1"]);
-    expect(ids(await s.topHolders("0xt", 2))).toEqual(["0xh2", "0xh4"]);
     expect(await s.chainMeta()).toEqual({ latestProcessedBlock: 10, blockHeight: 12 });
   });
-  it("batches top holders per token — same ranking as topHolders, flattened in the order of the given ids", async () => {
+  it("batches top holders per token — BigInt-ranked largest first, flattened in the order of the given ids", async () => {
     const s = source();
+    expect(ids(await s.topHoldersBatch(["0xt"], 10))).toEqual(["0xh2", "0xh4", "0xh1"]);
     expect(ids(await s.topHoldersBatch(["0xt", "0xother"], 2))).toEqual(["0xh2", "0xh4", "0xh5"]);
     expect(ids(await s.topHoldersBatch([], 10))).toEqual([]);
   });

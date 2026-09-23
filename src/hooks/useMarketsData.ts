@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useDataSource } from "@/context/DataSource";
 import { StoreUnavailableError } from "@/lib/data/envio";
@@ -132,13 +133,37 @@ export function useTrades(id: string) {
   });
 }
 
+/** How often a list being built is asked about while it is still young. */
+export const HOLDERS_POLL_MS = 5_000;
+/** And after HOLDERS_FAST_POLL_MS of waiting, when the token is plainly one of the slow ones. */
+export const HOLDERS_SLOW_POLL_MS = 30_000;
+/** How long the fast poll lasts, measured from when this tab started watching this token. */
+export const HOLDERS_FAST_POLL_MS = 120_000;
+
+/**
+ * A token's holder list, polled while the builder is still folding it. Fast for the first two minutes and
+ * then every 30 s (review 24 Sep 2026): most lists land inside the fast window, but a busy token really can
+ * take a quarter of an hour of the builder's paced slices, and a tab left open on one was asking twelve
+ * times a minute for as long as it stayed open. Polling stops entirely once the list is ready, and never
+ * starts for a token that will not get one.
+ */
 export function useHolders(id: string) {
   const ds = useDataSource();
+  // Stamped in an effect rather than during render: reading the clock while rendering is impure, and a ref
+  // may only be written outside it. The fast window is per token, so switching tokens restarts it rather
+  // than inheriting the last one's age; 0 means the effect has not run yet, which is as early as it gets.
+  const watchingSince = useRef(0);
+  useEffect(() => {
+    watchingSince.current = Date.now();
+  }, [id]);
   return useQuery({
     queryKey: keys.holders(id),
     queryFn: () => ds.holders(id),
-    // A list being built lands within a minute or two (design section 1): poll until it does, then stop.
-    refetchInterval: (query) => (query.state.data?.status === "building" ? 5_000 : false),
+    refetchInterval: (query) => {
+      if (query.state.data?.status !== "building") return false;
+      const since = watchingSince.current;
+      return since > 0 && Date.now() - since >= HOLDERS_FAST_POLL_MS ? HOLDERS_SLOW_POLL_MS : HOLDERS_POLL_MS;
+    },
   });
 }
 

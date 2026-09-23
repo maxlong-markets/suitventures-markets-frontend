@@ -55,6 +55,12 @@ validateQuotes(QUOTES);
 
 const BY_ADDRESS = new Map(QUOTES.map((q) => [q.address, q]));
 
+/**
+ * Every quote asset's address, lowercased (QUOTES above already lowercases them). This is also the exclusion
+ * list the top-holder builder and the nightly cleanup pass as token ids — a token's id IS its lowercased
+ * address in this store, and a quote asset must never be given a holder list of its own (top-holders design
+ * section 4, step 2) — so it must stay lowercase; quotes.test.ts pins that.
+ */
 export const QUOTE_ADDRESSES: string[] = QUOTES.map((q) => q.address);
 
 export function isQuote(address: string): boolean {

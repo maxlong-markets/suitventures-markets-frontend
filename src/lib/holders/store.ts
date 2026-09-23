@@ -10,6 +10,12 @@ import type { Db } from "@/lib/db/client";
 
 export type HolderStatus = "building" | "ready" | "skipped";
 export type RefreshRow = { tokenId: string; refreshedAt: number; cursorBlock: number; requestedAt: number; status: HolderStatus; transfers: number };
+/**
+ * A due row with the tier that claimed it (design section 4's three due lists): 1 opened-and-stale, 2 covered
+ * and traded since a stale list, 3 the full pass. The runner needs the number because tier 1 is the only tier
+ * a stranger can fill on demand, and it is capped to a share of each window (REQUESTED_SHARE in run.ts, I3).
+ */
+export type DueRow = RefreshRow & { tier: 1 | 2 | 3 };
 
 /** Tokens on the markets table: the top N by trades in the last 24 h (design section 4, coverage set). */
 export const COVERAGE_LIMIT = 500;
@@ -105,23 +111,28 @@ const TRADED_SINCE_SQL = `select r.token_id from market.holder_refresh r
 /**
  * The builder's work list for one invocation, in the order of design section 4: opened-and-stale first, then
  * covered tokens that traded since a list older than STALE_SEC (in coverage order, most traded first), then
- * covered tokens older than FULL_PASS_SEC (oldest first). Each token once; skipped never. Covered tokens with
- * no row must have been inserted by ensureRows before this is called.
+ * covered tokens older than FULL_PASS_SEC (oldest first). Each token once, tagged with the tier that claimed
+ * it; skipped never. Covered tokens with no row must have been inserted by ensureRows before this is called.
+ *
+ * One benign state has no exit here: a token that got a `building` row from ensureRows and then left the top
+ * 500 before it was ever built is in no tier at all — tiers 2 and 3 read the coverage set, tier 1 needs a
+ * request stamp — so it simply waits, costing one row, until somebody opens its page or the nightly's 7-day
+ * cleanup (KEEP_REQUESTED_SEC) drops it.
  */
-export async function dueTokens(db: Db, coverage: readonly string[], now: number): Promise<RefreshRow[]> {
-  const out: RefreshRow[] = [];
+export async function dueTokens(db: Db, coverage: readonly string[], now: number): Promise<DueRow[]> {
+  const out: DueRow[] = [];
   const seen = new Set<string>();
-  const push = (r: RefreshRow) => { if (!seen.has(r.tokenId)) { seen.add(r.tokenId); out.push(r); } };
-  for (const r of await db.query<Row>(REQUESTED_SQL, [now - STALE_SEC])) push(shape(r));
+  const push = (r: RefreshRow, tier: 1 | 2 | 3) => { if (!seen.has(r.tokenId)) { seen.add(r.tokenId); out.push({ ...r, tier }); } };
+  for (const r of await db.query<Row>(REQUESTED_SQL, [now - STALE_SEC])) push(shape(r), 1);
   if (coverage.length === 0) return out;
   const byId = new Map<string, RefreshRow>();
   for (const r of await db.query<Row>(COVERAGE_ROWS_SQL, [coverage])) byId.set(r.token_id, shape(r));
   const staleIds = coverage.filter((id) => { const r = byId.get(id); return r && r.status === "ready" && r.refreshedAt < now - STALE_SEC; });
   const traded = new Set((await db.query<{ token_id: string }>(TRADED_SINCE_SQL, [staleIds, now - FULL_PASS_SEC])).map((r) => r.token_id));
-  for (const id of staleIds) if (traded.has(id)) push(byId.get(id)!);
+  for (const id of staleIds) if (traded.has(id)) push(byId.get(id)!, 2);
   const full = coverage.map((id) => byId.get(id)).filter((r): r is RefreshRow => !!r && r.status !== "skipped" && r.refreshedAt < now - FULL_PASS_SEC);
   full.sort((a, b) => a.refreshedAt - b.refreshedAt);
-  for (const r of full) push(r);
+  for (const r of full) push(r, 3);
   return out;
 }
 
@@ -208,21 +219,41 @@ export async function requestBuild(db: Db, tokenId: string, now: number): Promis
   return rows.length > 0;
 }
 
-/** Nightly cleanup (design section 7): drop everything for tokens neither kept nor requested recently, one token per statement pair. */
-export async function pruneHolders(db: Db, keepIds: readonly string[], now: number): Promise<{ tokens: number; rows: number }> {
+/**
+ * Nightly cleanup (design section 7): drop everything for tokens neither kept nor requested recently, one
+ * token per statement pair, then one anti-join sweep for balances whose refresh row is already gone.
+ *
+ * Bounded by `opts.deadlineMs` exactly as pruneSwaps/pruneCandles are (src/lib/sync/retention.ts, I2): the
+ * clock is checked before each victim and before the closing sweep, and `done: false` says the caller must
+ * come back. Like those two it carries no cursor of its own — `not in keepIds and requested_at < cutoff`
+ * already names what is left to do — so a stopped run simply re-scans next night and finds the same victims,
+ * minus the ones it reached. `tokens` counts the victims actually dropped THIS call, not the ones it found.
+ */
+export async function pruneHolders(
+  db: Db,
+  keepIds: readonly string[],
+  now: number,
+  opts: { deadlineMs: number },
+): Promise<{ tokens: number; rows: number; done: boolean }> {
   const victims = await db.query<{ token_id: string }>(
     "select token_id from market.holder_refresh where not (token_id = any($1::text[])) and requested_at < $2",
     [keepIds, now - KEEP_REQUESTED_SEC],
   );
   let rows = 0;
+  let tokens = 0;
   for (const v of victims) {
+    if (Date.now() >= opts.deadlineMs) return { tokens, rows, done: false };
     const deleted = await db.query<{ n: number }>("with d as (delete from market.token_balances where token_id = $1 returning 1) select count(*)::int as n from d", [v.token_id]);
     rows += deleted[0]?.n ?? 0;
     await db.query("delete from market.holder_refresh where token_id = $1", [v.token_id]);
+    tokens += 1;
   }
+  // The sweep is one statement over the whole balances table, so it is the one part of this that can take
+  // real time on a big store: it gets its own check rather than riding on the last victim's.
+  if (Date.now() >= opts.deadlineMs) return { tokens, rows, done: false };
   const orphans = await db.query<{ n: number }>(
     "with d as (delete from market.token_balances b where not exists (select 1 from market.holder_refresh r where r.token_id = b.token_id) returning 1) select count(*)::int as n from d",
   );
   rows += orphans[0]?.n ?? 0;
-  return { tokens: victims.length, rows };
+  return { tokens, rows, done: true };
 }

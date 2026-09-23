@@ -196,6 +196,13 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
       if (res.status === 401 || res.status === 403) {
         throw new Error("HyperSync rejected the API token");
       }
+      if (res.status === 429) {
+        // Review 24 Sep 2026 (I1): a 429 is the one response that ALWAYS carries the rate-limit headers, and
+        // a caller that is being throttled is exactly the caller that needs the advertised budget. Reading
+        // them only on `res.ok` above means a key already over its limit never advertises one at all.
+        const advertised = rateLimitFromHeaders(res);
+        if (advertised !== undefined) rateLimitPerMinute = advertised;
+      }
       if (res.status === 429 || res.status >= 500) {
         const wait = Math.max(retryAfterMs(res) ?? 0, backoffMs(attemptsMade - 1));
         await retryOrThrow(new Error(`HyperSync request failed with status ${res.status}`), wait);

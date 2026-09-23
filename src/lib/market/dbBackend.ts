@@ -265,7 +265,20 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
       const chain = states.find((s) => s.job === "chain");
       const nightly = states.find((s) => s.job === "nightly");
       const holdersState = states.find((s) => s.job === "holders");
-      const ages = await db.query<{ id: string; usd_updated_at: number; aggregator: string | null }>(QUOTE_AGES_SQL);
+      // Review 24 Sep 2026 (I4): STATE_SQL above answering is what proves the database is reachable; every
+      // query after it is decoration beside the job rows, and one of them failing must not blank the whole
+      // report. Each gets its own catch, a one-line warn and an empty answer — health's reason for existing
+      // is to say whether the jobs are running, and that part still stands.
+      let ages: { id: string; usd_updated_at: number; aggregator: string | null }[] = [];
+      // An empty `quotes` makes the "no quote is stale" half of `ok` below vacuously true, which would turn a
+      // broken query into a clean bill of health. The flag is what keeps the report answering AND honest.
+      let quotesFailed = false;
+      try {
+        ages = await db.query<{ id: string; usd_updated_at: number; aggregator: string | null }>(QUOTE_AGES_SQL);
+      } catch (err) {
+        quotesFailed = true;
+        console.warn(`health: quote ages unavailable: ${message(err)}`);
+      }
       const quotes = ages.map((q) => ({ id: q.id, ageSec: at - q.usd_updated_at, stale: isStale({ updatedAt: q.usd_updated_at, aggregator: q.aggregator ?? "" }, at) }));
       // Task 6: lag is the node's own head minus the chain cursor, in blocks — never a vendor's number
       // (spec's failure-handling table). Optional and absent by default; see DbBackendOpts.chainHead.
@@ -292,13 +305,20 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
       // estimate out of the catalog, never a count(*) over a table meant to reach a million rows. `rows` and
       // `bytes` come back as bigint — a string from the postgres driver, a number from PGlite — so both go
       // through Number(), the same way every other bigint this app reads does.
-      const size = (await db.query<{ rows: number | string; bytes: number | string }>(HOLDERS_TABLE_SQL))[0];
+      // Its own try/catch for the same reason as the quote ages above (I4): a table renamed away or a catalog
+      // permission change must cost the footprint line, never the builder's cycle beside it.
+      let size: { rows: number | string; bytes: number | string } | undefined;
+      try {
+        size = (await db.query<{ rows: number | string; bytes: number | string }>(HOLDERS_TABLE_SQL))[0];
+      } catch (err) {
+        console.warn(`health: market.token_balances size unavailable: ${message(err)}`);
+      }
       const holders = {
         lastError: shortError("holders", holdersState?.last_error ?? null),
         lastCycle: holdersCycleFrom(holdersState?.last_report ?? null, at),
         table: { rows: Number(size?.rows ?? 0), bytes: Number(size?.bytes ?? 0) },
       };
-      const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && quotes.every((q) => !q.stale);
+      const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && !quotesFailed && quotes.every((q) => !q.stale);
       return { ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night, holders, ...(opts.rpc ? { rpc: opts.rpc } : {}) };
     },
   };

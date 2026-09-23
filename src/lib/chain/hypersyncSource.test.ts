@@ -97,6 +97,21 @@ describe("createHyperSyncSource", () => {
     expect(source.rateLimitPerMinute).toBeNull();
   });
 
+  it("reads the budget off a 429 too — the one response that always carries the headers (review 24 Sep, I1)", async () => {
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      // Only the 429 carries headers, so a value read here can have come from nowhere else.
+      return call === 1
+        ? jsonResponse({ error: "rate limit exceeded" }, 429, { "x-ratelimit-limit": "30000, 30000;w=60", "x-ratelimit-cost": "1000" })
+        : jsonResponse({ height: 7 });
+    });
+    const { sleep } = fakeSleep();
+    const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, sleep });
+    await expect(source.head()).resolves.toBe(7);
+    expect(source.rateLimitPerMinute).toBe(30);
+  });
+
   it("scales a non-minute window and keeps the last answered value when a later response says nothing", async () => {
     let call = 0;
     const fetchImpl = vi.fn(async () => {
