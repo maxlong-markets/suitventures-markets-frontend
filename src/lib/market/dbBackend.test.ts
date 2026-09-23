@@ -347,6 +347,35 @@ describe("createDbBackend health", () => {
     });
   });
 
+  it("surfaces the holder builder's last cycle and the balances table's footprint, null until a full report exists (design section 8)", async () => {
+    // Nothing has written a `holders` sync_state row at all yet: the block is still there (the table's size is
+    // worth knowing before the first build), but the cycle reads null rather than a row of zeros.
+    const cold = await backend().health();
+    expect(cold.holders!.lastCycle).toBeNull();
+    expect(cold.holders!.table.rows).toBe(0); // PGlite's reltuples is -1 before the first analyze; clamped
+    expect(cold.holders!.table.bytes).toBeGreaterThan(0);
+
+    // A run that recorded no report, and one from an older build whose report lacks the fields, are both
+    // "nothing to show" — never zeros that would read like a cycle that resolved nothing.
+    await finishRun(db, "holders", { now: NOW - 40, ok: true, rows: 0, queries: 0 });
+    expect((await backend().health()).holders!.lastCycle).toBeNull();
+    await finishRun(db, "holders", { now: NOW - 40, ok: true, rows: 0, queries: 0, report: { at: NOW - 40, coverage: 500 } });
+    expect((await backend().health()).holders!.lastCycle).toBeNull();
+
+    // The real thing: runHoldersBuild's cycleReport(), field for field (src/lib/holders/run.ts).
+    await finishRun(db, "holders", {
+      now: NOW - 40, ok: true, rows: 4800, queries: 66,
+      report: {
+        at: NOW - 40, coverage: 500, coverageRecomputed: 1, due: 12, tokensTouched: 9, tokensReady: 7,
+        tokensSkipped: 1, slices: 21, requests: 66, transfers: 4800, errors: 0, spacingMs: 750,
+      },
+    });
+    expect((await backend().health()).holders!.lastCycle).toEqual({
+      ageSec: 40, coverage: 500, due: 12, tokensTouched: 9, tokensReady: 7, tokensSkipped: 1,
+      slices: 21, requests: 66, transfers: 4800, errors: 0, spacingMs: 750,
+    });
+  });
+
   it("reports lag null when no chainHead callback is supplied at all (Task 6: absent by default)", async () => {
     const noCallback = createDbBackend(db, { now: () => now });
     expect(await noCallback.health()).toMatchObject({ ok: true, lag: null });

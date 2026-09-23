@@ -42,20 +42,29 @@ Live market data lives in a Postgres schema `market` on a Supabase project the
 app owns (`supabase/migrations/`). The one-minute cron reads the PoolManager's
 `Initialize`, `Swap` and `ModifyLiquidity` events through HyperSync, folds them
 with the indexer's own arithmetic, and writes rows and a block cursor in one
-transaction; ERC-20 `Transfer` is deliberately not indexed, so total supply
+transaction. That cron does not index ERC-20 `Transfer` at all, so total supply
 comes from the token contract and the holder count from the stored baseline
-moved by trades. The route handlers under `src/app/api` read that store.
+moved by trades; the separate top-holder builder folds `Transfer` per token for
+the few hundred tokens that need an exact list, and resets their count to exact
+at every refresh. The route handlers under `src/app/api` read that store.
 
-- **Sync** (`src/lib/chain`, `src/lib/sync`): `GET /api/internal/sync` runs
-  every minute on Vercel cron (`vercel.json`) and is the chain reader
-  (`src/lib/chain/run.ts`) described above; `GET /api/internal/sync/nightly`
-  (`src/lib/sync/nightly.ts`) runs at 03:00 UTC, recomputing every listed pool,
-  probing pool routability, and pruning swaps and candles past their retention
-  windows. Both require `Authorization: Bearer <CRON_SECRET>`, take a lease in
-  `market.sync_state` so invocations never overlap, and record their last run,
-  last success and last error there. The chain job's lease matches its 300 s
-  `maxDuration` exactly: re-folding an overlapping block range would double-count
-  candle volume and pool totals, unlike the nightly phases' plain upserts.
+- **Sync** (`src/lib/chain`, `src/lib/sync`, `src/lib/holders`): `GET
+  /api/internal/sync` runs every minute on Vercel cron (`vercel.json`) and is the
+  chain reader (`src/lib/chain/run.ts`) described above; `GET
+  /api/internal/holders` (`src/lib/holders/run.ts`) runs every minute too and is
+  the top-holder builder, folding each covered token's `Transfer` logs into
+  `market.token_balances` at 80 HyperSync requests a minute
+  (`docs/superpowers/specs/2026-09-23-top-holders-design.md`); `GET
+  /api/internal/sync/nightly` (`src/lib/sync/nightly.ts`) runs at 03:00 UTC,
+  recomputing every listed pool, pruning swaps and candles past their retention
+  windows, dropping the holder lists of tokens neither covered nor opened in the
+  last week, then probing pool routability. All three require `Authorization:
+  Bearer <CRON_SECRET>`, take a lease in `market.sync_state` so invocations never
+  overlap, and record their last run, last success and last error there. The
+  chain job's lease matches its 300 s `maxDuration` exactly: re-folding an
+  overlapping block range would double-count candle volume and pool totals,
+  unlike the nightly phases' plain upserts — and the holder builder's lease exists
+  for the same reason, its balance upserts being additive too.
 - **Backend switch** (`src/lib/market`): route handlers call `getBackend()`,
   which is always the store implementation now — Envio was decommissioned 21
   Sep 2026 (Task 6) and `MARKET_DATA_BACKEND` is no longer read anywhere, so
@@ -67,7 +76,9 @@ moved by trades. The route handlers under `src/app/api` read that store.
   headers. `GET /api/tokens/[address]` is new: one `TokenPair` (or 404) for a
   token outside the 500-row list, so deep links work. `GET /api/health` reports
   the backend, database latency, sync age and last error, indexer lag (chain
-  head minus last processed block) and which quote-asset USD prices are stale.
+  head minus last processed block), which quote-asset USD prices are stale, and
+  the holder builder's last cycle next to `market.token_balances`'s row estimate
+  and total size.
 - **Scripts** (`scripts/`, see `scripts/README.md`): `npm run db:migrate`,
   `npm run db:smoke`, `npm run seed` (the resumable one-off load) and
   `npm run db:parity`. They read `DATABASE_URL_DIRECT` (session pooler) from
@@ -80,7 +91,7 @@ Live mode needs these variables; all but the first are server-only:
 | `NEXT_PUBLIC_DATA_SOURCE` | `envio` |
 | `DATABASE_URL` | Supabase pooler, transaction mode, port 6543 |
 | `CRON_SECRET` | 32 random bytes; Vercel sends it as a Bearer token to the cron routes |
-| `HYPERSYNC_API_TOKEN` | the chain reader's HyperSync token, from Envio's HyperSync dashboard (`ENVIO_API_TOKEN` is a fallback) |
+| `HYPERSYNC_API_TOKEN` | the HyperSync token both the chain reader and the top-holder builder use, from Envio's HyperSync dashboard (`ENVIO_API_TOKEN` is a fallback). A paid key (100 requests a minute) since the builder shipped: it paces itself to 80 a minute, leaving the reader the rest. On a key that advertises a smaller budget the builder drops to that budget minus 10 rather than starving the reader, so a free key only makes the lists build slowly |
 | `HYPERSYNC_URL` | optional; defaults to `https://4663.hypersync.xyz` |
 | `CHAIN_RPC_URL` | optional; primary RPC for the reader's chain reads (metadata, Chainlink prices, holder-count balances, health), defaults to the chain's public node; always paced at 40 calls a second |
 | `CHAIN_RPC_FALLBACK_URL` | optional; backup RPC (a paid endpoint, server-only) tried once when the primary refuses, times out or errors |
@@ -133,6 +144,7 @@ src/lib            types, formatting, market filters, chain, wagmi, SVRouter swa
 src/lib/chain      the reader: HyperSync log source, decode, fold, onchain metadata and Chainlink prices, store writes
 src/lib/data       seed data, mock source, Envio source, local watch store
 src/lib/db         Db interface (postgres driver, PGlite in tests), migrations
+src/lib/holders    the top-holder builder: coverage, due list, transfer fold, balance store
 src/lib/sync       writers, cursor/lease state, the job runner, retention, nightly
 src/lib/market     MarketBackend: the store implementation (the only one now)
 src/lib/seed       the resumable one-off loader

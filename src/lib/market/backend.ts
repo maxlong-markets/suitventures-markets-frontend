@@ -20,6 +20,21 @@ export type HealthReport = {
   /** Hostnames only, never URLs (a paid endpoint's key is in its path): where the server's chain reads go. */
   rpc?: { primary: string; backup: string | null };
   nightly?: { lastOkAgeSec: number | null; lastError: string | null; phase: string }; // phase "" is a finished re-pull
+  /**
+   * The top-holder builder (top-holders design section 8): its last cycle from the `holders` job's own
+   * `last_report`, and what `market.token_balances` costs — so pace, progress and the storage ceiling are
+   * visible without the logs. `lastCycle` is null until the builder has written a full report; `table` is
+   * always there, because the footprint is worth knowing before the first build. Absent only when the
+   * database did not answer at all.
+   */
+  holders?: {
+    lastCycle: {
+      ageSec: number; coverage: number; due: number; tokensTouched: number; tokensReady: number;
+      tokensSkipped: number; slices: number; requests: number; transfers: number; errors: number; spacingMs: number;
+    } | null;
+    /** `rows` is pg_class.reltuples (an estimate, clamped at 0 before the first analyze); `bytes` is pg_total_relation_size, indexes and toast included. */
+    table: { rows: number; bytes: number };
+  };
   error?: string;
 };
 
