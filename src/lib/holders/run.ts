@@ -4,15 +4,16 @@ import { acquireLease, finishRun, readState, releaseLease, renewLease, saveCurso
 import { foldTransfers } from "./fold";
 import {
   applySlice, coverageSet, dueTokens, ensureRows, markReady, markSkipped, refreshRow,
-  COVERAGE_LIMIT, MAX_TRANSFERS_PER_TOKEN, type RefreshRow,
+  COVERAGE_LIMIT, MAX_TRANSFERS_PER_TOKEN, MissingRowError, type RefreshRow,
 } from "./store";
 
 /**
  * The top-holder builder (docs/superpowers/specs/2026-09-23-top-holders-design.md, section 4): one invocation
  * per cron minute under the `holders` lease, at most `windowSec` of work, one HyperSync request every
- * `requestSpacingMs` (80 a minute against the key's 100, the reader's 4 alongside). Per due token: slice from
- * the stored cursor until ready or the window ends. A thrown head() or coverage error ends the invocation
- * through finishRun(ok: false); a per-token failure is counted and skipped over.
+ * `requestSpacingMs` (80 a minute against the key's 100, the reader's 4 alongside) — and no request ever
+ * STARTS outside the window, however long pacing made it wait for its turn. Per due token: slice from the
+ * stored cursor until ready or the window ends. A thrown head() or coverage error ends the invocation through
+ * finishRun(ok: false); a per-token failure is counted and skipped over.
  */
 export const HOLDERS_JOB = "holders";
 export const DEFAULT_REQUEST_SPACING_MS = 750;
@@ -72,6 +73,7 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
   const safety = opts.safetyBlocks ?? DEFAULT_SAFETY_BLOCKS;
   const maxTransfers = opts.maxTransfersPerToken ?? MAX_TRANSFERS_PER_TOKEN;
   const requestsStart = deps.source.requests;
+  const used = () => deps.source.requests - requestsStart;
   let lastRequestMs = -Infinity;
   let head = 0;
   const pace = async (): Promise<void> => {
@@ -82,6 +84,10 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
   try {
     await pace();
     head = await deps.source.head();
+    // A zero, negative or missing height puts `head - safety` below every stored cursor, which would make the
+    // ready check below fire for every due token at once and stamp a half-built list as exact with a holder
+    // count to match. Refuse it here: the invocation ends on the ok:false path and the next minute tries again.
+    if (!Number.isInteger(head) || head <= 0) throw new Error(`holders: HyperSync head is not a positive integer: ${head}`);
     const coverage = await resolveCoverage();
     report.coverage = coverage.length;
     await ensureRows(db, coverage);
@@ -93,12 +99,12 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
       await buildToken(row);
       await renewLease(db, HOLDERS_JOB, opts.owner, sec(opts.now()), opts.leaseSec);
     }
-    await finishRun(db, HOLDERS_JOB, { now: sec(opts.now()), ok: true, rows: report.transfers, queries: deps.source.requests - requestsStart, report: cycleReport() });
+    await finishRun(db, HOLDERS_JOB, { now: sec(opts.now()), ok: true, rows: report.transfers, queries: used(), report: cycleReport() });
   } catch (err) {
     report.error = message(err);
-    await finishRun(db, HOLDERS_JOB, { now: sec(opts.now()), ok: false, error: report.error, rows: 0, queries: deps.source.requests - requestsStart });
+    await finishRun(db, HOLDERS_JOB, { now: sec(opts.now()), ok: false, error: report.error, rows: 0, queries: used() });
   } finally {
-    report.requests = deps.source.requests - requestsStart;
+    report.requests = used();
     await releaseLease(db, HOLDERS_JOB, opts.owner);
   }
   return report;
@@ -107,7 +113,7 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     return {
       at: sec(opts.now()), coverage: report.coverage, coverageRecomputed: report.coverageRecomputed ? 1 : 0, due: report.due,
       tokensTouched: report.tokensTouched, tokensReady: report.tokensReady, tokensSkipped: report.tokensSkipped,
-      slices: report.slices, requests: deps.source.requests - requestsStart, transfers: report.transfers, errors: report.errors,
+      slices: report.slices, requests: used(), transfers: report.transfers, errors: report.errors,
     };
   }
 
@@ -116,6 +122,10 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
    * that constant for the measurement this exists for). `cursor` holds the unix second the list was computed
    * and `cursor_text` the ids as a JSON array, so the cache needs no schema of its own; a row that is stale,
    * empty or holding anything but an array of strings recomputes and stores the fresh list.
+   *
+   * The entry is keyed to nothing but the job: a change to `excludedIds` or `coverageLimit` inside the TTL is
+   * ignored until it expires. Fine while the route is the only caller and both are constants; a second caller
+   * with different arguments would have to key the entry or bypass the cache.
    */
   async function resolveCoverage(): Promise<string[]> {
     const nowSec = sec(opts.now());
@@ -137,7 +147,24 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
       // that stops one block short of it (`nextBlock === head - safety`) also passes, one block early — that
       // block is simply folded by the next refresh, which resumes from this same untouched cursor.
       if (row.cursorBlock >= head - safety) {
-        await markReady(db, row.tokenId, sec(opts.now()));
+        try {
+          await markReady(db, row.tokenId, sec(opts.now()));
+        } catch (err) {
+          // Fix round 1: the holders route opens a refresh row for any id it is asked about, including one
+          // market.tokens has never seen, and markReady's exact-count update then matches nothing. That token
+          // can never become ready, and left `building` its refreshed_at never moves — so it would stand first
+          // in the due list and abort every following invocation. It is a terminal state for this one token,
+          // so it is retired the way any other unbuildable token is. A MissingRowError naming the REFRESH
+          // table is the opposite case (the store refusing to write what it just read) and still propagates,
+          // as does anything else — see the comment on the slice call below.
+          if (err instanceof MissingRowError && err.table === "market.tokens") {
+            console.warn(`holders: ${row.tokenId} has a refresh row but no market.tokens row; marking it skipped`);
+            await markSkipped(db, row.tokenId);
+            report.tokensSkipped += 1;
+            return;
+          }
+          throw err;
+        }
         report.tokensReady += 1;
         return;
       }
@@ -147,6 +174,10 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
         return;
       }
       await pace();
+      // The wait above can itself run past the window's end (the whole loop is one request behind the clock),
+      // and a request that starts then finishes outside it — after the lease's own window and into the minute
+      // the next cron invocation owns. Check again now that the waiting is done, not only at the top.
+      if (opts.now() >= endMs) return;
       let slice: { transfers: TransferEvent[]; nextBlock: number };
       try {
         // Only the source call is caught here: a throw out of applySlice/markReady/refreshRow below is the

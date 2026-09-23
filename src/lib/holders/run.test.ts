@@ -56,6 +56,10 @@ class FakeTransferSource {
   /** transfers() calls only, in order. */
   readonly calls: { token: string; fromBlock: number; toBlock: number | undefined }[] = [];
   headThrows: Error | null = null;
+  /** Overridable so a test can serve a head no chain would report (fix round 1, the head guard). */
+  headValue = HEAD;
+  /** Runs just before a slice is returned, for a test that changes the database mid-invocation. */
+  onTransfers: ((token: string, fromBlock: number) => Promise<void>) | null = null;
 
   constructor(
     private readonly clock: () => number,
@@ -67,7 +71,7 @@ class FakeTransferSource {
     this._requests += 1;
     this.requestTimes.push(this.clock());
     if (this.headThrows) throw this.headThrows;
-    return HEAD;
+    return this.headValue;
   }
 
   async transfers(token: string, fromBlock: number, toBlock?: number): Promise<Slice> {
@@ -75,6 +79,7 @@ class FakeTransferSource {
     this.requestTimes.push(this.clock());
     this.calls.push({ token, fromBlock, toBlock });
     if (this.throwOn.has(token)) throw new Error(`HyperSync request failed with status 500 (${token})`);
+    await this.onTransfers?.(token, fromBlock);
     const slice = this.slices[token]?.[fromBlock];
     if (!slice) throw new Error(`FakeTransferSource: no slice configured for ${token} from block ${fromBlock}`);
     if (toBlock === undefined) return { transfers: [...slice.transfers], nextBlock: slice.nextBlock };
@@ -253,16 +258,20 @@ describe("runHoldersBuild: pacing and the window", () => {
       },
     };
 
-    // windowSec 1 against a 750 ms spacing: two slices fit, the third would start past the window's end.
-    const first = baseOpts({ windowSec: 1 });
+    // windowSec 2 against a 750 ms spacing: two slices fit, and the third's wait lands past the window's end.
+    const first = baseOpts({ windowSec: 2 });
     const sourceA = new FakeTransferSource(first.now, slices);
     const reportA = await runHoldersBuild(db, { source: sourceA }, first);
 
     expect(reportA).toMatchObject({ tokensTouched: 1, tokensReady: 0, slices: 2, requests: 3, error: null });
+    // The third wait was paid and then the window check stopped it: a request must never START outside the
+    // window, however long pacing made the caller wait for its turn (fix round 1, item 3c).
+    expect(first.slept).toEqual([750, 750, 750]); // three waits paid...
+    expect(sourceA.calls).toHaveLength(2); // ...two requests issued
     expect(await refreshRow(db, T1)).toMatchObject({ status: "building", cursorBlock: 6000 });
     expect(await balancesOf(T1)).toEqual([{ holder: W1, balance: "70" }, { holder: W2, balance: "30" }]);
 
-    const second = baseOpts({ windowSec: 1 });
+    const second = baseOpts({ windowSec: 2 });
     const sourceB = new FakeTransferSource(second.now, slices);
     const reportB = await runHoldersBuild(db, { source: sourceB }, second);
 
@@ -315,6 +324,76 @@ describe("runHoldersBuild: failures and the safety valve", () => {
     expect(await refreshRow(db, T1)).toMatchObject({ status: "skipped", cursorBlock: 0, transfers: 12 });
     expect(await balancesOf(T1)).toEqual([]);
     expect(await holdersCountOf(T1)).toBe(0); // never made ready, so its count was never claimed to be exact
+  });
+
+  it("skips a token whose refresh row names an id market.tokens has never seen, and carries on down the list", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // requestBuild opens a refresh row for any id the holders route is asked about, token row or not. Left
+    // building, its refreshed_at never moves, so it would sit first in the due list and abort every minute.
+    await refresh(T1, { requestedAt: NOW, cursorBlock: PAST_CEILING }); // already at the ceiling: markReady is next
+    await seedToken(T2);
+    await refresh(T2, { requestedAt: NOW - 10 });
+    const source = new FakeTransferSource(() => NOW_MS, { [T2]: { 0: { transfers: [mint(10, W1, 8n)], nextBlock: PAST_CEILING } } });
+
+    const report = await runHoldersBuild(db, { source }, frozenOpts());
+
+    expect(report).toMatchObject({ due: 2, tokensTouched: 2, tokensReady: 1, tokensSkipped: 1, errors: 0, error: null });
+    expect(await refreshRow(db, T1)).toMatchObject({ status: "skipped", cursorBlock: 0 });
+    expect(await refreshRow(db, T2)).toMatchObject({ status: "ready" }); // the token behind it was still built
+    expect((await readState(db, HOLDERS_JOB)).lastError).toBeNull(); // a terminal per-token state, not an abort
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(T1));
+  });
+
+  it("lets a store refusal inside a slice end the invocation through finishRun(ok: false), uncounted as an error", async () => {
+    await seedToken(T1);
+    await refresh(T1, { requestedAt: NOW });
+    const source = new FakeTransferSource(() => NOW_MS, { [T1]: { 0: { transfers: [mint(10, W1, 5n)], nextBlock: 3000 } } });
+    // The refresh row vanishes between dueTokens and applySlice: the store then refuses to move a cursor it
+    // cannot find, which is a broken invariant rather than one flaky HyperSync response.
+    source.onTransfers = async () => {
+      await db.query("delete from market.holder_refresh where token_id = $1", [T1]);
+    };
+
+    const report = await runHoldersBuild(db, { source }, frozenOpts());
+
+    expect(report.error).toBe(`applySlice: no market.holder_refresh row for token ${T1}`);
+    expect(report).toMatchObject({ errors: 0, slices: 0, tokensReady: 0, tokensSkipped: 0, transfers: 0 });
+    const state = await readState(db, HOLDERS_JOB);
+    expect(state.lastError).toBe(report.error);
+    expect(state.lastOkAt).toBeNull();
+    expect(state.leaseOwner).toBeNull();
+  });
+
+  it("refuses a head that is not a positive integer rather than let every due token look ready", async () => {
+    await seedToken(T1);
+    for (const bad of [0, Number.NaN]) {
+      await db.query("delete from market.holder_refresh");
+      await refresh(T1, { requestedAt: NOW });
+      const source = new FakeTransferSource(() => NOW_MS);
+      source.headValue = bad;
+
+      const report = await runHoldersBuild(db, { source }, frozenOpts());
+
+      expect(report.error).toBe(`holders: HyperSync head is not a positive integer: ${bad}`);
+      expect(report).toMatchObject({ tokensTouched: 0, tokensReady: 0, slices: 0, requests: 1, errors: 0 });
+      expect(source.calls).toEqual([]); // the coverage query and every slice are past the guard
+      expect((await readState(db, HOLDERS_JOB)).lastError).toBe(report.error);
+      expect(await refreshRow(db, T1)).toMatchObject({ status: "building", refreshedAt: 0, cursorBlock: 0 });
+    }
+  });
+
+  it("marks a token whose cursor already stands at the ceiling ready without asking for a slice", async () => {
+    await seedToken(T1, 999);
+    await refresh(T1, { requestedAt: NOW, cursorBlock: CEILING }); // exactly head - safety
+    await db.query("insert into market.token_balances (token_id, holder, balance, updated_at) values ($1, $2, 3, $3)", [T1, W1, NOW]);
+    const source = new FakeTransferSource(() => NOW_MS);
+
+    const report = await runHoldersBuild(db, { source }, frozenOpts());
+
+    expect(report).toMatchObject({ tokensTouched: 1, tokensReady: 1, slices: 0, requests: 1, transfers: 0, error: null });
+    expect(source.calls).toEqual([]);
+    expect(await refreshRow(db, T1)).toMatchObject({ status: "ready", refreshedAt: NOW, cursorBlock: CEILING });
+    expect(await holdersCountOf(T1)).toBe(1);
   });
 });
 
