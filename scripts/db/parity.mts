@@ -2,7 +2,6 @@ import { createDb } from "@/lib/db/client";
 import type { PairsScope } from "@/lib/envio/pairs";
 import { createDbBackend } from "@/lib/market/dbBackend";
 import { createEnvioBackend } from "@/lib/market/envioBackend";
-import { createEnvioSource } from "@/lib/sync/envioSource";
 import type { TokenPair } from "@/lib/types";
 
 const TOLERANCE = 0.001; // 0.1 %
@@ -44,7 +43,9 @@ function report(scope: PairsScope, envio: TokenPair[], store: TokenPair[]): void
 }
 
 const db = createDb(url, { max: 2 });
-const store = createDbBackend(db, createEnvioSource());
+// No second argument any more: `DbBackendOpts.topHolders` — the only thing an EnvioSource was passed
+// here for — went with the holders read-through on 23 Sep 2026, and this script compares `pairs()` only.
+const store = createDbBackend(db);
 const envio = createEnvioBackend();
 try {
   for (const scope of ["all", "launchpad"] as const) {

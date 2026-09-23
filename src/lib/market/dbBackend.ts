@@ -3,18 +3,15 @@ import { ttlCache } from "@/lib/envio/cache";
 import { PAIRS_LIMIT, PAIRS_TTL, type PairsScope } from "@/lib/envio/pairs";
 import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, WindowRow } from "@/lib/envio/queries";
 import { isStale, shapeCandles, shapeHolders, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
-import type { BalanceRec } from "@/lib/sync/source";
-import { replaceHolders } from "@/lib/sync/writers";
+import { refreshRow, requestBuild, STALE_SEC } from "@/lib/holders/store";
 import { nowSec } from "@/lib/time";
+import type { HoldersStatus } from "@/lib/types";
 import type { HealthReport, MarketBackend } from "./backend";
 import { PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
 import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
-/** A token's stored top holders are re-pulled through `opts.topHolders` (Task 6: optional, absent by default — see createDbBackend) when older than this (spec 5.4). */
-export const HOLDER_REFRESH_SEC = 300;
 const SYNC_OK_WITHIN_SEC = 300;
 const HOLDERS_SHOWN = 10;
-const HOLDERS_PULLED = 100;
 const TRADES_LIMIT = 50;
 const CANDLES_LIMIT = 300;
 /** The same window as `loadWindowRows` in pairs.ts: h1 candles from a day before the 24h bucket. */
@@ -96,7 +93,6 @@ const POOL_KEY_FALLBACK_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_sp
   from market.pools p join market.tokens t on t.id = p.token_id join market.quotes q on q.id = p.quote_id
   where p.token_id = $1 and p.quote_id = $2 and p.price_quote > 1e-24 and p.price_quote < 1e18
   order by p.swap_count desc, p.id limit 1`;
-const REFRESH_SQL = `select refreshed_at from market.holder_refresh where token_id = $1`;
 
 /** Either query's row, shaped for `poolKeyRow` — factored out so poolKey() can try it twice. */
 function poolKeyParts(row: PoolKeyCols): PoolKeyParts {
@@ -119,9 +115,6 @@ const STATE_SQL = `select job, cursor, phase, last_ok_at, last_error, last_repor
 const QUOTE_AGES_SQL = `select id, usd_updated_at, aggregator from market.quotes where usd_updated_at is not null order by id`;
 
 export type DbBackendOpts = {
-  /** Re-pulls one token's top holders on a stale read (spec 5.4). Absent by default (Task 6: Envio is gone) —
-   * the holders endpoint then always serves the stored rows and never fails on their account. */
-  topHolders?: (tokenId: string, limit: number) => Promise<BalanceRec[]>;
   /** The node's own current block height, for health's `lag` (node head minus the chain cursor, in blocks).
    * Absent by default, which reports `lag: null` rather than guessing at a vendor's number. */
   chainHead?: () => Promise<number>;
@@ -191,22 +184,24 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
     },
     async holders(id) {
       const token = (await db.query<TokenCols>(TOKEN_SQL, [id]))[0];
-      if (!token) return { holders: [], count: 0 };
+      if (!token) return { holders: [], count: 0, status: "building", asOf: null };
       const at = now();
-      const refreshedAt = (await db.query<{ refreshed_at: number }>(REFRESH_SQL, [id]))[0]?.refreshed_at ?? null;
-      // Task 6: the read-through refresh is optional and absent by default, so this endpoint serves the
-      // stored rows and never fails on Envio's account — there is no Envio to fail on anymore.
-      if (opts.topHolders && (refreshedAt === null || at - refreshedAt > HOLDER_REFRESH_SEC)) {
-        let fresh: BalanceRec[] | undefined;
-        try {
-          fresh = await opts.topHolders(id, HOLDERS_PULLED);
-        } catch (err) {
-          console.warn(`holders refresh failed for ${id}: ${message(err)}`); // the stored rows still serve
-        }
-        if (fresh) await replaceHolders(db, id, fresh, at);
+      let row = await refreshRow(db, id);
+      // The tab's open is what queues a build (design section 5): no row, or a list stale by STALE_SEC, gets a
+      // request stamp (throttled inside requestBuild); a skipped token is never re-queued.
+      if (!row || (row.status !== "skipped" && row.refreshedAt < at - STALE_SEC)) {
+        await requestBuild(db, id, at);
+        row = row ?? (await refreshRow(db, id));
       }
-      const rows = await db.query<BalanceRow>(HOLDERS_SQL, [id]);
-      return { holders: shapeHolders(rows, token.decimals, BigInt(token.total_supply)), count: token.holders_count };
+      const status: HoldersStatus = row?.status === "ready" ? "ready" : row?.status === "skipped" ? "skipped" : "building";
+      // Rows are served only behind `ready`: a half-folded list is a wrong list, not an early one.
+      const rows = status === "ready" ? await db.query<BalanceRow>(HOLDERS_SQL, [id]) : [];
+      return {
+        holders: shapeHolders(rows, token.decimals, BigInt(token.total_supply)),
+        count: token.holders_count,
+        status,
+        asOf: row && row.refreshedAt > 0 ? row.refreshedAt : null,
+      };
     },
     async poolKey(tokenId, quoteId) {
       // The primary pool first, when it prices sanely and carries quoteId (POOL_KEY_SQL); the

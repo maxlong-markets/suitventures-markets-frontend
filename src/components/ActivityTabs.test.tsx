@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { addressUrl, ZERO_ADDRESS } from "@/lib/chain";
 import { fmtAmt, short } from "@/lib/format";
-import type { Address, Holder, TokenPair, Trade } from "@/lib/types";
+import type { Address, Holder, HoldersView, TokenPair, Trade } from "@/lib/types";
 import { render, screen, within } from "@/test/dom";
 import ActivityTabs, { type ActivityTab } from "./ActivityTabs";
 
@@ -45,10 +45,16 @@ const TRADE: Trade = {
   tx: TX,
 };
 
+/** Unix seconds; `NOW_MS` below is the same instant in the milliseconds the tab is given. */
+const AS_OF = 2_000_000_000;
+const NOW_MS = 2_000_000_000_000;
+const HOLDER: Holder = { wallet: WALLET, balance: 1_500, share: 12.5 };
+const ready = (over: Partial<HoldersView> = {}): HoldersView => ({ holders: [HOLDER], count: 1, status: "ready", asOf: AS_OF, ...over });
+
 const h = vi.hoisted(() => ({
   trades: [] as Trade[],
   tradesPending: false,
-  holders: [] as Holder[],
+  holders: undefined as HoldersView | undefined,
   holdersPending: false,
 }));
 
@@ -59,7 +65,7 @@ vi.mock("@/hooks/useMarketsData", () => ({
 
 function show(tab: ActivityTab) {
   return render(
-    <ActivityTabs pair={pair} now={2_000_000_000_000} tab={tab} onTabChange={vi.fn()} />,
+    <ActivityTabs pair={pair} now={NOW_MS} tab={tab} onTabChange={vi.fn()} />,
   );
 }
 
@@ -67,7 +73,7 @@ describe("ActivityTabs", () => {
   beforeEach(() => {
     h.trades = [TRADE];
     h.tradesPending = false;
-    h.holders = [];
+    h.holders = ready({ holders: [], count: 0 });
     h.holdersPending = false;
   });
 
@@ -105,11 +111,65 @@ describe("ActivityTabs", () => {
     render(
       <ActivityTabs
         pair={{ ...pair, hookAddress: ZERO_ADDRESS }}
-        now={2_000_000_000_000}
+        now={NOW_MS}
         tab="info"
         onTabChange={vi.fn()}
       />,
     );
     expect(screen.getByText(pair.hook).closest("a")).toBeNull();
+  });
+});
+
+/** The four states of design section 1, each with the copy that table names. */
+describe("ActivityTabs holders", () => {
+  beforeEach(() => {
+    h.trades = [TRADE];
+    h.tradesPending = false;
+    h.holders = ready();
+    h.holdersPending = false;
+  });
+
+  it("renders a ready list's rows and how old the list is", () => {
+    h.holders = ready({ asOf: AS_OF - 7_200 }); // two hours before the tab's own `now`
+    show("holders");
+    expect(screen.getByText(short(WALLET))).toBeTruthy();
+    expect(screen.getByText(fmtAmt(HOLDER.balance, 0))).toBeTruthy();
+    expect(screen.getByText("12.50%")).toBeTruthy();
+    expect(screen.getByText("As of 2h ago")).toBeTruthy();
+  });
+
+  it("reads a list brought to the head seconds ago as 'just now', not as 0m", () => {
+    h.holders = ready({ asOf: AS_OF - 30 });
+    show("holders");
+    expect(screen.getByText("As of just now")).toBeTruthy();
+  });
+
+  it("says a ready list is empty rather than showing an age with no rows", () => {
+    h.holders = ready({ holders: [], count: 0 });
+    show("holders");
+    expect(screen.getByText("No holders yet.")).toBeTruthy();
+    expect(screen.queryByText(/^As of /)).toBeNull();
+  });
+
+  it("shows the skeleton and what is happening while the list is being built", () => {
+    h.holders = { holders: [], count: 0, status: "building", asOf: null };
+    const { container } = show("holders");
+    expect(container.querySelector("[aria-busy]")).toBeTruthy();
+    expect(screen.getByText("Building this token's holder list. Usually under a minute.")).toBeTruthy();
+  });
+
+  it("explains a token too large to fold, with no skeleton to wait on", () => {
+    h.holders = { holders: [], count: 0, status: "skipped", asOf: null };
+    const { container } = show("holders");
+    expect(screen.getByText("Holder list unavailable for tokens with over a million holders.")).toBeTruthy();
+    expect(container.querySelector("[aria-busy]")).toBeNull();
+  });
+
+  it("shows the skeleton alone while the first request is still in flight", () => {
+    h.holders = undefined;
+    h.holdersPending = true;
+    const { container } = show("holders");
+    expect(container.querySelector("[aria-busy]")).toBeTruthy();
+    expect(screen.queryByText(/Building this token/)).toBeNull();
   });
 });

@@ -3,6 +3,7 @@ import type {
   Candle,
   Denom,
   Holder,
+  HoldersView,
   Interval,
   MarketsDataSource,
   Quote,
@@ -18,6 +19,7 @@ import type {
 } from "@/lib/types";
 import { hash } from "@/lib/format";
 import { localQuote } from "@/lib/quote";
+import { nowSec } from "@/lib/time";
 import { hexAddr, hexBytes32, normal, rng } from "./random";
 import { buildPairs, buildQuotes } from "./seed";
 
@@ -250,7 +252,8 @@ export class MockDataSource implements MarketsDataSource {
     return out.map((t) => ({ ...t }));
   }
 
-  async holders(id: string): Promise<Holder[]> {
+  /** The demo build has no builder behind it, so every generated list is simply always ready, as of now. */
+  async holders(id: string): Promise<HoldersView> {
     const pair = this.pairOrThrow(id);
     let out = this.holderCache.get(pair.id);
     if (!out) {
@@ -258,7 +261,8 @@ export class MockDataSource implements MarketsDataSource {
       this.holderCache.set(pair.id, out);
     }
     await this.delay();
-    return out.map((h) => ({ ...h }));
+    const holders = out.map((h) => ({ ...h }));
+    return { holders, count: holders.length, status: "ready", asOf: nowSec() };
   }
 
   /**

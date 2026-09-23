@@ -2,7 +2,7 @@ import type { PublicClient } from "viem";
 import { chainRpcHosts, createChainClient } from "@/lib/chain/onchain";
 import type { PairsScope } from "@/lib/envio/pairs";
 import type { IndexerInterval } from "@/lib/sync/ids";
-import type { Candle, Holder, QuoteAsset, TokenPair, Trade } from "@/lib/types";
+import type { Candle, HoldersView, QuoteAsset, TokenPair, Trade } from "@/lib/types";
 import { getDb } from "@/lib/db/client";
 import { createDbBackend } from "./dbBackend";
 import type { PoolKeyRow } from "./poolKey";
@@ -31,7 +31,8 @@ export interface MarketBackend {
   quotes(): Promise<QuoteAsset[]>;
   candles(id: string, interval: IndexerInterval): Promise<Candle[]>;
   trades(id: string): Promise<Trade[]>;
-  holders(id: string): Promise<{ holders: Holder[]; count: number }>;
+  /** The stored top-holder list with its build state; opening the tab is what queues a build (design section 5). */
+  holders(id: string): Promise<HoldersView>;
   /**
    * A v4 PoolKey to trade against, the direction flag and both assets' decimals. Two different
    * meanings of "the token's pool" meet here, and this method answers the trading one:
@@ -74,9 +75,9 @@ export function chainHeadFrom(client: Pick<PublicClient, "getBlockNumber">): () 
  * MAJOR-1) from the chain RPC client, so health's `lag` is real rather than always null: at most one
  * `eth_blockNumber` call every 5 s (health/route.ts's `ttlCache` TTL), and `dbBackend.ts`'s `health()` already
  * catches a throw from this callback and degrades to `lag: null`, so a flaky public RPC never fails the whole
- * health check — it only loses the one signal. No `topHolders` callback is wired in yet: the holders endpoint
- * still serves the stored rows only (see the task-6 report's "Concerns" for why). Memoised per process, the
- * chain client included — `getBackend()` builds at most one of each.
+ * health check — it only loses the one signal. The holders endpoint has no refresh callback at all any more:
+ * since 23 Sep 2026 the holder builder is the only writer of `market.token_balances`, and `holders()` reads
+ * what it wrote. Memoised per process, the chain client included — `getBackend()` builds at most one of each.
  */
 export function getBackend(): MarketBackend {
   if (instance) return instance;

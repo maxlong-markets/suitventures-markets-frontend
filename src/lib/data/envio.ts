@@ -1,5 +1,5 @@
 import { createSiweMessage } from "viem/siwe";
-import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, TraderRow, TradersBy, VoteDir, VoteResult } from "@/lib/types";
+import type { Address, Candle, Denom, HoldersView, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, TraderRow, TradersBy, VoteDir, VoteResult } from "@/lib/types";
 import type { PriceResult } from "@/lib/quote/price";
 import { robinhoodChain } from "@/lib/chain";
 import { localQuote, poolFeePctFor } from "@/lib/quote";
@@ -74,8 +74,9 @@ export class EnvioDataSource implements MarketsDataSource {
   trades(id: string): Promise<Trade[]> {
     return getJson(`/api/tokens/${id}/trades`);
   }
-  async holders(id: string): Promise<Holder[]> {
-    return (await getJson<{ holders: Holder[] }>(`/api/tokens/${id}/holders`)).holders;
+  /** The whole view, status and as-of included: the tab renders four states, not just rows (design section 5). */
+  holders(id: string): Promise<HoldersView> {
+    return getJson<HoldersView>(`/api/tokens/${id}/holders`);
   }
 
   async quoteSwap(id: string, side: Side, amount: string, denom: Denom, isSuitHolder: boolean, slippagePct: number): Promise<Quote> {

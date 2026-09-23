@@ -1,6 +1,6 @@
 import type { Db } from "@/lib/db/client";
 import { parseCandleId, parseSwapId } from "./ids";
-import type { BalanceRec, CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "./source";
+import type { CandleRec, PoolRec, QuotePriceRec, QuoteRec, SwapRec, TokenRec } from "./source";
 
 /** Rows per statement. Each column is one array parameter, so a chunk bounds the statement's size, not its parameter count. */
 const CHUNK = 1000;
@@ -157,25 +157,9 @@ export async function upsertCandles(db: Db, candles: readonly CandleRec[]): Prom
   return rows.length;
 }
 
-export async function replaceHolders(db: Db, tokenId: string, balances: readonly BalanceRec[], refreshedAt: number): Promise<number> {
-  const rows = dedupe(balances.filter((b) => BigInt(b.balance) > 0n), (b) => b.holder);
-  return db.tx(async (t) => {
-    await t.query("delete from market.token_balances where token_id = $1", [tokenId]);
-    for (const c of chunks(rows)) {
-      await t.query(
-        `insert into market.token_balances (token_id, holder, balance, updated_at)
-         select $1::text, holder, balance, updated_at from unnest($2::text[], $3::numeric[], $4::int[]) as u(holder, balance, updated_at)`,
-        [tokenId, c.map((b) => b.holder), c.map((b) => b.balance), c.map((b) => b.updatedAt)],
-      );
-    }
-    await t.query(
-      `insert into market.holder_refresh (token_id, refreshed_at) values ($1, $2)
-       on conflict (token_id) do update set refreshed_at = excluded.refreshed_at`,
-      [tokenId, refreshedAt],
-    );
-    return rows.length;
-  });
-}
+// `replaceHolders` lived here until 23 Sep 2026. It wrote a token's whole top-N list from one indexer pull;
+// the holder builder (`src/lib/holders/run.ts`) now folds exact balances incrementally and is the only writer
+// of `market.token_balances` and `market.holder_refresh` (top-holders design, sections 3 and 5).
 
 /** Spec section 6: the primary pool when sane and traded, else the sane traded pool with the most swaps, else null. */
 const LISTED_POOL = `coalesce(

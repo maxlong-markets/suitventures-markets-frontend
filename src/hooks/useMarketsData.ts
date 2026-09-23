@@ -137,6 +137,8 @@ export function useHolders(id: string) {
   return useQuery({
     queryKey: keys.holders(id),
     queryFn: () => ds.holders(id),
+    // A list being built lands within a minute or two (design section 1): poll until it does, then stop.
+    refetchInterval: (query) => (query.state.data?.status === "building" ? 5_000 : false),
   });
 }
 

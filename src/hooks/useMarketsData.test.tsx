@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StoreUnavailableError } from "@/lib/data/envio";
-import type { Address, Candle, Interval, TraderRow } from "@/lib/types";
+import type { Address, Candle, HoldersView, Interval, TraderRow } from "@/lib/types";
 import { queryHarness, renderHook, waitFor } from "@/test/dom";
-import { keys, useChartCandles, useTraders, useVotes, useWatchlist } from "./useMarketsData";
+import { keys, useChartCandles, useHolders, useTraders, useVotes, useWatchlist } from "./useMarketsData";
 
 const ROW: TraderRow = {
   wallet: "0x1111111111111111111111111111111111111111" as Address,
@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
     watchlist: vi.fn<() => Promise<string[]>>(),
     votes: vi.fn<() => Promise<Record<string, never>>>(),
     candles: vi.fn<(id: string, interval: Interval) => Promise<Candle[]>>(),
+    holders: vi.fn<(id: string) => Promise<HoldersView>>(),
   },
 }));
 
@@ -142,5 +143,32 @@ describe("useChartCandles", () => {
     await waitFor(() => expect(result.current.settled).toBe(true));
     expect(result.current).toEqual({ interval: "1h", candles: [CANDLE, CANDLE], settled: true, empty: false });
     expect(h.ds.candles).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useHolders", () => {
+  /**
+   * The interval the live query would actually poll on: `refetchInterval` is a function of the query,
+   * so this resolves it exactly as React Query does rather than waiting five real seconds for a tick.
+   */
+  async function pollInterval(status: HoldersView["status"]) {
+    h.ds.holders.mockReset().mockResolvedValue({ holders: [], count: 0, status, asOf: null });
+    const { client, wrapper } = queryHarness();
+    const { result } = renderHook(() => useHolders(TOKEN), { wrapper });
+    await waitFor(() => expect(result.current.data?.status).toBe(status));
+    const query = client.getQueryCache().find({ queryKey: keys.holders(TOKEN) })!;
+    // Through the observer, not the cache entry: `refetchInterval` is an observer option, and the
+    // observer is what actually schedules the poll.
+    const option = query.observers[0]!.options.refetchInterval;
+    return typeof option === "function" ? option(query) : option;
+  }
+
+  it("polls every 5 s while the list is being built (design section 1)", async () => {
+    expect(await pollInterval("building")).toBe(5_000);
+  });
+
+  it("stops polling once the list is ready, and never polls a token that will not get one", async () => {
+    expect(await pollInterval("ready")).toBe(false);
+    expect(await pollInterval("skipped")).toBe(false);
   });
 });

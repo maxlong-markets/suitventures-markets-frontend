@@ -103,8 +103,24 @@ function TradesTable({ pair }: { pair: TokenPair }) {
 
 const HOLDER_COLS =
   "grid grid-cols-[32px_minmax(0,1fr)_120px_90px] items-center gap-[10px]";
+const HOLDER_NOTE = "py-[11px] text-[11px] text-ink-40";
 
-function HoldersTable({ pair }: { pair: TokenPair }) {
+/**
+ * How old the list is, in the tab's own `now` (milliseconds) against `asOf` (Unix seconds). Under a
+ * minute is words rather than a number: fmtAge would round a 20-second-old list to "0m", which reads
+ * as an error rather than as fresh.
+ */
+function asOfText(asOf: number, now: number): string {
+  const hours = ageHours(asOf * 1000, now);
+  return hours < 1 / 60 ? "just now" : `${fmtAge(hours)} ago`;
+}
+
+/**
+ * The four states of the top-holders design, section 1. `building` still shows the skeleton because the
+ * list really is on its way — the hook polls every 5 s — while `skipped` shows no skeleton at all: nothing
+ * is coming for that token, and a permanent skeleton would promise otherwise.
+ */
+function HoldersTable({ pair, now }: { pair: TokenPair; now: number }) {
   const { data, isPending } = useHolders(pair.id);
   return (
     <>
@@ -116,23 +132,36 @@ function HoldersTable({ pair }: { pair: TokenPair }) {
         <div className="text-right">Balance</div>
         <div className="text-right">Share</div>
       </div>
+      {/* No data once the query has settled is a failed request: the header alone, exactly as before. */}
       {isPending ? (
         <RowsSkeleton rows={8} />
+      ) : !data ? null : data.status === "skipped" ? (
+        <div className={HOLDER_NOTE}>Holder list unavailable for tokens with over a million holders.</div>
+      ) : data.status === "building" ? (
+        <>
+          <RowsSkeleton rows={8} />
+          <div className={HOLDER_NOTE}>Building this token&apos;s holder list. Usually under a minute.</div>
+        </>
+      ) : data.holders.length === 0 ? (
+        <div className={HOLDER_NOTE}>No holders yet.</div>
       ) : (
-        data?.map((h, i) => (
-          <div
-            key={h.wallet}
-            className={`${HOLDER_COLS} h-8 border-b border-hairline-soft hover:bg-hover-soft`}
-          >
-            <div className="text-ink-40">{i + 1}</div>
-            <div className="flex items-center gap-2 overflow-hidden whitespace-nowrap">
-              <span>{short(h.wallet)}</span>
-              {h.tag ? <Badge>{h.tag}</Badge> : null}
+        <>
+          {data.holders.map((h, i) => (
+            <div
+              key={h.wallet}
+              className={`${HOLDER_COLS} h-8 border-b border-hairline-soft hover:bg-hover-soft`}
+            >
+              <div className="text-ink-40">{i + 1}</div>
+              <div className="flex items-center gap-2 overflow-hidden whitespace-nowrap">
+                <span>{short(h.wallet)}</span>
+                {h.tag ? <Badge>{h.tag}</Badge> : null}
+              </div>
+              <div className="text-right">{fmtAmt(h.balance, 0)}</div>
+              <div className="text-right text-ink-70">{h.share.toFixed(2)}%</div>
             </div>
-            <div className="text-right">{fmtAmt(h.balance, 0)}</div>
-            <div className="text-right text-ink-70">{h.share.toFixed(2)}%</div>
-          </div>
-        ))
+          ))}
+          {data.asOf === null ? null : <div className={HOLDER_NOTE}>As of {asOfText(data.asOf, now)}</div>}
+        </>
       )}
     </>
   );
@@ -222,7 +251,7 @@ export default function ActivityTabs({ pair, now, tab, onTabChange }: Props) {
       </div>
       <div className="font-mono text-[12px] tabular-nums" role="tabpanel">
         {tab === "trades" ? <TradesTable pair={pair} /> : null}
-        {tab === "holders" ? <HoldersTable pair={pair} /> : null}
+        {tab === "holders" ? <HoldersTable pair={pair} now={now} /> : null}
         {tab === "info" ? <InfoList pair={pair} now={now} /> : null}
       </div>
     </>
