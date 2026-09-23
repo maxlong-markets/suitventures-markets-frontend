@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { encodeAbiParameters, encodeEventTopics } from "viem";
+import { encodeAbiParameters, encodeEventTopics, toEventSelector } from "viem";
 import { POOL_MANAGER, POOL_MANAGER_EVENTS_ABI, TOPIC0 } from "./abi";
 import { createHyperSyncSource } from "./hypersyncSource";
 
@@ -40,6 +40,33 @@ function swapLog(opts: { blockNumber?: number; logIndex?: number; txHash?: strin
     topic2: topics[2],
     // topic3 intentionally absent: Swap has only two indexed params (id, sender).
     data,
+  };
+}
+
+// Derived here rather than copied from the source, so the test would catch a wrong constant there.
+const TRANSFER_TOPIC0 = toEventSelector("Transfer(address,address,uint256)");
+// Letters, not digits: the tests below upper-case these to prove transfers() lowercases what it sends and what
+// it decodes, and a digit-only address would upper-case to itself and make those assertions vacuous.
+const ERC20 = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+const HOLDER_A = "0xaaaabbbbccccddddeeeeffff0000111122223333";
+const HOLDER_B = "0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef";
+
+/** An address as a 32-byte topic, the way an indexed `address` parameter is emitted: 24 zero nibbles then the 40. */
+const addressTopic = (address: string) => `0x${"0".repeat(24)}${address.slice(2)}`;
+
+/**
+ * One ERC-20 Transfer log, HyperSync-shaped (raw JSON, not yet decoded). It carries only the fields
+ * transfers() asks for — no topic0, no transaction_hash — because HyperSync returns only the selected ones.
+ * topic3 IS selected but still absent here: an ERC-20 Transfer has two indexed parameters, so it emits no third
+ * topic, and an absent topic arrives as a missing key rather than a zero one.
+ */
+function transferLog(opts: { blockNumber?: number; logIndex?: number; from?: string; to?: string; value?: bigint; data?: string } = {}) {
+  return {
+    block_number: opts.blockNumber ?? 100,
+    log_index: opts.logIndex ?? 0,
+    topic1: addressTopic(opts.from ?? HOLDER_A),
+    topic2: addressTopic(opts.to ?? HOLDER_B),
+    data: opts.data ?? encodeAbiParameters([{ type: "uint256" }], [opts.value ?? 1n]),
   };
 }
 
@@ -458,6 +485,148 @@ describe("createHyperSyncSource", () => {
       const source = createHyperSyncSource({ token: TOKEN, fetchImpl });
       await source.head();
       expect(fetchImpl.mock.calls[0]![0]).toBe("https://env.test/height");
+    });
+  });
+
+  describe("transfers: request shape", () => {
+    it("POSTs {url}/query for one token's Transfer logs, lowercased, with only the fields the fold needs", async () => {
+      const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse(page([], 250)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await source.transfers(`0x${ERC20.slice(2).toUpperCase()}`, 100);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(source.requests).toBe(1);
+      const [calledUrl, init] = fetchImpl.mock.calls[0]!;
+      expect(calledUrl).toBe(`${URL}/query`);
+      const req = init as RequestInit;
+      expect(req.method).toBe("POST");
+      expect((req.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+      // No to_block key at all when no ceiling is given: the slice takes whatever one response covers.
+      expect(JSON.parse(String(req.body))).toEqual({
+        from_block: 100,
+        logs: [{ address: [ERC20], topics: [[TRANSFER_TOPIC0]] }],
+        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "topic3", "data"] },
+      });
+    });
+
+    it("sends a given toBlock as the exclusive to_block, so the builder's head-minus-safety line is never passed", async () => {
+      const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse(page([], 200)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await source.transfers(ERC20, 100, 199);
+      const body = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body)) as Record<string, unknown>;
+      expect(body.to_block).toBe(200); // exclusive: to + 1, exactly as fetch() sends it
+      expect(body.from_block).toBe(100);
+    });
+
+    it("clamps nextBlock to toBlock+1 when the response overshoots the ceiling", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse(page([], 5_000_000)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100, 199)).resolves.toMatchObject({ nextBlock: 200 });
+    });
+  });
+
+  describe("transfers: decoding", () => {
+    it("decodes from, to and value, lowercasing the addresses, and returns the response's next_block", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page([{ logs: [transferLog({ blockNumber: 120, logIndex: 4, from: `0x${HOLDER_A.slice(2).toUpperCase()}`, value: 10n ** 30n })] }], 250),
+        ),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      const { transfers, nextBlock } = await source.transfers(ERC20, 100);
+      expect(nextBlock).toBe(250);
+      expect(transfers).toEqual([{ block: 120, logIndex: 4, from: HOLDER_A, to: HOLDER_B, value: 1_000_000_000_000_000_000_000_000_000_000n }]);
+    });
+
+    it("reads a value of 0 from empty or '0x' data instead of throwing on it", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(page([{ logs: [transferLog({ logIndex: 0, data: "0x" }), transferLog({ logIndex: 1, data: "" })] }], 250)),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      const { transfers } = await source.transfers(ERC20, 100);
+      expect(transfers.map((t) => t.value)).toEqual([0n, 0n]);
+    });
+
+    it("skips an ERC-721 Transfer (a fourth topic) and a log with no topic2", async () => {
+      // Same topic0 as ERC-20's, but the third indexed parameter is a token id, not a balance movement.
+      const erc721 = { ...transferLog({ logIndex: 1 }), topic3: `0x${"0".repeat(63)}7`, data: "0x" };
+      const { topic2: _noRecipient, ...missingTopic2 } = transferLog({ logIndex: 2 });
+      const fetchImpl = vi.fn(async () => jsonResponse(page([{ logs: [transferLog({ logIndex: 0 }), erc721, missingTopic2] }], 250)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      const { transfers } = await source.transfers(ERC20, 100);
+      expect(transfers.map((t) => t.logIndex)).toEqual([0]);
+    });
+
+    it("returns an empty slice, with the response's next_block, when the token moved in no block of the range", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse(page([], 250)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100)).resolves.toEqual({ transfers: [], nextBlock: 250 });
+    });
+
+    // A NaN block would sort unpredictably against every other transfer and then be written as an ordinary row,
+    // so a log whose position is not an integer fails the slice instead — the cursor stays put and it is retried.
+    it("throws, naming the offending values, when a log's block_number or log_index is not an integer", async () => {
+      const badBlock = { ...transferLog(), block_number: "not-a-number" };
+      const badIndex = { ...transferLog(), log_index: null };
+      const source = (log: unknown) =>
+        createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl: vi.fn(async () => jsonResponse(page([{ logs: [log] }], 250))) });
+      await expect(source(badBlock).transfers(ERC20, 100)).rejects.toThrow(/malformed position.*not-a-number/i);
+      await expect(source(badIndex).transfers(ERC20, 100)).rejects.toThrow(/malformed position.*log_index=null/i);
+    });
+
+    it("sorts transfers by (block, logIndex) ascending across the response's chunks", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page(
+            [
+              { logs: [transferLog({ blockNumber: 105, logIndex: 2 })] },
+              { logs: [transferLog({ blockNumber: 100, logIndex: 5 }), transferLog({ blockNumber: 100, logIndex: 1 })] },
+            ],
+            250,
+          ),
+        ),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      const { transfers } = await source.transfers(ERC20, 100);
+      expect(transfers.map((t) => [t.block, t.logIndex])).toEqual([
+        [100, 1],
+        [100, 5],
+        [105, 2],
+      ]);
+    });
+  });
+
+  // The same two guards fetch() carries, for the same reason: a missing or non-numeric next_block must not
+  // reach the caller as a cursor, and a response that does not pass fromBlock must never look like an empty
+  // range — the builder would store the cursor and spin on that block forever.
+  describe("transfers: malformed response and no progress", () => {
+    it("throws when next_block is missing from an otherwise well-formed response, naming what arrived", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ data: [] }));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100)).rejects.toThrow(/malformed.*next_block=undefined/i);
+    });
+
+    it("throws when next_block is present but not an integer, naming what arrived", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ data: [], next_block: "not-a-number" }));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100)).rejects.toThrow(/malformed.*next_block=not-a-number/i);
+    });
+
+    it("throws when data is missing or not an array", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ next_block: 250 }));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100)).rejects.toThrow(/malformed/i);
+    });
+
+    it("throws when the response makes no progress past fromBlock, naming the block it stopped at", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse(page([], 100)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100)).rejects.toThrow(/no progress.*next_block=100/i);
+    });
+
+    it("throws when the response regresses below fromBlock", async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse(page([], 50)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      await expect(source.transfers(ERC20, 100)).rejects.toThrow(/no progress.*next_block=50/i);
     });
   });
 });

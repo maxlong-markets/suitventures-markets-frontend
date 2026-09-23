@@ -1,6 +1,6 @@
 import { POOL_MANAGER, TOPIC0 } from "./abi";
 import { decodeLog, type RawLog } from "./decode";
-import type { ChainEvent, LogSource } from "./types";
+import type { ChainEvent, LogSource, TransferEvent } from "./types";
 
 export type HyperSyncSourceOptions = {
   url?: string;
@@ -63,6 +63,36 @@ type HyperSyncLog = {
 type HyperSyncChunk = { logs?: HyperSyncLog[]; blocks?: HyperSyncBlock[]; transactions?: HyperSyncTransaction[] };
 type HyperSyncQueryResponse = { data: HyperSyncChunk[]; next_block: number; archive_height?: number };
 type HyperSyncHeightResponse = { height: number };
+
+/**
+ * The transfers query's own response shape (top holders, 23 Sep 2026). HyperSync returns only the fields a
+ * query selects, so this claims exactly the ones `transfers()` asks for and deliberately NOT the
+ * `transaction_hash` that fetch()'s `HyperSyncLog` carries: reading a field this query never requested would
+ * type-check and silently be undefined.
+ */
+type HyperSyncTransferLog = {
+  block_number: number;
+  log_index: number;
+  data?: string | null;
+  topic1?: string | null;
+  topic2?: string | null;
+  topic3?: string | null;
+};
+type HyperSyncTransferResponse = { data: { logs?: HyperSyncTransferLog[] }[]; next_block: number; archive_height?: number };
+
+/** keccak256("Transfer(address,address,uint256)"). */
+const TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const topicAddress = (topic: unknown): string | null =>
+  typeof topic === "string" && topic.length === 66 ? `0x${topic.slice(26).toLowerCase()}` : null;
+
+/**
+ * A transfer log's block number or index as a number, NaN for anything that is not one. Number(null),
+ * Number("") and Number(false) are all 0, so those must be rejected before they reach Number at all — a
+ * present-but-empty position must never decode to block 0, the same rule parseBlockTimestamp above enforces on
+ * an empty timestamp. The caller turns the NaN into a throw.
+ */
+const logPosition = (value: unknown): number =>
+  typeof value === "number" || (typeof value === "string" && value.trim() !== "") ? Number(value) : NaN;
 
 /**
  * Topics in the order HyperSync sent them, from whichever of topic0..topic3 are present, stopping
@@ -227,6 +257,59 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
         throw new Error(`HyperSync made no progress past block ${fromBlock} (next_block=${String(response.next_block)})`);
       }
       return { events, nextBlock };
+    },
+
+    async transfers(token: string, fromBlock: number, toBlock?: number) {
+      const queryBody = {
+        from_block: fromBlock,
+        // HyperSync's to_block is exclusive, as in fetch(). Left out of the body entirely when the caller sets
+        // no ceiling: the source then covers whatever one response reaches.
+        ...(toBlock === undefined ? {} : { to_block: toBlock + 1 }),
+        logs: [{ address: [token.toLowerCase()], topics: [[TRANSFER_TOPIC0]] }],
+        // topic3 is selected only so the ERC-721 guard below can see it: an absent topic is a missing key, so
+        // an unselected topic3 would read as undefined on every log and that guard would never fire.
+        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "topic3", "data"] },
+      };
+      const response = (await request(
+        "/query",
+        "POST",
+        { "Content-Type": "application/json" },
+        JSON.stringify(queryBody),
+      )) as HyperSyncTransferResponse;
+      if (!Array.isArray(response.data) || !Number.isInteger(response.next_block)) {
+        throw new Error(
+          `HyperSync transfers response malformed for block ${fromBlock}: missing data array or next_block (next_block=${String(response.next_block)})`,
+        );
+      }
+      // Clamped exactly as fetch() clamps its own: a response may report a next_block past the range asked for,
+      // and storing that as the token's cursor would skip every block between the ceiling and it.
+      const nextBlock = toBlock === undefined ? response.next_block : Math.min(response.next_block, toBlock + 1);
+      if (nextBlock <= fromBlock) {
+        throw new Error(`HyperSync transfers made no progress from block ${fromBlock} (next_block=${String(response.next_block)})`);
+      }
+      const transfers: TransferEvent[] = [];
+      for (const chunk of response.data) {
+        for (const log of chunk.logs ?? []) {
+          // An ERC-721 Transfer carries the token id as a fourth topic; it is not a balance movement.
+          if (log.topic3 != null) continue;
+          const from = topicAddress(log.topic1);
+          const to = topicAddress(log.topic2);
+          if (!from || !to) continue;
+          // A malformed position must never become a NaN block: it would sort unpredictably against every other
+          // transfer and, worse, look like an ordinary row once written.
+          const block = logPosition(log.block_number);
+          const logIndex = logPosition(log.log_index);
+          if (!Number.isInteger(block) || !Number.isInteger(logIndex)) {
+            throw new Error(
+              `HyperSync transfer log has a malformed position: block_number=${String(log.block_number)} log_index=${String(log.log_index)}`,
+            );
+          }
+          const data = typeof log.data === "string" && log.data.length > 2 ? log.data : "0x0";
+          transfers.push({ block, logIndex, from, to, value: BigInt(data) });
+        }
+      }
+      transfers.sort((a, b) => a.block - b.block || a.logIndex - b.logIndex);
+      return { transfers, nextBlock };
     },
 
     get requests() {

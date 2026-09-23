@@ -5,7 +5,7 @@ import { testDb } from "@/test/db";
 import type { QuoteFeedConfig } from "./onchain";
 import { runChainSync, type ChainClient, type ChainRunDeps, type ChainRunOpts } from "./run";
 import { applyFold, readChainCursor } from "./store";
-import type { ChainEvent, InitializeEvent, SwapEvent } from "./types";
+import type { ChainEvent, InitializeEvent, SwapEvent, TransferEvent } from "./types";
 
 // Real addresses (config/quotes.json), the same ones src/lib/chain/fold.test.ts uses, so the one test below
 // that runs an Initialize+Swap through the real fold (not a fake) classifies and prices exactly as production
@@ -77,6 +77,10 @@ class FakeLogSource {
     if (batch && "throws" in batch) throw batch.throws;
     if (batch) return batch;
     return { events: [], nextBlock: toBlock + 1 };
+  }
+
+  async transfers(): Promise<{ transfers: TransferEvent[]; nextBlock: number }> {
+    throw new Error("FakeLogSource.transfers: not used by the reader's tests");
   }
 
   get requests(): number {

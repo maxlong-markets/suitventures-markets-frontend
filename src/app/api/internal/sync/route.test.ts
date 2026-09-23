@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ChainRunDeps } from "@/lib/chain/run";
-import type { ChainEvent } from "@/lib/chain/types";
+import type { ChainEvent, TransferEvent } from "@/lib/chain/types";
 import { resetDb, type Db } from "@/lib/db/client";
 import { setChainDeps } from "@/lib/sync/deps";
 import { saveCursors } from "@/lib/sync/state";
@@ -29,6 +29,9 @@ function alwaysBehindSource(): ChainRunDeps["source"] & { requests: number } {
     async fetch(_from: number, to: number): Promise<{ events: ChainEvent[]; nextBlock: number }> {
       requests += 1;
       return { events: [], nextBlock: to + 1 };
+    },
+    async transfers(): Promise<{ transfers: TransferEvent[]; nextBlock: number }> {
+      throw new Error("alwaysBehindSource.transfers: not used by this route's tests");
     },
     get requests() {
       return requests;
