@@ -55,6 +55,8 @@ const addressTopic = (address: string) => `0x${"0".repeat(24)}${address.slice(2)
 /**
  * One ERC-20 Transfer log, HyperSync-shaped (raw JSON, not yet decoded). It carries only the fields
  * transfers() asks for — no topic0, no transaction_hash — because HyperSync returns only the selected ones.
+ * topic3 IS selected but still absent here: an ERC-20 Transfer has two indexed parameters, so it emits no third
+ * topic, and an absent topic arrives as a missing key rather than a zero one.
  */
 function transferLog(opts: { blockNumber?: number; logIndex?: number; from?: string; to?: string; value?: bigint; data?: string } = {}) {
   return {
@@ -500,7 +502,7 @@ describe("createHyperSyncSource", () => {
       expect(JSON.parse(String(req.body))).toEqual({
         from_block: 100,
         logs: [{ address: [ERC20], topics: [[TRANSFER_TOPIC0]] }],
-        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "data"] },
+        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "topic3", "data"] },
       });
     });
   });

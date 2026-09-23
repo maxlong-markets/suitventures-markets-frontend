@@ -64,6 +64,22 @@ type HyperSyncChunk = { logs?: HyperSyncLog[]; blocks?: HyperSyncBlock[]; transa
 type HyperSyncQueryResponse = { data: HyperSyncChunk[]; next_block: number; archive_height?: number };
 type HyperSyncHeightResponse = { height: number };
 
+/**
+ * The transfers query's own response shape (top holders, 23 Sep 2026). HyperSync returns only the fields a
+ * query selects, so this claims exactly the ones `transfers()` asks for and deliberately NOT the
+ * `transaction_hash` that fetch()'s `HyperSyncLog` carries: reading a field this query never requested would
+ * type-check and silently be undefined.
+ */
+type HyperSyncTransferLog = {
+  block_number: number;
+  log_index: number;
+  data?: string | null;
+  topic1?: string | null;
+  topic2?: string | null;
+  topic3?: string | null;
+};
+type HyperSyncTransferResponse = { data: { logs?: HyperSyncTransferLog[] }[]; next_block: number; archive_height?: number };
+
 /** keccak256("Transfer(address,address,uint256)"). */
 const TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const topicAddress = (topic: unknown): string | null =>
@@ -238,14 +254,16 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
       const queryBody = {
         from_block: fromBlock,
         logs: [{ address: [token.toLowerCase()], topics: [[TRANSFER_TOPIC0]] }],
-        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "data"] },
+        // topic3 is selected only so the ERC-721 guard below can see it: an absent topic is a missing key, so
+        // an unselected topic3 would read as undefined on every log and that guard would never fire.
+        field_selection: { log: ["block_number", "log_index", "topic1", "topic2", "topic3", "data"] },
       };
       const response = (await request(
         "/query",
         "POST",
         { "Content-Type": "application/json" },
         JSON.stringify(queryBody),
-      )) as HyperSyncQueryResponse;
+      )) as HyperSyncTransferResponse;
       if (!Array.isArray(response.data) || !Number.isInteger(response.next_block)) {
         throw new Error(`HyperSync transfers response malformed for block ${fromBlock}: missing data array or next_block`);
       }
