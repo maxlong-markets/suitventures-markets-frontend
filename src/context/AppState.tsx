@@ -383,23 +383,25 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           qc.setQueryData<TokenPair | null>(keys.pair(id), (old) => (old ? fn(old) : old));
         };
 
-        const prev = prevBook?.[id];
-        const next = { ...(prevBook ?? {}) };
-        if (prev === dir) delete next[id];
-        else next[id] = dir;
-        qc.setQueryData(keys.votes, next);
-        // The number this delta lands on can be up to thirty seconds old and may already count
-        // this wallet's vote, or not yet count a vote the wallet cast elsewhere — so the decrement
-        // is clamped: a count of people is never negative, and this one is only an estimate until
-        // the answer below replaces it. Unclamped, a click against a stale zero painted -1.
-        eachRow((row) => {
-          const updated = { ...row };
-          if (prev) updated[prev] = Math.max(0, updated[prev] - 1);
-          if (prev !== dir) updated[dir] += 1;
-          return updated;
-        });
-
+        // Everything that changes a cache is inside the try, so nothing the `finally` has to undo
+        // — the lock above most of all — can be left behind by a throw on the way in.
         try {
+          const prev = prevBook?.[id];
+          const next = { ...(prevBook ?? {}) };
+          if (prev === dir) delete next[id];
+          else next[id] = dir;
+          qc.setQueryData(keys.votes, next);
+          // The number this delta lands on can be up to thirty seconds old and may already count
+          // this wallet's vote, or not yet count one it cast elsewhere — so the decrement is
+          // clamped: a count of people is never negative, and this one is only an estimate until
+          // the answer below replaces it. Unclamped, a click against a stale zero painted -1.
+          eachRow((row) => {
+            const updated = { ...row };
+            if (prev) updated[prev] = Math.max(0, updated[prev] - 1);
+            if (prev !== dir) updated[dir] += 1;
+            return updated;
+          });
+
           const written = await ds.vote(id, dir);
           // The server's own answer, with this write already in it, put exactly where the estimate
           // was. Asking the read path for it instead is what broke: those counts come from a
