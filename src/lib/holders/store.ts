@@ -208,21 +208,41 @@ export async function requestBuild(db: Db, tokenId: string, now: number): Promis
   return rows.length > 0;
 }
 
-/** Nightly cleanup (design section 7): drop everything for tokens neither kept nor requested recently, one token per statement pair. */
-export async function pruneHolders(db: Db, keepIds: readonly string[], now: number): Promise<{ tokens: number; rows: number }> {
+/**
+ * Nightly cleanup (design section 7): drop everything for tokens neither kept nor requested recently, one
+ * token per statement pair, then one anti-join sweep for balances whose refresh row is already gone.
+ *
+ * Bounded by `opts.deadlineMs` exactly as pruneSwaps/pruneCandles are (src/lib/sync/retention.ts, I2): the
+ * clock is checked before each victim and before the closing sweep, and `done: false` says the caller must
+ * come back. Like those two it carries no cursor of its own — `not in keepIds and requested_at < cutoff`
+ * already names what is left to do — so a stopped run simply re-scans next night and finds the same victims,
+ * minus the ones it reached. `tokens` counts the victims actually dropped THIS call, not the ones it found.
+ */
+export async function pruneHolders(
+  db: Db,
+  keepIds: readonly string[],
+  now: number,
+  opts: { deadlineMs: number },
+): Promise<{ tokens: number; rows: number; done: boolean }> {
   const victims = await db.query<{ token_id: string }>(
     "select token_id from market.holder_refresh where not (token_id = any($1::text[])) and requested_at < $2",
     [keepIds, now - KEEP_REQUESTED_SEC],
   );
   let rows = 0;
+  let tokens = 0;
   for (const v of victims) {
+    if (Date.now() >= opts.deadlineMs) return { tokens, rows, done: false };
     const deleted = await db.query<{ n: number }>("with d as (delete from market.token_balances where token_id = $1 returning 1) select count(*)::int as n from d", [v.token_id]);
     rows += deleted[0]?.n ?? 0;
     await db.query("delete from market.holder_refresh where token_id = $1", [v.token_id]);
+    tokens += 1;
   }
+  // The sweep is one statement over the whole balances table, so it is the one part of this that can take
+  // real time on a big store: it gets its own check rather than riding on the last victim's.
+  if (Date.now() >= opts.deadlineMs) return { tokens, rows, done: false };
   const orphans = await db.query<{ n: number }>(
     "with d as (delete from market.token_balances b where not exists (select 1 from market.holder_refresh r where r.token_id = b.token_id) returning 1) select count(*)::int as n from d",
   );
   rows += orphans[0]?.n ?? 0;
-  return { tokens: victims.length, rows };
+  return { tokens, rows, done: true };
 }

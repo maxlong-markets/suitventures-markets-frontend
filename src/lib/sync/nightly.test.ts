@@ -29,7 +29,7 @@ const nightly = (queryBudget = 240) => runNightly(db, { now: T0 + 1000, queryBud
 const listed = () => db.query("select id, listed_pool_id from market.tokens order by id");
 
 /** Off the markets table (no swap of their own), so only their request stamp keeps them (design section 7). */
-const TOKEN_C = addr(0xb3), TOKEN_D = addr(0xb4);
+const TOKEN_C = addr(0xb3), TOKEN_D = addr(0xb4), TOKEN_E = addr(0xb6);
 const WALLET_H = addr(0xc9);
 
 /** One top-holder list per token: a refresh row with its request stamp, and one balance row to delete with it. */
@@ -284,6 +284,37 @@ describe("runNightly", () => {
     expect(await readState(db, "nightly")).toMatchObject({ phase: "holders", cursorText: "" });
     expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }, { token_id: TOKEN_D }]);
     // A full window re-enters the phase and finds exactly the same victim.
+    expect(await nightly()).toMatchObject({ done: true, phase: "", prunedHolders: 1 });
+    expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }]);
+  });
+
+  it('stops in "holders" when the deadline passes BETWEEN victims, keeps the phase and finishes the cleanup next run', async () => {
+    // I2: pruneHolders used to loop every victim with no deadline of its own, so a cleanup that entered the
+    // phase in time could still run past maxDuration and be killed mid-list. It now reports `done` like
+    // pruneSwaps/pruneCandles, and this phase must return finish(false, "holders") on it.
+    await seedHolderCleanupCase();
+    await seedHolderList(TOKEN_E, T0 + 1000 - KEEP_REQUESTED_SEC - 86_400); // a second victim beside TOKEN_D
+    await saveCursors(db, "nightly", { phase: "holders", cursorText: "" });
+
+    const clock = { t: 1_700_000_000_000 };
+    vi.spyOn(Date, "now").mockImplementation(() => clock.t);
+    const deadlineMs = clock.t + 60_000;
+    let dropped = 0;
+    const gated: Db = {
+      ...db,
+      async query<T extends Record<string, unknown>>(text: string, params?: readonly unknown[]): Promise<T[]> {
+        const rows = await db.query<T>(text, params);
+        if (text.startsWith("delete from market.holder_refresh") && ++dropped === 1) clock.t = deadlineMs;
+        return rows;
+      },
+    };
+
+    const stopped = await runNightly(gated, { now: T0 + 1000, queryBudget: 240, deadlineMs });
+    expect(stopped).toMatchObject({ done: false, phase: "holders", prunedHolders: 1 });
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "holders", cursorText: "" });
+    expect(await holderTokens()).toHaveLength(3); // the two kept lists and one of the two victims
+
+    vi.restoreAllMocks();
     expect(await nightly()).toMatchObject({ done: true, phase: "", prunedHolders: 1 });
     expect(await holderTokens()).toEqual([{ token_id: TOKEN_A }, { token_id: TOKEN_C }]);
   });

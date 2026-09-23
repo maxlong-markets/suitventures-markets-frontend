@@ -134,7 +134,8 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     // day of market.swaps — 2.2 s warm and 6.5 s cold on production (COVERAGE_TTL_SEC in holders/run.ts).
     // So the phase as a whole has no per-token bound: it can take real time on a bad night.
     //
-    // Hence a deadline check before each of the two halves (fix round 1). Neither touches the stored cursor,
+    // Hence a deadline check before each of the two halves (fix round 1) AND inside pruneHolders itself
+    // (I2: before every victim and before the closing sweep). Neither touches the stored cursor,
     // because the phase has none of its own — it is a plain re-scan, like prune — and the transition into
     // "holders" was already saved above: the next invocation re-enters here with a full window and finds the
     // same victims. Without these checks a run that entered the phase late would be killed by maxDuration
@@ -143,8 +144,12 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     if (Date.now() >= opts.deadlineMs) return finish(false, "holders");
     const kept = await coverageSet(db, opts.now, QUOTE_IDS);
     if (Date.now() >= opts.deadlineMs) return finish(false, "holders");
-    const pruned = await pruneHolders(db, kept, opts.now);
+    // The pruner carries the same bounded contract as pruneSwaps/pruneCandles now (I2): it stops between
+    // victims and before its closing sweep, so a phase entered with only seconds left drops what it can and
+    // says so. `prunedHolders` is the victims dropped THIS run, which is what it always meant.
+    const pruned = await pruneHolders(db, kept, opts.now, { deadlineMs: opts.deadlineMs });
     r.prunedHolders = pruned.tokens;
+    if (!pruned.done) return finish(false, "holders");
     phase = "probe";
     afterId = "";
     await saveCursors(db, "nightly", { phase, cursorText: "" });
