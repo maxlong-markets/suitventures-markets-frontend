@@ -3,6 +3,14 @@ import type { Db } from "@/lib/db/client";
 import type { Address, TraderRow, VoteDir } from "@/lib/types";
 
 export type VoteCount = { bull: number; bear: number };
+
+/**
+ * What one vote write answers: the direction that now stands for this wallet (null when the vote
+ * was cleared) and the token's counts as the writing transaction read them. The counts travel with
+ * the write because the client paints them: the read path they would otherwise come from is a
+ * thirty-second cache, which is up to thirty seconds behind the write that just happened.
+ */
+export type VoteWrite = { dir: VoteDir | null; counts: VoteCount };
 /** The board's row type is declared in `types.ts` (the page is a client component); the name still lives beside the query that fills it. */
 export type { TraderRow } from "@/lib/types";
 
@@ -111,15 +119,26 @@ export async function votes(db: Db, wallet: string): Promise<Record<string, Vote
  * primary key in a single statement is the case Postgres documents as unsupported, and the two branches here are
  * mutually exclusive anyway, so this is the same atomicity without that question. Throws
  * `WalletCapError` only for a *new* token on a wallet at `VOTES_CAP`: clearing a vote reaches the
- * delete above and switching one reaches the conflict path, and neither is ever refused.
+ * delete above and switching one reaches the conflict path, and neither is ever refused — and it
+ * throws before the count below, so a refused write reads nothing and rolls back.
+ *
+ * The token's counts are read in the same transaction, through `voteCounts` itself rather than a
+ * second spelling of the same `group by`, so the answer can never disagree with the read path's.
+ * Read committed, not serializable: a vote another wallet commits a moment later is simply not in
+ * this answer, which is what "counts move fast and matter little" already means everywhere else —
+ * the next read reconciles it. What the caller does get is an answer that includes *its own* write.
  */
-export async function toggleVote(db: Db, wallet: string, tokenId: string, dir: VoteDir, now: number): Promise<VoteDir | null> {
+export async function toggleVote(db: Db, wallet: string, tokenId: string, dir: VoteDir, now: number): Promise<VoteWrite> {
   return db.tx(async (t) => {
     const cleared = await t.query<{ dir: VoteDir }>(CLEAR_VOTE_SQL, [wallet, tokenId, dir]);
-    if (cleared.length > 0) return null;
-    const cast = await t.query<{ dir: VoteDir }>(CAST_VOTE_SQL, [wallet, tokenId, dir, now, VOTES_CAP]);
-    if (cast.length === 0) throw new WalletCapError("votes");
-    return cast[0].dir;
+    let next: VoteDir | null = null;
+    if (cleared.length === 0) {
+      const cast = await t.query<{ dir: VoteDir }>(CAST_VOTE_SQL, [wallet, tokenId, dir, now, VOTES_CAP]);
+      if (cast.length === 0) throw new WalletCapError("votes");
+      next = cast[0].dir;
+    }
+    const counts = await voteCounts(t, [tokenId]);
+    return { dir: next, counts: counts[tokenId] };
   });
 }
 

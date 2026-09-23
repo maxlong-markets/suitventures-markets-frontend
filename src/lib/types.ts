@@ -28,6 +28,20 @@ export type SignMessage = (message: string) => Promise<Hex>;
 export type TradersBy = "volume" | "trades";
 
 /**
+ * What a vote write answers: the direction that now stands for this wallet (null when the vote was
+ * cleared) and the token's bull/bear counts with that write already in them. The counts come back
+ * with the write because the read that would otherwise supply them is a thirty-second cache, and a
+ * client that refetched it to show its own vote was reading a number from before the vote (the
+ * 23 Sep report). It is the wire shape of `VoteWrite` in `src/lib/social/store.ts`, flattened:
+ * that module is `server-only` and this type is what the client-side data sources answer.
+ */
+export interface VoteResult {
+  dir: VoteDir | null;
+  bull: number;
+  bear: number;
+}
+
+/**
  * The execution block the quote route returns. It lives in `src/lib/quote/price.ts` next to the
  * code that builds it; this is a type-only re-export, erased at build time, so nothing client-side
  * gains a runtime dependency on the route's internals. Both sides of the
@@ -177,9 +191,9 @@ export interface MarketsDataSource {
   votes(): Promise<Record<string, VoteDir>>;
   /**
    * Casting the same direction twice clears the vote; casting the other direction switches it.
-   * Answers the direction that now stands, or null when the vote was cleared.
+   * Answers the direction that now stands and the token's counts with the write in them.
    */
-  vote(id: string, dir: VoteDir): Promise<VoteDir | null>;
+  vote(id: string, dir: VoteDir): Promise<VoteResult>;
 
   // --- Session ----------------------------------------------------------
 

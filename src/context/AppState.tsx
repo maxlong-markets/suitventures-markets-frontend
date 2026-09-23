@@ -12,7 +12,7 @@ import {
 } from "react";
 import { useAccount } from "wagmi";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type Query } from "@tanstack/react-query";
 import {
   DEFAULT_FILTERS,
   applyPreset,
@@ -68,6 +68,12 @@ export interface AppState {
   toggleStar(id: string): void;
   votes: Readonly<Record<string, VoteDir>>;
   vote(id: string, dir: VoteDir): void;
+  /**
+   * The tokens with a vote write in flight. `vote` ignores a click on one of them, so the buttons
+   * have to say so — an ignored click that looked like a working one is what made spam-clicking
+   * feel broken in the first place.
+   */
+  votePending: ReadonlySet<string>;
 
   signModal: { kind: GateKind } | null;
   /** Opens the connect or sign-in flow with nothing queued behind it; `/watchlist` uses it. */
@@ -100,6 +106,12 @@ const CONFIRMED_TOAST_TTL = 7_000;
  * state back underneath it (review I2).
  */
 const WRITE_FAILED = "Couldn't save that. Try again.";
+
+/** One frozen empty set, so "no vote is in flight" is the same value on every render. */
+const NO_VOTES_PENDING: ReadonlySet<string> = new Set();
+
+/** A query worth cancelling before an optimistic write: one that already holds what would be lost. */
+const loaded = (query: Query) => query.state.data !== undefined;
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const ds = useDataSource();
@@ -323,38 +335,115 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const votesQuery = useVotes(signed);
   const votes = useMemo(() => votesQuery.data ?? {}, [votesQuery.data]);
 
+  /**
+   * The tokens whose vote write is in flight. The ref is the lock — a click handler reads it in
+   * the tick it was written, where a state value would still be the previous render's — and the
+   * state beside it is the same set for rendering.
+   */
+  const votingRef = useRef<Set<string>>(new Set());
+  const [votePending, setVotePending] = useState<ReadonlySet<string>>(NO_VOTES_PENDING);
+  const markVoting = useCallback((id: string, on: boolean) => {
+    if (on) votingRef.current.add(id);
+    else votingRef.current.delete(id);
+    setVotePending(votingRef.current.size === 0 ? NO_VOTES_PENDING : new Set(votingRef.current));
+  }, []);
+
   const vote = useCallback(
     (id: string, dir: VoteDir) => {
       gate("vote", async () => {
-        const book = qc.getQueryData<Record<string, VoteDir>>(keys.votes) ?? {};
-        const prev = book[id];
-        const next = { ...book };
-        if (prev === dir) delete next[id];
-        else next[id] = dir;
-        qc.setQueryData(keys.votes, next);
-        qc.setQueryData<TokenPair[]>(keys.pairs, (old) =>
-          old?.map((p) => {
-            if (p.id !== id) return p;
-            const updated = { ...p };
-            if (prev) updated[prev] -= 1;
+        // One write per token at a time. Every click used to fire its own toggle and the server
+        // applied them in arrival order, so two clicks on one button cast and then cleared it:
+        // that is the 0, and a click on each button is the 2 (report of 23 Sep). Queueing the
+        // second toggle would be the same race with more steps, so the click is dropped instead —
+        // and `votePending` is what tells the user that, rather than a button that does nothing.
+        if (votingRef.current.has(id)) return;
+        markVoting(id, true);
+
+        // Every step after the lock is inside the try, so nothing the `finally` has to undo — the
+        // lock above all — can be left behind by a throw on the way in. That is why the snapshot
+        // is declared out here and filled in there.
+        let prevBook: Record<string, VoteDir> | undefined;
+        let prevPairs: TokenPair[] | undefined;
+        let prevPair: TokenPair | null | undefined;
+        try {
+          // Before the optimistic write, never after: a read of one of these three that is already
+          // in flight resolves with the state from before this vote and lands on top of it. The
+          // votes book above all — `useVotes` is enabled the moment the session lands, so its
+          // first fetch races the very write that same sign-in released. Cancelling reverts each
+          // query to the state it had before its fetch, which is the state snapshotted just below.
+          //
+          // The two count queries are cancelled only where they already hold data: the write below
+          // patches rows it finds and writes nothing where there are none, so a first load has
+          // nothing to clobber and a page to deliver. The book has no such exemption — an empty
+          // book is a book, and the optimistic write replaces it outright.
+          void qc.cancelQueries({ queryKey: keys.votes });
+          void qc.cancelQueries({ queryKey: keys.pairs, predicate: loaded });
+          void qc.cancelQueries({ queryKey: keys.pair(id), predicate: loaded });
+
+          prevBook = qc.getQueryData<Record<string, VoteDir>>(keys.votes);
+          prevPairs = qc.getQueryData<TokenPair[]>(keys.pairs);
+          prevPair = qc.getQueryData<TokenPair | null>(keys.pair(id));
+
+          // A token is listed, deep-linked, or both; the counts live under whichever key holds it.
+          const eachRow = (fn: (row: TokenPair) => TokenPair) => {
+            qc.setQueryData<TokenPair[]>(keys.pairs, (old) => old?.map((p) => (p.id === id ? fn(p) : p)));
+            qc.setQueryData<TokenPair | null>(keys.pair(id), (old) => (old ? fn(old) : old));
+          };
+
+          const prev = prevBook?.[id];
+          const next = { ...(prevBook ?? {}) };
+          if (prev === dir) delete next[id];
+          else next[id] = dir;
+          qc.setQueryData(keys.votes, next);
+          // The number this delta lands on can be up to thirty seconds old and may already count
+          // this wallet's vote, or not yet count one it cast elsewhere — so the decrement is
+          // clamped: a count of people is never negative, and this one is only an estimate until
+          // the answer below replaces it. Unclamped, a click against a stale zero painted -1.
+          eachRow((row) => {
+            const updated = { ...row };
+            if (prev) updated[prev] = Math.max(0, updated[prev] - 1);
             if (prev !== dir) updated[dir] += 1;
             return updated;
-          }),
-        );
-        try {
-          await ds.vote(id, dir);
+          });
+
+          const written = await ds.vote(id, dir);
+          // The server's own answer, with this write already in it, put exactly where the estimate
+          // was. Asking the read path for it instead is what broke: those counts come from a
+          // thirty-second cache, so the refetch answered with the count from before the vote.
+          qc.setQueryData<Record<string, VoteDir>>(keys.votes, (old) => {
+            const book = { ...(old ?? {}) };
+            if (written.dir) book[id] = written.dir;
+            else delete book[id];
+            return book;
+          });
+          eachRow((row) => ({ ...row, bull: written.bull, bear: written.bear }));
         } catch {
+          // The snapshot, not a refetch: the counts a refetch brings back are the stale ones, and
+          // the status is deliberately not read — 429, 503 and a dead network leave the user the
+          // same move (review I2).
+          //
+          // `?? {}` is load-bearing: `setQueryData` ignores an `undefined` value, so restoring a
+          // book that had not loaded yet would restore nothing and leave the refused vote
+          // highlighted until the settle refetch. An empty book is also exactly what the screen
+          // showed while the read was still out, since `votes` below reads `data ?? {}`. The two
+          // count rows need no such fallback: the write above patches rows it finds and writes
+          // nothing where there are none, so an absent snapshot means nothing was changed.
+          qc.setQueryData(keys.votes, prevBook ?? {});
+          qc.setQueryData(keys.pairs, prevPairs);
+          qc.setQueryData(keys.pair(id), prevPair);
           addToast({ kind: "failed", message: WRITE_FAILED });
         } finally {
+          markVoting(id, false);
+          // The book, and only the book. It is the one thing this write cannot state on its own —
+          // another tab may have voted on another token — and reading it after the commit is
+          // correct. The counts are not invalidated: the list is served from that thirty-second
+          // cache, and asking it again is what painted the vote away (review M4 is answered by
+          // writing the server's counts into `keys.pair(id)` above, not by a refetch).
           void qc.invalidateQueries({ queryKey: keys.votes });
-          void qc.invalidateQueries({ queryKey: keys.pairs });
-          // A token outside the 500-row list has its own key, and the optimistic write above
-          // never touched it: without this its counts stay on the pre-vote number (review M4).
-          void qc.invalidateQueries({ queryKey: keys.pair(id) });
         }
       });
     },
-    [addToast, ds, gate, qc],
+    [addToast, ds, gate, markVoting, qc],
   );
 
   const value = useMemo<AppState>(
@@ -376,6 +465,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       toggleStar,
       votes,
       vote,
+      votePending,
       signModal,
       promptSignIn,
       completeSign,
@@ -404,6 +494,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       toggleStar,
       votes,
       vote,
+      votePending,
       signModal,
       promptSignIn,
       completeSign,

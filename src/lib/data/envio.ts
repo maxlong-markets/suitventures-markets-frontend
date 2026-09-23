@@ -1,5 +1,5 @@
 import { createSiweMessage } from "viem/siwe";
-import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, TraderRow, TradersBy, VoteDir } from "@/lib/types";
+import type { Address, Candle, Denom, Holder, Interval, MarketsDataSource, Quote, QuoteAsset, Side, SignMessage, TokenPair, Trade, TraderRow, TradersBy, VoteDir, VoteResult } from "@/lib/types";
 import type { PriceResult } from "@/lib/quote/price";
 import { robinhoodChain } from "@/lib/chain";
 import { localQuote, poolFeePctFor } from "@/lib/quote";
@@ -175,7 +175,7 @@ export class EnvioDataSource implements MarketsDataSource {
     return (await res.json()) as Record<string, VoteDir>;
   }
 
-  async vote(id: string, dir: VoteDir): Promise<VoteDir | null> {
+  async vote(id: string, dir: VoteDir): Promise<VoteResult> {
     const res = await fetch(`/api/me/votes/${encodeURIComponent(id.toLowerCase())}`, {
       method: "POST",
       credentials: "same-origin",
@@ -183,7 +183,9 @@ export class EnvioDataSource implements MarketsDataSource {
       body: JSON.stringify({ dir }),
     });
     if (!res.ok) throw new Error(`/api/me/votes: ${res.status}`);
-    return ((await res.json()) as { dir: VoteDir | null }).dir;
+    // The route answers the counts its own transaction read; the client paints them rather than
+    // asking the cache-backed read path, which is older than this write (the 23 Sep report).
+    return (await res.json()) as VoteResult;
   }
 
   // --- Session ----------------------------------------------------------

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Address, Hex, SignMessage, VoteDir } from "@/lib/types";
-import { keys } from "@/hooks/useMarketsData";
+import type { Address, Hex, SignMessage, TokenPair, VoteDir, VoteResult } from "@/lib/types";
+import { keys, usePairs } from "@/hooks/useMarketsData";
 import { act, fireEvent, queryHarness, render, screen, waitFor } from "@/test/dom";
 import { AppStateProvider, useAppState, type AppState } from "./AppState";
 
@@ -9,6 +9,9 @@ import { AppStateProvider, useAppState, type AppState } from "./AppState";
 const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
 const LOWER = WALLET.toLowerCase() as Address;
 const TOKEN = "0x000000000000000000000000000000000000000a";
+
+/** Only the four fields the vote flow reads; the rest of a pair never reaches these assertions. */
+const pairRow = (bull: number, bear: number): TokenPair => ({ id: TOKEN, ticker: "AI", bull, bear }) as TokenPair;
 
 const h = vi.hoisted(() => ({
   account: { address: undefined as string | undefined, isConnected: false },
@@ -20,7 +23,8 @@ const h = vi.hoisted(() => ({
     watchlist: vi.fn<() => Promise<string[]>>(),
     setWatch: vi.fn<(id: string, on: boolean) => Promise<void>>(),
     votes: vi.fn<() => Promise<Record<string, VoteDir>>>(),
-    vote: vi.fn<(id: string, dir: VoteDir) => Promise<VoteDir | null>>(),
+    vote: vi.fn<(id: string, dir: VoteDir) => Promise<VoteResult>>(),
+    pairs: vi.fn<() => Promise<TokenPair[]>>(),
   },
 }));
 
@@ -62,8 +66,49 @@ function watchUnhandled(): { seen: unknown[]; stop(): void } {
 /** One macrotask, which is when Node decides a rejection is going unhandled. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** A promise the test settles by hand, so a request can be held in flight at an exact point. */
+function deferred<T>(): { promise: Promise<T>; settle(value: T): void } {
+  let settle!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
+}
+
+/**
+ * The two reads and the one write the vote flow touches, behind a store that answers like the
+ * server does. `pairs` deliberately keeps answering the counts it was seeded with: that is the
+ * thirty-second cache `_lib/counts.ts` reads through, and a client that leans on a refetch of the
+ * list to show a vote is leaning on exactly this (the 23 Sep report).
+ */
+function fakeVotes(live: { bull: number; bear: number; voted?: VoteDir }, cached: [number, number] = [live.bull, live.bear]) {
+  /** The toggle the store performs, exposed so a case can hold the request open around it. */
+  const write = (dir: VoteDir): VoteResult => {
+    if (live.voted) live[live.voted] -= 1;
+    live.voted = live.voted === dir ? undefined : dir;
+    if (live.voted) live[live.voted] += 1;
+    return { dir: live.voted ?? null, bull: live.bull, bear: live.bear };
+  };
+  h.ds.pairs.mockImplementation(async () => [pairRow(cached[0], cached[1])]);
+  h.ds.votes.mockImplementation(async (): Promise<Record<string, VoteDir>> => (live.voted ? { [TOKEN]: live.voted } : {}));
+  h.ds.vote.mockImplementation(async (_id, dir) => write(dir));
+  /** Holds the next write open until `release()`, with the store still moving when it lands. */
+  const hold = () => {
+    const gate = deferred<void>();
+    h.ds.vote.mockImplementationOnce(async (_id, dir) => {
+      await gate.promise;
+      return write(dir);
+    });
+    return () => gate.settle();
+  };
+  return { live, hold };
+}
+
 function Probe() {
   const s = useAppState();
+  // The counts the token header renders come from the pairs list, so the list is what the vote
+  // cases below watch: a vote that does not survive its own write shows up here as a number.
+  const row = usePairs().data?.find((p) => p.id === TOKEN);
   useEffect(() => {
     api = s;
   });
@@ -73,11 +118,16 @@ function Probe() {
       <div data-testid="modal">{s.signModal?.kind ?? "none"}</div>
       <div data-testid="stars">{[...s.stars].join(",")}</div>
       <div data-testid="toasts">{s.toasts.map((t) => `${t.kind}:${t.message}`).join("|")}</div>
+      <div data-testid="counts">{row ? `${row.bull}/${row.bear}` : "-"}</div>
+      <div data-testid="voted">{s.votes[TOKEN] ?? "none"}</div>
       <button type="button" onClick={() => s.toggleStar(TOKEN)}>
         star
       </button>
       <button type="button" onClick={() => s.vote(TOKEN, "bull")}>
         vote
+      </button>
+      <button type="button" onClick={() => s.vote(TOKEN, "bear")}>
+        vote bear
       </button>
       <button
         type="button"
@@ -120,7 +170,8 @@ describe("AppStateProvider sign-in", () => {
     h.ds.watchlist.mockReset().mockResolvedValue([TOKEN]);
     h.ds.votes.mockReset().mockResolvedValue({});
     h.ds.setWatch.mockReset().mockResolvedValue(undefined);
-    h.ds.vote.mockReset().mockResolvedValue("bull");
+    h.ds.vote.mockReset().mockResolvedValue({ dir: "bull", bull: 1, bear: 0 });
+    h.ds.pairs.mockReset().mockResolvedValue([pairRow(0, 0)]);
     (sign as ReturnType<typeof vi.fn>).mockClear();
   });
 
@@ -251,7 +302,8 @@ describe("AppStateProvider refused writes", () => {
     h.ds.watchlist.mockReset().mockResolvedValue([TOKEN]);
     h.ds.votes.mockReset().mockResolvedValue({});
     h.ds.setWatch.mockReset().mockResolvedValue(undefined);
-    h.ds.vote.mockReset().mockResolvedValue("bull");
+    h.ds.vote.mockReset().mockResolvedValue({ dir: "bull", bull: 1, bear: 0 });
+    h.ds.pairs.mockReset().mockResolvedValue([pairRow(0, 0)]);
   });
 
   it("tells the user when a star is refused, puts the star back, and floats no rejection", async () => {
@@ -277,17 +329,24 @@ describe("AppStateProvider refused writes", () => {
 
   it("tells the user when a vote is refused, restores the server's answer, and floats no rejection", async () => {
     h.ds.vote.mockRejectedValue(new Error("/api/me/votes: 503"));
+    h.ds.pairs.mockResolvedValue([pairRow(3, 1)]);
     const unhandled = watchUnhandled();
     try {
       const { client } = show();
       await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
       await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+      await waitFor(() => expect(screen.getByTestId("counts").textContent).toBe("3/1"));
 
       fireEvent.click(screen.getByText("vote"));
       expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" }); // painted first
+      expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 4, bear: 1 });
 
       await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
       await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+      // The count goes back too, and from the snapshot rather than a refetch — the list is never
+      // asked again, because what it would answer is the thirty-second-old number.
+      await waitFor(() => expect(screen.getByTestId("counts").textContent).toBe("3/1"));
+      expect(h.ds.pairs).toHaveBeenCalledTimes(1);
       await flush();
       expect(unhandled.seen).toEqual([]);
     } finally {
@@ -295,22 +354,242 @@ describe("AppStateProvider refused writes", () => {
     }
   });
 
-  // Review M4: a vote on a token outside the 500-row pairs list lives under `keys.pair(id)`, so
-  // invalidating only `keys.pairs` left a deep-linked token's counts on the pre-vote number.
-  it("invalidates the deep-linked token's own key as well as the list and the votes", async () => {
+});
+
+/**
+ * The 23 Sep report: "right after I vote, it doesn't show the vote ... I also don't have the option
+ * to change my vote ... if you spam click the buttons it gets broken (sometimes -1, sometimes 0,
+ * sometimes 2)". Three symptoms over one flow, and every case below is one of them.
+ */
+describe("AppStateProvider votes", () => {
+  beforeEach(() => {
+    api = null;
+    h.account = { address: WALLET, isConnected: true };
+    h.openConnectModal.mockClear();
+    h.ds.session.mockReset().mockResolvedValue(LOWER);
+    h.ds.signIn.mockReset().mockResolvedValue(LOWER);
+    h.ds.watchlist.mockReset().mockResolvedValue([]);
+    h.ds.votes.mockReset().mockResolvedValue({});
+    h.ds.setWatch.mockReset().mockResolvedValue(undefined);
+    h.ds.vote.mockReset();
+    h.ds.pairs.mockReset();
+    (sign as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  /**
+   * Root cause 1. The write used to end by invalidating `keys.pairs`, and the list is served from
+   * a counts cache that is up to thirty seconds old — so the refetch it asked for replaced the
+   * vote the user had just cast with the number from before it.
+   */
+  it("paints the new count at once and keeps it while the list still answers the pre-vote number", async () => {
+    fakeVotes({ bull: 3, bear: 1 });
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("counts").textContent).toBe("3/1"));
+
+    fireEvent.click(screen.getByText("vote"));
+    // The click's own tick, before any render: the cache is what the header reads a moment later.
+    expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 4, bear: 1 });
+    await waitFor(() => expect(h.ds.vote).toHaveBeenCalledWith(TOKEN, "bull"));
+
+    await act(async () => {
+      await flush();
+    });
+    expect(screen.getByTestId("counts").textContent).toBe("4/1"); // and still there once it settles
+    expect(screen.getByTestId("voted").textContent).toBe("bull");
+    expect(h.ds.pairs).toHaveBeenCalledTimes(1); // the stale list was never asked again
+  });
+
+  /**
+   * Root cause 3. Every click used to fire its own toggle, and the server applied them in arrival
+   * order: two clicks on one button cast and then cleared, which is where the 0 and the 2 in the
+   * report came from. One write per token at a time, and the buttons say so.
+   */
+  it("ignores a second click while the first vote is in flight, and reports the token as pending", async () => {
+    const store = fakeVotes({ bull: 3, bear: 1 });
+    const release = store.hold();
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("counts").textContent).toBe("3/1"));
+
+    fireEvent.click(screen.getByText("vote"));
+    fireEvent.click(screen.getByText("vote")); // the same button again
+    fireEvent.click(screen.getByText("vote bear")); // and the other one
+    expect(h.ds.vote).toHaveBeenCalledTimes(1);
+    // Not 5/1 from a double cast, not 3/2 from the second button, and not a 0 from the two racing.
+    expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 4, bear: 1 });
+    await waitFor(() => expect(api!.votePending.has(TOKEN)).toBe(true));
+
+    await act(async () => {
+      release();
+      await flush();
+    });
+    await waitFor(() => expect(api!.votePending.has(TOKEN)).toBe(false));
+    expect(screen.getByTestId("counts").textContent).toBe("4/1");
+    expect(store.live).toMatchObject({ bull: 4, bear: 1, voted: "bull" }); // one toggle reached the store
+
+    // The lock is for one request, not for the session: the next click goes through.
+    fireEvent.click(screen.getByText("vote bear"));
+    await waitFor(() => expect(h.ds.vote).toHaveBeenCalledTimes(2));
+  });
+
+  /**
+   * Root cause 2, and the "no option to change my vote" half of the report: the optimistic delta
+   * was applied to whatever number the cache held, and that number can predate the wallet's own
+   * vote — `updated[prev] -= 1` on a zero is where the -1 came from.
+   */
+  it("switches to the other direction, clears on the same one, and never paints a negative count", async () => {
+    // The book says this wallet leans bull; the list's counts are a cached moment without it.
+    fakeVotes({ bull: 1, bear: 0, voted: "bull" }, [0, 0]);
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("voted").textContent).toBe("bull"));
+    expect(screen.getByTestId("counts").textContent).toBe("0/0");
+
+    fireEvent.click(screen.getByText("vote bear")); // switch
+    expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 0, bear: 1 }); // never -1
+    await waitFor(() => expect(h.ds.vote).toHaveBeenCalledWith(TOKEN, "bear"));
+    await act(async () => {
+      await flush();
+    });
+    expect(screen.getByTestId("voted").textContent).toBe("bear");
+    expect(screen.getByTestId("counts").textContent).toBe("0/1"); // the server's own answer
+
+    fireEvent.click(screen.getByText("vote bear")); // the same direction again clears it
+    await act(async () => {
+      await flush();
+    });
+    expect(screen.getByTestId("voted").textContent).toBe("none");
+    expect(screen.getByTestId("counts").textContent).toBe("0/0");
+  });
+
+  /**
+   * The cancel, on its own. A vote clicked while this browser's own read of the book is still out
+   * loses it: the read answers with the book from before the write and React Query puts that
+   * straight over the optimistic one. Nothing downstream covers this — the read lands while the
+   * write is still in flight, before the settle has asked for anything — so dropping the
+   * `cancelQueries` calls fails here and only here.
+   */
+  it("keeps the vote when a votes read that was already in flight answers with the pre-vote book", async () => {
+    const store = fakeVotes({ bull: 3, bear: 1 });
+    const read = deferred<Record<string, VoteDir>>();
+    h.ds.votes.mockImplementationOnce(() => read.promise); // the session's own first read, held open
+    const release = store.hold();
+    const { client } = show();
+
+    // Signed in from the cookie, so the read is already out when the click happens.
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    await waitFor(() => expect(h.ds.votes).toHaveBeenCalledTimes(1));
+    expect(client.getQueryState(keys.votes)?.fetchStatus).toBe("fetching");
+
+    fireEvent.click(screen.getByText("vote"));
+    expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" });
+
+    // The held read answers now, while the write is still out: the exact moment the vote was lost.
+    await act(async () => {
+      read.settle({});
+      await flush();
+    });
+    expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" });
+    expect(screen.getByTestId("voted").textContent).toBe("bull"); // the button stays pressed
+
+    await act(async () => {
+      release();
+      await flush();
+    });
+    expect(screen.getByTestId("voted").textContent).toBe("bull");
+  });
+
+  /**
+   * The rollback's own edge, on that same held read: the optimistic write creates the book out of
+   * nothing, so the snapshot to put back is `undefined` — and `setQueryData` ignores an undefined
+   * value. Restoring it verbatim restored nothing and left the refused vote highlighted.
+   */
+  it("takes a refused vote back out of a book that had not loaded when it was cast", async () => {
+    fakeVotes({ bull: 3, bear: 1 });
+    // Both reads are held: the one the click interrupts, and the one the settle asks for. With the
+    // second still out, an empty book can only have come from the rollback — which is the point,
+    // because the refetch arriving first is what used to hide this.
+    const read = deferred<Record<string, VoteDir>>();
+    const refetch = deferred<Record<string, VoteDir>>();
+    h.ds.votes.mockImplementationOnce(() => read.promise).mockImplementationOnce(() => refetch.promise);
+    h.ds.vote.mockRejectedValueOnce(new Error("/api/me/votes: 429"));
     const { client } = show();
     await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
-    const invalidate = vi.spyOn(client, "invalidateQueries");
+    await waitFor(() => expect(h.ds.votes).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByText("vote"));
+    expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" });
+
+    await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
+    expect(h.ds.votes).toHaveBeenCalledTimes(2);
+    expect(client.getQueryState(keys.votes)?.fetchStatus).toBe("fetching"); // still out
+    expect(client.getQueryData(keys.votes)).toEqual({});
+    expect(screen.getByTestId("voted").textContent).toBe("none");
+    expect(screen.getByTestId("counts").textContent).toBe("3/1"); // and the count never moved
+
+    await act(async () => {
+      refetch.settle({});
+      await flush();
+    });
+    expect(screen.getByTestId("voted").textContent).toBe("none");
+  });
+
+  /**
+   * The first symptom as reported — "it doesn't show the vote immediately after I sign". The
+   * session that lands enables the votes query, so its first read is in flight beside the POST the
+   * same sign-in released, and it answers with the book from before the write.
+   */
+  it("leaves the vote on screen when the deferred sign-in's own votes read lands after the write", async () => {
+    h.ds.session.mockResolvedValue(null); // nobody signed in yet: the vote is queued behind the modal
+    const store = fakeVotes({ bull: 3, bear: 1 });
+    const release = store.hold();
+    // The read the session itself starts, held open so it can answer after the write commits.
+    const read = deferred<Record<string, VoteDir>>();
+    h.ds.votes.mockImplementationOnce(() => read.promise);
+
+    show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("vote"));
+    expect(screen.getByTestId("modal").textContent).toBe("vote");
+    expect(h.ds.vote).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.ds.vote).toHaveBeenCalledWith(TOKEN, "bull"));
+
+    // The write commits, and only then the read that the session started answers — with the book
+    // as it was before the vote. That order is what used to wipe the vote off the screen.
+    await act(async () => {
+      release();
+      await flush();
+      read.settle({});
+      await flush();
+    });
+
+    await waitFor(() => expect(screen.getByTestId("voted").textContent).toBe("bull"));
+    expect(screen.getByTestId("counts").textContent).toBe("4/1");
+  });
+
+  /**
+   * Review M4: a token outside the 500-row pairs list lives under `keys.pair(id)`. The counts there
+   * used to be repaired by an invalidate, which re-read the same stale cache; now the server's own
+   * answer is written into the row, wherever the row lives.
+   */
+  it("writes the server's counts into the deep-linked token's own key as well as the list", async () => {
+    fakeVotes({ bull: 3, bear: 1 });
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    // The harness collects a query nobody observes on the next tick (`gcTime: 0`); on the token
+    // page `usePair` holds this row, so the row is held here too.
+    client.setQueryDefaults(keys.pair(TOKEN), { gcTime: Infinity });
+    client.setQueryData(keys.pair(TOKEN), pairRow(3, 1));
 
     fireEvent.click(screen.getByText("vote"));
     await waitFor(() => expect(h.ds.vote).toHaveBeenCalledWith(TOKEN, "bull"));
-
-    await waitFor(() => {
-      const invalidated = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
-      expect(invalidated).toContainEqual(keys.votes);
-      expect(invalidated).toContainEqual(keys.pairs);
-      expect(invalidated).toContainEqual(keys.pair(TOKEN));
+    await act(async () => {
+      await flush();
     });
-    invalidate.mockRestore();
+
+    expect(client.getQueryData<TokenPair>(keys.pair(TOKEN))).toMatchObject({ bull: 4, bear: 1 });
+    expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 4, bear: 1 });
   });
 });

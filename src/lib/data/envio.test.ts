@@ -238,7 +238,7 @@ describe("EnvioDataSource sessions and user data", () => {
       [`PUT /api/me/watchlist/${TOKEN}`]: { status: 204 },
       [`DELETE /api/me/watchlist/${TOKEN}`]: { status: 204 },
       "GET /api/me/votes": { status: 200, body: { [TOKEN]: "bull" } },
-      [`POST /api/me/votes/${TOKEN}`]: { status: 200, body: { dir: "bull" } },
+      [`POST /api/me/votes/${TOKEN}`]: { status: 200, body: { dir: "bull", bull: 4, bear: 1 } },
     };
     sessionFetch.mockClear();
     vi.stubGlobal("fetch", sessionFetch);
@@ -336,9 +336,11 @@ describe("EnvioDataSource sessions and user data", () => {
     expect(call(`/api/me/watchlist/${TOKEN}`).init?.method).toBe("DELETE");
   });
 
-  it("posts a vote and answers the direction that now stands", async () => {
-    routes[`POST /api/me/votes/${TOKEN}`] = { status: 200, body: { dir: null } };
-    await expect(source().vote(TOKEN, "bull")).resolves.toBeNull();
+  // The counts come back with the write (23 Sep): the read path they would otherwise come from is
+  // a thirty-second cache, so a client that refetched it to show its own vote read a stale number.
+  it("posts a vote and answers the direction that now stands, with the token's counts", async () => {
+    routes[`POST /api/me/votes/${TOKEN}`] = { status: 200, body: { dir: null, bull: 3, bear: 1 } };
+    await expect(source().vote(TOKEN, "bull")).resolves.toEqual({ dir: null, bull: 3, bear: 1 });
     const posted = call(`/api/me/votes/${TOKEN}`);
     expect(posted.init?.method).toBe("POST");
     expect(JSON.parse(String(posted.init?.body))).toEqual({ dir: "bull" });
