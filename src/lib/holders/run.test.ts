@@ -58,6 +58,8 @@ class FakeTransferSource {
   headThrows: Error | null = null;
   /** Overridable so a test can serve a head no chain would report (fix round 1, the head guard). */
   headValue = HEAD;
+  /** The key's advertised budget, as the real source reads it from the rate-limit headers (null: none advertised). */
+  rateLimitPerMinute: number | null = null;
   /** Runs just before a slice is returned, for a test that changes the database mid-invocation. */
   onTransfers: ((token: string, fromBlock: number) => Promise<void>) | null = null;
 
@@ -110,7 +112,7 @@ const frozenOpts = (over: Partial<HoldersRunOpts> = {}) => baseOpts({ requestSpa
 
 const EMPTY_REPORT: HoldersRunReport = {
   skipped: null, coverage: 0, coverageRecomputed: false, due: 0, tokensTouched: 0, tokensReady: 0, tokensSkipped: 0,
-  slices: 0, requests: 0, transfers: 0, errors: 0, error: null,
+  slices: 0, requests: 0, transfers: 0, errors: 0, error: null, spacingMs: 0, // frozenOpts: spacing 0; the pacing tests assert their own
 };
 
 let db: Db;
@@ -245,6 +247,38 @@ describe("runHoldersBuild: pacing and the window", () => {
     }
     // The head read is paced but not delayed: nothing has been requested yet when it goes out.
     expect(opts.slept).toEqual([750, 750, 750]);
+  });
+
+  it("paces to the key's advertised budget minus the reader's reserve: a 30-a-minute key spaces the builder at 3 s, and the report says so", async () => {
+    await seedToken(T1);
+    await refresh(T1, { requestedAt: NOW });
+    const opts = baseOpts();
+    const source = new FakeTransferSource(opts.now, {
+      [T1]: {
+        0: { transfers: [mint(10, W1, 5n)], nextBlock: 3000 },
+        3000: { transfers: [], nextBlock: PAST_CEILING },
+      },
+    });
+    source.rateLimitPerMinute = 30; // the free package: 30 a minute; minus READER_RESERVE_PER_MINUTE = 20 a minute = 3,000 ms
+
+    const report = await runHoldersBuild(db, { source }, opts);
+
+    expect(report).toMatchObject({ tokensReady: 1, slices: 2, requests: 3, spacingMs: 3_000, error: null });
+    expect(source.requestTimes).toEqual([NOW_MS, NOW_MS + 3_000, NOW_MS + 6_000]);
+    expect(opts.slept).toEqual([3_000, 3_000]);
+    const stored = await db.query<{ last_report: Record<string, unknown> }>("select last_report from market.sync_state where job = 'holders'");
+    expect(stored[0]!.last_report.spacingMs).toBe(3_000);
+  });
+
+  it("keeps the default spacing when the key advertises no budget (the paid package) or one wider than the default", async () => {
+    await seedToken(T1);
+    await refresh(T1, { requestedAt: NOW });
+    const opts = baseOpts();
+    const source = new FakeTransferSource(opts.now, { [T1]: { 0: { transfers: [mint(10, W1, 5n)], nextBlock: PAST_CEILING } } });
+    source.rateLimitPerMinute = 1_000; // 990 a minute allowed is 61 ms, narrower than the default: the default stands
+    const report = await runHoldersBuild(db, { source }, opts);
+    expect(report.spacingMs).toBe(DEFAULT_REQUEST_SPACING_MS);
+    expect(opts.slept).toEqual([750]);
   });
 
   it("stops at the window's end with the cursor stored, and the next invocation resumes without folding twice", async () => {
@@ -434,7 +468,7 @@ describe("runHoldersBuild: what it records through finishRun", () => {
 
     expect(await lastReport()).toEqual({
       at: NOW, coverage: 0, coverageRecomputed: 1, due: 1, tokensTouched: 1, tokensReady: 1, tokensSkipped: 0,
-      slices: 1, requests: 2, transfers: 2, errors: 0,
+      slices: 1, requests: 2, transfers: 2, errors: 0, spacingMs: 0,
     });
     const state = await readState(db, HOLDERS_JOB);
     expect(state).toMatchObject({ lastError: null, lastOkAt: NOW, lastRunAt: NOW, rowsWritten: 2, queriesUsed: 2, leaseOwner: null });

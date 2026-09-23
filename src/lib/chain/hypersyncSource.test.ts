@@ -79,7 +79,41 @@ describe("createHyperSyncSource", () => {
     vi.unstubAllEnvs();
   });
 
-  describe("head", () => {
+  describe("rateLimitPerMinute (24 Sep 2026: the key's advertised budget, read from the response headers)", () => {
+  it("is null before any request and reads the free package's 30,000-units-per-60-s limit at 1,000 a request as 30 a minute", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ height: 1 }, 200, { "x-ratelimit-limit": "30000, 30000;w=60", "x-ratelimit-cost": "1000", "x-ratelimit-remaining": "29000" }),
+    );
+    const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+    expect(source.rateLimitPerMinute).toBeNull();
+    await source.head();
+    expect(source.rateLimitPerMinute).toBe(30);
+  });
+
+  it("reads null (no advertised budget) from the paid package's answer, which carries a cost of 0 and no limit header", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ height: 1 }, 200, { "x-ratelimit-cost": "0" }));
+    const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+    await source.head();
+    expect(source.rateLimitPerMinute).toBeNull();
+  });
+
+  it("scales a non-minute window and keeps the last answered value when a later response says nothing", async () => {
+    let call = 0;
+    const fetchImpl = vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? jsonResponse({ height: 1 }, 200, { "x-ratelimit-limit": "6000;w=30", "x-ratelimit-cost": "1000" }) // 6 per 30 s = 12 a minute
+        : jsonResponse({ height: 2 }, 200);
+    });
+    const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+    await source.head();
+    expect(source.rateLimitPerMinute).toBe(12);
+    await source.head();
+    expect(source.rateLimitPerMinute).toBe(12);
+  });
+});
+
+describe("head", () => {
     it("GETs {url}/height and returns the height", async () => {
       const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ height: 68_689_936 }));
       const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });

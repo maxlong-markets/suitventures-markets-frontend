@@ -78,6 +78,13 @@ export interface LogSource {
   transfers(token: string, fromBlock: number, toBlock?: number): Promise<{ transfers: TransferEvent[]; nextBlock: number }>;
   /** Requests issued so far, for budgets and reports. */
   readonly requests: number;
+  /**
+   * The key's advertised budget in requests per minute, from the service's rate-limit headers on the
+   * last answered request (24 Sep 2026: the free package answers `x-ratelimit-limit=30000;w=60` with
+   * `x-ratelimit-cost=1000`, i.e. 30 a minute; the paid package sends no limit and a cost of 0), or null
+   * when none has been seen. A source that cannot know it (a test fake) may omit the field.
+   */
+  readonly rateLimitPerMinute?: number | null;
 }
 
 /** A pool as the fold sees it. Mirrors market.pools; `baselineAt` is market.pools.baseline_at. */

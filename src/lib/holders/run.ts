@@ -17,6 +17,13 @@ import {
  */
 export const HOLDERS_JOB = "holders";
 export const DEFAULT_REQUEST_SPACING_MS = 750;
+/**
+ * Requests a minute left to the reader (its steady state is ~4, a backlog cycle more) when the key advertises a
+ * budget (24 Sep 2026): the builder then spaces itself to `limit - reserve` a minute. The free key advertises
+ * 30, so the builder drops to 20 a minute and the reader keeps working; the paid key advertises nothing and the
+ * default spacing stands. This is what keeps a mis-set key on Vercel from starving the reader.
+ */
+export const READER_RESERVE_PER_MINUTE = 10;
 export const DEFAULT_SAFETY_BLOCKS = 30;
 /**
  * How long a computed coverage set is reused before the query behind it runs again. Measured on production
@@ -28,7 +35,7 @@ export const DEFAULT_SAFETY_BLOCKS = 30;
  */
 export const COVERAGE_TTL_SEC = 300;
 
-export type HoldersRunDeps = { source: Pick<LogSource, "head" | "transfers" | "requests"> };
+export type HoldersRunDeps = { source: Pick<LogSource, "head" | "transfers" | "requests" | "rateLimitPerMinute"> };
 export type HoldersRunOpts = {
   owner: string; now: () => number; sleep: (ms: number) => Promise<void>; windowSec: number; leaseSec: number;
   excludedIds: readonly string[]; requestSpacingMs?: number; safetyBlocks?: number; coverageLimit?: number; maxTransfersPerToken?: number;
@@ -37,6 +44,8 @@ export type HoldersRunReport = {
   skipped: "lease" | "nightly" | null; coverage: number; coverageRecomputed: boolean; due: number;
   tokensTouched: number; tokensReady: number; tokensSkipped: number;
   slices: number; requests: number; transfers: number; errors: number; error: string | null;
+  /** The spacing this invocation paced at, after the key's advertised budget (READER_RESERVE_PER_MINUTE) was applied. */
+  spacingMs: number;
 };
 
 const sec = (ms: number) => Math.floor(ms / 1000);
@@ -56,7 +65,7 @@ function parseCoverage(text: string): string[] | null {
 export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: HoldersRunOpts): Promise<HoldersRunReport> {
   const report: HoldersRunReport = {
     skipped: null, coverage: 0, coverageRecomputed: false, due: 0, tokensTouched: 0, tokensReady: 0, tokensSkipped: 0,
-    slices: 0, requests: 0, transfers: 0, errors: 0, error: null,
+    slices: 0, requests: 0, transfers: 0, errors: 0, error: null, spacingMs: opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS,
   };
   const startMs = opts.now();
   if (!(await acquireLease(db, HOLDERS_JOB, opts.owner, sec(startMs), opts.leaseSec))) return { ...report, skipped: "lease" };
@@ -69,7 +78,7 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     return { ...report, skipped: "nightly" };
   }
   const endMs = startMs + opts.windowSec * 1000;
-  const spacing = opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS;
+  let spacing = opts.requestSpacingMs ?? DEFAULT_REQUEST_SPACING_MS;
   const safety = opts.safetyBlocks ?? DEFAULT_SAFETY_BLOCKS;
   const maxTransfers = opts.maxTransfersPerToken ?? MAX_TRANSFERS_PER_TOKEN;
   const requestsStart = deps.source.requests;
@@ -88,6 +97,14 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     // ready check below fire for every due token at once and stamp a half-built list as exact with a holder
     // count to match. Refuse it here: the invocation ends on the ok:false path and the next minute tries again.
     if (!Number.isInteger(head) || head <= 0) throw new Error(`holders: HyperSync head is not a positive integer: ${head}`);
+    // The head answer is the first response of the invocation, so the key's advertised budget (if any) is known
+    // from here on: never pace faster than `limit - READER_RESERVE_PER_MINUTE` a minute.
+    const advertised = deps.source.rateLimitPerMinute;
+    if (typeof advertised === "number" && advertised > 0) {
+      const allowed = Math.max(1, advertised - READER_RESERVE_PER_MINUTE);
+      spacing = Math.max(spacing, Math.ceil(60_000 / allowed));
+    }
+    report.spacingMs = spacing;
     const coverage = await resolveCoverage();
     report.coverage = coverage.length;
     await ensureRows(db, coverage);
@@ -113,7 +130,7 @@ export async function runHoldersBuild(db: Db, deps: HoldersRunDeps, opts: Holder
     return {
       at: sec(opts.now()), coverage: report.coverage, coverageRecomputed: report.coverageRecomputed ? 1 : 0, due: report.due,
       tokensTouched: report.tokensTouched, tokensReady: report.tokensReady, tokensSkipped: report.tokensSkipped,
-      slices: report.slices, requests: used(), transfers: report.transfers, errors: report.errors,
+      slices: report.slices, requests: used(), transfers: report.transfers, errors: report.errors, spacingMs: report.spacingMs,
     };
   }
 

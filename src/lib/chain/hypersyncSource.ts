@@ -110,6 +110,27 @@ function buildTopics(log: HyperSyncLog): string[] {
 }
 
 /**
+ * The key's budget in requests per minute, read from one answered response, or undefined when the
+ * headers say nothing usable. The free package answers `x-ratelimit-limit: 30000, 30000;w=60` and
+ * `x-ratelimit-cost: 1000` (measured 23 Sep 2026): units per window divided by units per request,
+ * scaled to a minute. The paid package sends no limit header and a cost of 0, which reads as "no
+ * advertised limit": null, so the caller falls back to its own default pace.
+ */
+function rateLimitFromHeaders(res: Response): number | null | undefined {
+  const limitHeader = res.headers.get("x-ratelimit-limit");
+  const costHeader = res.headers.get("x-ratelimit-cost");
+  if (limitHeader === null && costHeader === null) return undefined;
+  const cost = Number(costHeader ?? "1");
+  if (limitHeader === null || !(cost > 0)) return null;
+  const match = /^\s*(\d+)(?:.*?;w=(\d+))?/.exec(limitHeader);
+  if (!match) return null;
+  const units = Number(match[1]);
+  const windowSec = match[2] ? Number(match[2]) : 60;
+  if (!(units > 0) || !(windowSec > 0)) return null;
+  return Math.max(1, Math.floor((units / cost) * (60 / windowSec)));
+}
+
+/**
  * `LogSource` over HyperSync (`https://4663.hypersync.xyz` by default). Every request retries
  * 429s, 5xx and network errors with a capped exponential backoff — `Retry-After` is honoured as a
  * floor under that backoff, never a replacement for it, so a short or zero header can never pin
@@ -127,6 +148,7 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
   const sleep = opts.sleep ?? defaultSleep;
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   let requests = 0;
+  let rateLimitPerMinute: number | null = null;
 
   function getToken(): string {
     const token = opts.token || process.env.HYPERSYNC_API_TOKEN || process.env.ENVIO_API_TOKEN;
@@ -158,6 +180,8 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
         continue;
       }
       if (res.ok) {
+        const advertised = rateLimitFromHeaders(res);
+        if (advertised !== undefined) rateLimitPerMinute = advertised;
         // A truncated or otherwise malformed body on an ok response is just as transient-shaped
         // as a network error or a 5xx (responses run to several MB and a catch-up makes
         // thousands of sequential calls), so it gets the same retry treatment rather than
@@ -314,6 +338,9 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
 
     get requests() {
       return requests;
+    },
+    get rateLimitPerMinute() {
+      return rateLimitPerMinute;
     },
   };
 }
