@@ -359,33 +359,37 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         if (votingRef.current.has(id)) return;
         markVoting(id, true);
 
-        // Before the optimistic write, never after: a read of one of these three that is already
-        // in flight resolves with the state from before this vote and lands on top of it. The
-        // votes book above all — `useVotes` is enabled the moment the session lands, so its first
-        // fetch races the very write that same sign-in released. Cancelling reverts each query to
-        // the state it had before its fetch, which is the state snapshotted just below.
-        //
-        // The two count queries are cancelled only where they already hold data: the write below
-        // patches rows it finds and writes nothing where there are none, so a first load has
-        // nothing to clobber and a page to deliver. The book has no such exemption — an empty
-        // book is a book, and the optimistic write replaces it outright.
-        void qc.cancelQueries({ queryKey: keys.votes });
-        void qc.cancelQueries({ queryKey: keys.pairs, predicate: loaded });
-        void qc.cancelQueries({ queryKey: keys.pair(id), predicate: loaded });
-
-        const prevBook = qc.getQueryData<Record<string, VoteDir>>(keys.votes);
-        const prevPairs = qc.getQueryData<TokenPair[]>(keys.pairs);
-        const prevPair = qc.getQueryData<TokenPair | null>(keys.pair(id));
-
-        // A token is listed, deep-linked, or both; the counts live under whichever key holds it.
-        const eachRow = (fn: (row: TokenPair) => TokenPair) => {
-          qc.setQueryData<TokenPair[]>(keys.pairs, (old) => old?.map((p) => (p.id === id ? fn(p) : p)));
-          qc.setQueryData<TokenPair | null>(keys.pair(id), (old) => (old ? fn(old) : old));
-        };
-
-        // Everything that changes a cache is inside the try, so nothing the `finally` has to undo
-        // — the lock above most of all — can be left behind by a throw on the way in.
+        // Every step after the lock is inside the try, so nothing the `finally` has to undo — the
+        // lock above all — can be left behind by a throw on the way in. That is why the snapshot
+        // is declared out here and filled in there.
+        let prevBook: Record<string, VoteDir> | undefined;
+        let prevPairs: TokenPair[] | undefined;
+        let prevPair: TokenPair | null | undefined;
         try {
+          // Before the optimistic write, never after: a read of one of these three that is already
+          // in flight resolves with the state from before this vote and lands on top of it. The
+          // votes book above all — `useVotes` is enabled the moment the session lands, so its
+          // first fetch races the very write that same sign-in released. Cancelling reverts each
+          // query to the state it had before its fetch, which is the state snapshotted just below.
+          //
+          // The two count queries are cancelled only where they already hold data: the write below
+          // patches rows it finds and writes nothing where there are none, so a first load has
+          // nothing to clobber and a page to deliver. The book has no such exemption — an empty
+          // book is a book, and the optimistic write replaces it outright.
+          void qc.cancelQueries({ queryKey: keys.votes });
+          void qc.cancelQueries({ queryKey: keys.pairs, predicate: loaded });
+          void qc.cancelQueries({ queryKey: keys.pair(id), predicate: loaded });
+
+          prevBook = qc.getQueryData<Record<string, VoteDir>>(keys.votes);
+          prevPairs = qc.getQueryData<TokenPair[]>(keys.pairs);
+          prevPair = qc.getQueryData<TokenPair | null>(keys.pair(id));
+
+          // A token is listed, deep-linked, or both; the counts live under whichever key holds it.
+          const eachRow = (fn: (row: TokenPair) => TokenPair) => {
+            qc.setQueryData<TokenPair[]>(keys.pairs, (old) => old?.map((p) => (p.id === id ? fn(p) : p)));
+            qc.setQueryData<TokenPair | null>(keys.pair(id), (old) => (old ? fn(old) : old));
+          };
+
           const prev = prevBook?.[id];
           const next = { ...(prevBook ?? {}) };
           if (prev === dir) delete next[id];
@@ -417,7 +421,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           // The snapshot, not a refetch: the counts a refetch brings back are the stale ones, and
           // the status is deliberately not read — 429, 503 and a dead network leave the user the
           // same move (review I2).
-          qc.setQueryData(keys.votes, prevBook);
+          //
+          // `?? {}` is load-bearing: `setQueryData` ignores an `undefined` value, so restoring a
+          // book that had not loaded yet would restore nothing and leave the refused vote
+          // highlighted until the settle refetch. An empty book is also exactly what the screen
+          // showed while the read was still out, since `votes` below reads `data ?? {}`. The two
+          // count rows need no such fallback: the write above patches rows it finds and writes
+          // nothing where there are none, so an absent snapshot means nothing was changed.
+          qc.setQueryData(keys.votes, prevBook ?? {});
           qc.setQueryData(keys.pairs, prevPairs);
           qc.setQueryData(keys.pair(id), prevPair);
           addToast({ kind: "failed", message: WRITE_FAILED });

@@ -329,17 +329,24 @@ describe("AppStateProvider refused writes", () => {
 
   it("tells the user when a vote is refused, restores the server's answer, and floats no rejection", async () => {
     h.ds.vote.mockRejectedValue(new Error("/api/me/votes: 503"));
+    h.ds.pairs.mockResolvedValue([pairRow(3, 1)]);
     const unhandled = watchUnhandled();
     try {
       const { client } = show();
       await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
       await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+      await waitFor(() => expect(screen.getByTestId("counts").textContent).toBe("3/1"));
 
       fireEvent.click(screen.getByText("vote"));
       expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" }); // painted first
+      expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 4, bear: 1 });
 
       await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
       await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+      // The count goes back too, and from the snapshot rather than a refetch — the list is never
+      // asked again, because what it would answer is the thirty-second-old number.
+      await waitFor(() => expect(screen.getByTestId("counts").textContent).toBe("3/1"));
+      expect(h.ds.pairs).toHaveBeenCalledTimes(1);
       await flush();
       expect(unhandled.seen).toEqual([]);
     } finally {
@@ -451,6 +458,78 @@ describe("AppStateProvider votes", () => {
     });
     expect(screen.getByTestId("voted").textContent).toBe("none");
     expect(screen.getByTestId("counts").textContent).toBe("0/0");
+  });
+
+  /**
+   * The cancel, on its own. A vote clicked while this browser's own read of the book is still out
+   * loses it: the read answers with the book from before the write and React Query puts that
+   * straight over the optimistic one. Nothing downstream covers this — the read lands while the
+   * write is still in flight, before the settle has asked for anything — so dropping the
+   * `cancelQueries` calls fails here and only here.
+   */
+  it("keeps the vote when a votes read that was already in flight answers with the pre-vote book", async () => {
+    const store = fakeVotes({ bull: 3, bear: 1 });
+    const read = deferred<Record<string, VoteDir>>();
+    h.ds.votes.mockImplementationOnce(() => read.promise); // the session's own first read, held open
+    const release = store.hold();
+    const { client } = show();
+
+    // Signed in from the cookie, so the read is already out when the click happens.
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    await waitFor(() => expect(h.ds.votes).toHaveBeenCalledTimes(1));
+    expect(client.getQueryState(keys.votes)?.fetchStatus).toBe("fetching");
+
+    fireEvent.click(screen.getByText("vote"));
+    expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" });
+
+    // The held read answers now, while the write is still out: the exact moment the vote was lost.
+    await act(async () => {
+      read.settle({});
+      await flush();
+    });
+    expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" });
+    expect(screen.getByTestId("voted").textContent).toBe("bull"); // the button stays pressed
+
+    await act(async () => {
+      release();
+      await flush();
+    });
+    expect(screen.getByTestId("voted").textContent).toBe("bull");
+  });
+
+  /**
+   * The rollback's own edge, on that same held read: the optimistic write creates the book out of
+   * nothing, so the snapshot to put back is `undefined` — and `setQueryData` ignores an undefined
+   * value. Restoring it verbatim restored nothing and left the refused vote highlighted.
+   */
+  it("takes a refused vote back out of a book that had not loaded when it was cast", async () => {
+    fakeVotes({ bull: 3, bear: 1 });
+    // Both reads are held: the one the click interrupts, and the one the settle asks for. With the
+    // second still out, an empty book can only have come from the rollback — which is the point,
+    // because the refetch arriving first is what used to hide this.
+    const read = deferred<Record<string, VoteDir>>();
+    const refetch = deferred<Record<string, VoteDir>>();
+    h.ds.votes.mockImplementationOnce(() => read.promise).mockImplementationOnce(() => refetch.promise);
+    h.ds.vote.mockRejectedValueOnce(new Error("/api/me/votes: 429"));
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    await waitFor(() => expect(h.ds.votes).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByText("vote"));
+    expect(client.getQueryData(keys.votes)).toEqual({ [TOKEN]: "bull" });
+
+    await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
+    expect(h.ds.votes).toHaveBeenCalledTimes(2);
+    expect(client.getQueryState(keys.votes)?.fetchStatus).toBe("fetching"); // still out
+    expect(client.getQueryData(keys.votes)).toEqual({});
+    expect(screen.getByTestId("voted").textContent).toBe("none");
+    expect(screen.getByTestId("counts").textContent).toBe("3/1"); // and the count never moved
+
+    await act(async () => {
+      refetch.settle({});
+      await flush();
+    });
+    expect(screen.getByTestId("voted").textContent).toBe("none");
   });
 
   /**
