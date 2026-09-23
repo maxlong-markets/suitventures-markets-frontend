@@ -153,6 +153,20 @@ it("applySlice adds deltas, drops wallets that reach zero, and moves the cursor 
   expect(await refreshRow(db, T1)).toMatchObject({ cursorBlock: 1_800, transfers: 3 + DELTA_CHUNK + 1 });
 });
 
+// Review round 1: the three writers of market.holder_refresh used to update `where token_id = $1` and ignore that
+// nothing matched. applySlice was the dangerous one — the balances committed while the cursor did not, so the next
+// pass re-folded the same range and doubled every delta. All three now throw, inside their transaction, so the rest
+// of the statement group rolls back with them.
+it("applySlice throws and rolls its deltas back when the token has no refresh row", async () => {
+  await balance(T1, W1, "100");
+
+  await expect(applySlice(db, T1, new Map([[W1, 50n], [W2, 7n]]), 900, 3, NOW)).rejects.toThrow(
+    `applySlice: no market.holder_refresh row for token ${T1}`,
+  );
+
+  expect(await balancesOf(T1)).toEqual([{ holder: W1, balance: "100" }]); // neither the upsert nor W2's insert survived
+});
+
 it("markReady stamps the row and sets the token's exact holder count", async () => {
   await seedToken(T1, 999); // whatever the reader's ±1 deltas left behind
   await refresh(T1, { status: "building", cursorBlock: 4_000 });
@@ -164,6 +178,34 @@ it("markReady stamps the row and sets the token's exact holder count", async () 
 
   expect(await refreshRow(db, T1)).toMatchObject({ status: "ready", refreshedAt: NOW, cursorBlock: 4_000 });
   expect(await holdersCountOf(T1)).toBe(2);
+});
+
+it("markReady throws and leaves the holder count alone when there is no refresh row", async () => {
+  await seedToken(T1, 999);
+  await balance(T1, W1, "100");
+
+  await expect(markReady(db, T1, NOW)).rejects.toThrow(`markReady: no market.holder_refresh row for token ${T1}`);
+
+  expect(await holdersCountOf(T1)).toBe(999); // the exact-count update never ran
+});
+
+/** requestBuild can insert a refresh row for a token market.tokens has never heard of; setting no count is worse than failing. */
+it("markReady throws and rolls its stamp back when the token has no market.tokens row", async () => {
+  await refresh(T1, { status: "building" });
+  await balance(T1, W1, "100");
+
+  await expect(markReady(db, T1, NOW)).rejects.toThrow(`markReady: no market.tokens row for token ${T1}`);
+
+  expect(await refreshRow(db, T1)).toMatchObject({ status: "building", refreshedAt: 0 }); // the ready stamp rolled back
+});
+
+it("markSkipped throws and keeps the balances when there is no refresh row", async () => {
+  await balance(T1, W1, "100");
+  await balance(T1, W2, "7");
+
+  await expect(markSkipped(db, T1)).rejects.toThrow(`markSkipped: no market.holder_refresh row for token ${T1}`);
+
+  expect(await countBalances(T1)).toBe(2); // the delete that ran first rolled back
 });
 
 it("markSkipped drops the token's rows and rewinds its cursor", async () => {
@@ -211,7 +253,7 @@ it("dueTokens lists opened, then traded-since, then full-pass tokens, each once"
   await refresh(T2, { status: "ready", refreshedAt: NOW - 1_000 }); // stale, but its last trade predates the list
   await refresh(T3, { status: "ready", refreshedAt: NOW - 1_000 }); // stale and traded since
   await refresh(T4, { status: "building" }); // never folded: refreshed_at 0, requested_at 0
-  await refresh(T5, { status: "ready", refreshedAt: NOW - 5_000 }); // no trade since, but past the full pass
+  await refresh(T5, { status: "ready", refreshedAt: NOW - 5_000 }); // its only trade predates the full pass: tier 3, not tier 2
   await refresh(T6, { status: "ready", refreshedAt: NOW - 300 }); // fresh
   await refresh(T7, { status: "skipped", requestedAt: NOW - 50 }); // never, whatever else is true of it
   await refresh(T8, { status: "building", requestedAt: NOW - 5 }); // off-table, opened a moment ago
@@ -220,6 +262,9 @@ it("dueTokens lists opened, then traded-since, then full-pass tokens, each once"
   await swap(T1, NOW - 500);
   await swap(T2, NOW - 2_000); // older than T2's refreshed_at
   await swap(T3, NOW - 400);
+  // Newer than T5's refreshed_at but older than FULL_PASS_SEC, so the traded-since probe's time bound excludes
+  // it: T5 reaches the list through tier 3 (oldest refreshed_at first), behind T4, not through tier 2.
+  await swap(T5, NOW - 4_000);
   await swap(T6, NOW - 100);
   await swap(T7, NOW - 100);
 

@@ -10,3 +10,8 @@ alter table market.holder_refresh drop constraint if exists holder_refresh_statu
 alter table market.holder_refresh add constraint holder_refresh_status_check check (status in ('building', 'ready', 'skipped'));
 -- The builder's first priority: opened tokens still building, newest request first (design section 4, due list 1).
 create index if not exists holder_refresh_requested on market.holder_refresh (requested_at desc) where status <> 'skipped';
+
+-- Review round 1: the builder runs two probes over market.swaps by token_id every minute — the coverage set
+-- (top 500 by trade count over 24 h) and the traded-since check behind due list 2. market.swaps is indexed only
+-- by (pool_id, ts desc) plus a BRIN on ts, so both would scan the table; nothing queried it by token_id before.
+create index if not exists swaps_token_ts on market.swaps (token_id, ts desc);

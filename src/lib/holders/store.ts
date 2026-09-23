@@ -52,6 +52,15 @@ const shape = (r: Row): RefreshRow => ({
   tokenId: r.token_id, refreshedAt: r.refreshed_at, cursorBlock: r.cursor_block, requestedAt: r.requested_at, status: r.status, transfers: Number(r.transfers),
 });
 
+/**
+ * Review round 1: every writer below targets one row by primary key, and Db.query reports no affected-row count.
+ * So each update returns its key and this turns "matched nothing" into an error rather than a silent no-op —
+ * called inside a db.tx, the throw rolls back whatever the same transaction already wrote.
+ */
+function requireRow(rows: readonly unknown[], fn: string, table: string, tokenId: string): void {
+  if (rows.length === 0) throw new Error(`${fn}: no ${table} row for token ${tokenId}`);
+}
+
 export async function refreshRow(db: Db, tokenId: string): Promise<RefreshRow | null> {
   const rows = await db.query<Row>(`select ${ROW_COLS} from market.holder_refresh where token_id = $1`, [tokenId]);
   return rows[0] ? shape(rows[0]) : null;
@@ -61,8 +70,14 @@ export async function refreshRow(db: Db, tokenId: string): Promise<RefreshRow | 
 const REQUESTED_SQL = `select ${ROW_COLS} from market.holder_refresh
   where status <> 'skipped' and requested_at > refreshed_at and refreshed_at < $1 order by requested_at desc limit 100`;
 const COVERAGE_ROWS_SQL = `select ${ROW_COLS} from market.holder_refresh where token_id = any($1::text[])`;
+/**
+ * Due list 2's probe. The `s.ts > $2` bound (now - FULL_PASS_SEC) is what keeps this off the whole swaps history:
+ * without it the planner has to walk every trade a token ever made. It costs no coverage — a token whose trade is
+ * older than that has a `refreshed_at` older still (the probe only counts trades after `refreshed_at`), so due list
+ * 3 already has it. It changes only which tier claims such a token, never whether it is folded.
+ */
 const TRADED_SINCE_SQL = `select r.token_id from market.holder_refresh r
-  where r.token_id = any($1::text[]) and exists (select 1 from market.swaps s where s.token_id = r.token_id and s.ts > r.refreshed_at)`;
+  where r.token_id = any($1::text[]) and exists (select 1 from market.swaps s where s.token_id = r.token_id and s.ts > r.refreshed_at and s.ts > $2)`;
 
 /**
  * The builder's work list for one invocation, in the order of design section 4: opened-and-stale first, then
@@ -79,7 +94,7 @@ export async function dueTokens(db: Db, coverage: readonly string[], now: number
   const byId = new Map<string, RefreshRow>();
   for (const r of await db.query<Row>(COVERAGE_ROWS_SQL, [coverage])) byId.set(r.token_id, shape(r));
   const staleIds = coverage.filter((id) => { const r = byId.get(id); return r && r.status === "ready" && r.refreshedAt < now - STALE_SEC; });
-  const traded = new Set((await db.query<{ token_id: string }>(TRADED_SINCE_SQL, [staleIds])).map((r) => r.token_id));
+  const traded = new Set((await db.query<{ token_id: string }>(TRADED_SINCE_SQL, [staleIds, now - FULL_PASS_SEC])).map((r) => r.token_id));
   for (const id of staleIds) if (traded.has(id)) push(byId.get(id)!);
   const full = coverage.map((id) => byId.get(id)).filter((r): r is RefreshRow => !!r && r.status !== "skipped" && r.refreshedAt < now - FULL_PASS_SEC);
   full.sort((a, b) => a.refreshedAt - b.refreshedAt);
@@ -105,27 +120,52 @@ export async function applySlice(db: Db, tokenId: string, deltas: ReadonlyMap<st
       );
       await t.query("delete from market.token_balances where token_id = $1 and holder = any($2::text[]) and balance = 0", [tokenId, chunk]);
     }
-    await t.query("update market.holder_refresh set cursor_block = $2, transfers = transfers + $3 where token_id = $1", [tokenId, nextBlock, transferCount]);
+    // `returning` is the only affected-row count Db.query gives us, and this update must not be allowed to miss:
+    // the balances above are already written, so a silently skipped cursor would have the next pass re-fold the
+    // same range and add every delta a second time. Throwing here rolls the whole slice back (see requireRow).
+    requireRow(
+      await t.query<{ token_id: string }>(
+        "update market.holder_refresh set cursor_block = $2, transfers = transfers + $3 where token_id = $1 returning token_id",
+        [tokenId, nextBlock, transferCount],
+      ),
+      "applySlice",
+      "market.holder_refresh",
+      tokenId,
+    );
   });
 }
 
 /** The fold reached the head: status ready, refreshed now, and the token's holder count set exact (design section 6). Returns the count. */
 export async function markReady(db: Db, tokenId: string, now: number): Promise<number> {
   return db.tx(async (t) => {
-    await t.query("update market.holder_refresh set status = 'ready', refreshed_at = $2 where token_id = $1", [tokenId, now]);
+    requireRow(
+      await t.query<{ token_id: string }>("update market.holder_refresh set status = 'ready', refreshed_at = $2 where token_id = $1 returning token_id", [tokenId, now]),
+      "markReady",
+      "market.holder_refresh",
+      tokenId,
+    );
     const rows = await t.query<{ n: number }>(
       `update market.tokens set holders_count = (select count(*)::int from market.token_balances where token_id = $1 and balance > 0)
        where id = $1 returning holders_count as n`,
       [tokenId],
     );
-    return rows[0]?.n ?? 0;
+    // requestBuild can open a refresh row for a token market.tokens has never seen. Reporting 0 holders for a list
+    // that just folded would be a lie the caller cannot tell from an empty token, so this fails loudly instead.
+    requireRow(rows, "markReady", "market.tokens", tokenId);
+    return rows[0].n;
   });
 }
 
 export async function markSkipped(db: Db, tokenId: string): Promise<void> {
   await db.tx(async (t) => {
     await t.query("delete from market.token_balances where token_id = $1", [tokenId]);
-    await t.query("update market.holder_refresh set status = 'skipped', cursor_block = 0 where token_id = $1", [tokenId]);
+    // Without the row there is nothing to record the skip on, and the delete above would drop the balances anyway.
+    requireRow(
+      await t.query<{ token_id: string }>("update market.holder_refresh set status = 'skipped', cursor_block = 0 where token_id = $1 returning token_id", [tokenId]),
+      "markSkipped",
+      "market.holder_refresh",
+      tokenId,
+    );
   });
 }
 
