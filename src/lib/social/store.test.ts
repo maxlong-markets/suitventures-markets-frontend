@@ -145,22 +145,51 @@ describe("votes cap", () => {
 
   it("never refuses a wallet changing a vote it already holds", async () => {
     await fillVotes(W1, VOTES_CAP);
-    expect(await toggleVote(db, W1, SEEDED, "bear", NOW + 1)).toBe("bear"); // switched at the cap
-    expect(await toggleVote(db, W1, SEEDED, "bear", NOW + 2)).toBeNull(); // and cleared
+    expect((await toggleVote(db, W1, SEEDED, "bear", NOW + 1)).dir).toBe("bear"); // switched at the cap
+    expect((await toggleVote(db, W1, SEEDED, "bear", NOW + 2)).dir).toBeNull(); // and cleared
     // Clearing freed a row, so the token refused above now takes it.
-    expect(await toggleVote(db, W1, T1, "bull", NOW + 3)).toBe("bull");
+    expect((await toggleVote(db, W1, T1, "bull", NOW + 3)).dir).toBe("bull");
   });
 });
 
 describe("votes", () => {
   it("casts, switches and clears", async () => {
-    expect(await toggleVote(db, W1, T1, "bull", NOW)).toBe("bull");
+    expect((await toggleVote(db, W1, T1, "bull", NOW)).dir).toBe("bull");
     expect(await votes(db, W1)).toEqual({ [T1]: "bull" });
-    expect(await toggleVote(db, W1, T1, "bear", NOW + 1)).toBe("bear"); // the other direction switches
+    expect((await toggleVote(db, W1, T1, "bear", NOW + 1)).dir).toBe("bear"); // the other direction switches
     expect(await votes(db, W1)).toEqual({ [T1]: "bear" });
-    expect(await toggleVote(db, W1, T1, "bear", NOW + 2)).toBeNull(); // the same direction clears
+    expect((await toggleVote(db, W1, T1, "bear", NOW + 2)).dir).toBeNull(); // the same direction clears
     expect(await votes(db, W1)).toEqual({});
-    expect(await toggleVote(db, W1, T1, "bear", NOW + 3)).toBe("bear"); // and casts again
+    expect((await toggleVote(db, W1, T1, "bear", NOW + 3)).dir).toBe("bear"); // and casts again
+  });
+
+  /**
+   * The client paints the new count from this answer, so a write that only said which way the
+   * wallet now leans left the screen to a refetch — and the refetch reads a cache that is up to
+   * thirty seconds old (the "my vote doesn't show" report, 23 Sep). The counts must be the
+   * transaction's own, not a second read a moment later.
+   */
+  it("answers the token's counts, and the same ones `voteCounts` reads", async () => {
+    await toggleVote(db, W2, T1, "bull", NOW); // a bystander's vote, which every answer must include
+    const agree = async (got: { bull: number; bear: number }) =>
+      expect(got).toEqual((await voteCounts(db, [T1]))[T1]);
+
+    const cast = await toggleVote(db, W1, T1, "bull", NOW + 1);
+    expect(cast).toEqual({ dir: "bull", counts: { bull: 2, bear: 0 } });
+    await agree(cast.counts);
+
+    const switched = await toggleVote(db, W1, T1, "bear", NOW + 2);
+    expect(switched).toEqual({ dir: "bear", counts: { bull: 1, bear: 1 } });
+    await agree(switched.counts);
+
+    const cleared = await toggleVote(db, W1, T1, "bear", NOW + 3);
+    expect(cleared).toEqual({ dir: null, counts: { bull: 1, bear: 0 } });
+    await agree(cleared.counts);
+  });
+
+  it("counts only the token written, never the wallet's other votes", async () => {
+    await toggleVote(db, W1, T2, "bull", NOW);
+    expect((await toggleVote(db, W1, T1, "bull", NOW + 1)).counts).toEqual({ bull: 1, bear: 0 });
   });
 
   it("stamps updated_at on every write", async () => {

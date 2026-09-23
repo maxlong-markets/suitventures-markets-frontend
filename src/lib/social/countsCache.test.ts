@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import type { VoteCount } from "@/lib/social/store";
-import { clearCountsCache, countsCacheSize, countsFor } from "./countsCache";
+import { clearCountsCache, countsCacheSize, countsFor, rememberCounts } from "./countsCache";
 
 const { voteCounts } = vi.hoisted(() => ({
   voteCounts: vi.fn<(db: unknown, ids: readonly string[]) => Promise<Record<string, VoteCount>>>(),
@@ -105,5 +105,53 @@ describe("countsFor", () => {
     voteCounts.mockClear();
     await countsFor(db, [rest[0]], NOW + 32); // a bystander, still within its own TTL
     expect(voteCounts).not.toHaveBeenCalled(); // it must still be a hit — nothing displaced it
+  });
+});
+
+/**
+ * The write path's half of the cache. Without it a vote landed in the store while the pairs list
+ * and `/api/votes` kept answering the pre-vote number for up to thirty seconds, so the client's
+ * own refetch after the write put the count back where it was (the "my vote doesn't show" report,
+ * 23 Sep).
+ */
+describe("rememberCounts", () => {
+  it("replaces what a later read inside the window sees, without a query", async () => {
+    voteCounts.mockResolvedValue({ [T1]: { bull: 3, bear: 1 } });
+    await countsFor(db, [T1], NOW);
+    rememberCounts(T1, { bull: 4, bear: 1 }, NOW + 1);
+    voteCounts.mockClear();
+    await expect(countsFor(db, [T1], NOW + 2)).resolves.toEqual({ [T1]: { bull: 4, bear: 1 } });
+    expect(voteCounts).not.toHaveBeenCalled();
+  });
+
+  it("restarts the id's thirty seconds rather than inheriting the replaced entry's age", async () => {
+    voteCounts.mockResolvedValue({ [T1]: { bull: 3, bear: 1 } });
+    await countsFor(db, [T1], NOW);
+    rememberCounts(T1, { bull: 4, bear: 1 }, NOW + 20);
+    voteCounts.mockClear();
+    // Past the first entry's TTL, inside the replacement's: the write, not the read, sets the clock.
+    await expect(countsFor(db, [T1], NOW + 31)).resolves.toEqual({ [T1]: { bull: 4, bear: 1 } });
+    expect(voteCounts).not.toHaveBeenCalled();
+  });
+
+  it("caches an id nobody has read yet", async () => {
+    rememberCounts(T2, { bull: 0, bear: 2 }, NOW);
+    await expect(countsFor(db, [T2], NOW + 1)).resolves.toEqual({ [T2]: { bull: 0, bear: 2 } });
+    expect(voteCounts).not.toHaveBeenCalled();
+  });
+
+  it("stays inside the cap, evicting the oldest entry the same way a read does", async () => {
+    const ids = Array.from({ length: 5_000 }, (_, i) => `0x${i.toString(16).padStart(40, "0")}`);
+    voteCounts.mockImplementation(async (_db, batch) =>
+      Object.fromEntries((batch as string[]).map((id) => [id, { bull: 0, bear: 0 }])),
+    );
+    for (let i = 0; i < ids.length; i++) await countsFor(db, [ids[i]], NOW + i);
+    expect(countsCacheSize()).toBe(5_000);
+
+    rememberCounts(T1, { bull: 1, bear: 0 }, NOW + ids.length); // a 5,001st id
+    expect(countsCacheSize()).toBe(5_000);
+    voteCounts.mockClear();
+    await countsFor(db, [ids[0]], NOW + ids.length); // the oldest went, so this is a miss again
+    expect(voteCounts).toHaveBeenCalledTimes(1);
   });
 });

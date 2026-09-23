@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
+import { clearCountsCache, countsCacheSize, countsFor } from "@/lib/social/countsCache";
 import { WRITE_LIMIT, allowWrite, rateLimitSize, resetRateLimit } from "@/lib/social/rateLimit";
 import { VOTES_CAP, votes } from "@/lib/social/store";
 import { nowSec } from "@/lib/time";
@@ -30,6 +31,7 @@ afterAll(async () => {
 beforeEach(async () => {
   vi.stubEnv("SESSION_SECRET", TEST_SESSION_SECRET);
   resetRateLimit();
+  clearCountsCache();
   await db.exec("truncate market.votes");
 });
 afterEach(() => vi.unstubAllEnvs());
@@ -55,14 +57,43 @@ describe("POST /api/me/votes/[address]", () => {
     expect((await post(T1, { dir: "bull" }, sessionHeader(WALLET))).status).toBe(503);
   });
 
-  it("casts, switches and clears, answering the new direction each time", async () => {
+  it("casts, switches and clears, answering the new direction and the token's fresh counts each time", async () => {
     const cast = await post(T1, { dir: "bull" }, sessionHeader(WALLET));
     expect(cast.status).toBe(200);
     expect(cast.headers.get("Cache-Control")).toBe("no-store");
-    await expect(cast.json()).resolves.toEqual({ dir: "bull" });
-    await expect((await post(T1, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: "bear" });
-    await expect((await post(T1, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: null });
+    await expect(cast.json()).resolves.toEqual({ dir: "bull", bull: 1, bear: 0 });
+    await expect((await post(T1, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: "bear", bull: 0, bear: 1 });
+    await expect((await post(T1, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: null, bull: 0, bear: 0 });
     expect(await votes(db, WALLET)).toEqual({});
+  });
+
+  /**
+   * The counts the pairs list and `/api/votes` serve come from `countsFor`, whose entries live for
+   * thirty seconds. Before this, a vote landed in the store while every reader kept answering the
+   * pre-vote number, so the client's own refetch after the write painted the count back to where
+   * it had been — the "right after I vote, it doesn't show" half of the 23 Sep report.
+   */
+  it("refreshes the token's counts cache, so a read inside the thirty-second window sees the vote", async () => {
+    const now = nowSec();
+    // The page load just before the vote: the id is cached at its pre-vote count.
+    await expect(countsFor(db, [T1], now)).resolves.toEqual({ [T1]: { bull: 0, bear: 0 } });
+
+    await post(T1, { dir: "bull" }, sessionHeader(WALLET));
+    await expect(countsFor(db, [T1], now + 1)).resolves.toEqual({ [T1]: { bull: 1, bear: 0 } });
+
+    // And the same on the way back out: clearing the vote must not leave the 1 behind either.
+    await post(T1, { dir: "bull" }, sessionHeader(WALLET));
+    await expect(countsFor(db, [T1], now + 2)).resolves.toEqual({ [T1]: { bull: 0, bear: 0 } });
+  });
+
+  it("leaves other tokens' cached counts alone", async () => {
+    const now = nowSec();
+    const T2 = `0x${"2".repeat(40)}`;
+    await db.query("insert into market.votes (wallet, token_id, dir, updated_at) values ($1, $2, 'bear', $3)", [OTHER, T2, now]);
+    await expect(countsFor(db, [T2], now)).resolves.toEqual({ [T2]: { bull: 0, bear: 1 } });
+    await post(T1, { dir: "bull" }, sessionHeader(WALLET));
+    expect(countsCacheSize()).toBe(2);
+    await expect(countsFor(db, [T2], now + 1)).resolves.toEqual({ [T2]: { bull: 0, bear: 1 } });
   });
 
   it("lowercases the path segment", async () => {
@@ -100,7 +131,7 @@ describe("POST /api/me/votes/[address]", () => {
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     await expect(res.json()).resolves.toEqual({ error: "too many votes" });
     // A token the wallet already voted on is not a new row, so the switch goes through at the cap.
-    await expect((await post(SEEDED, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: "bear" });
+    await expect((await post(SEEDED, { dir: "bear" }, sessionHeader(WALLET))).json()).resolves.toEqual({ dir: "bear", bull: 0, bear: 1 });
   });
 
   it("ignores a wallet query parameter and a body wallet field: the vote still lands under the cookie's wallet", async () => {
@@ -113,7 +144,7 @@ describe("POST /api/me/votes/[address]", () => {
       { params: Promise.resolve({ address: T1 }) },
     );
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ dir: "bull" });
+    await expect(res.json()).resolves.toEqual({ dir: "bull", bull: 1, bear: 0 });
     expect(await votes(db, WALLET)).toEqual({ [T1]: "bull" });
     expect(await votes(db, OTHER)).toEqual({});
   });
