@@ -31,7 +31,9 @@ type Phase = (typeof PHASES)[number];
  * 7: pruneHolders over every token the coverage set no longer names and nobody has opened in the last
  * KEEP_REQUESTED_SEC), "probe" (probePools over pools active in the last PROBE_ACTIVE_SEC, cursor_text = its
  * lastId, saved after every page it processes rather than once at the end — I3), then phase "" and done =
- * true. Resumes from the stored phase and cursor; stops early (done = false) at the deadline.
+ * true. Resumes from the stored phase and cursor — except a stored "probe", which resumes the walk from its
+ * cursor while the run still starts at the front (24 Sep 2026; see runNightly's own comment); stops early
+ * (done = false) at the deadline.
  *
  * "holders" sits between prune and probe for the same reason prune does: it is the second thing protecting
  * the store from unbounded growth (balances, not swaps), it carries no chain request and no cursor of its
@@ -96,14 +98,26 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
   };
   // "" is a finished run, so the next one starts over; a known current phase resumes after its stored cursor;
   // a phase from before Task 6 ("tokens"/"pools") is unknown to the new PHASES list and also lands here.
-  let phase: Phase = (PHASES as readonly string[]).includes(state.phase) ? (state.phase as Phase) : "listed";
-  let afterId = phase === state.phase ? state.cursorText : "";
+  //
+  // ONE exception, found live on 24 Sep 2026: a stored "probe" is a resume POINT for the probe's own walk,
+  // never a starting phase. Probe is deliberately the one phase allowed to end a run not-done, and it stays
+  // unfinished for weeks (PROBE_RUN_CAP a night against 263,180 pools was 69 more nights that morning) — so
+  // resuming AT it sent every night after the first straight back into probe, and listed, prune and holders
+  // never ran again. Production that morning: 980,942 trades a day past the retention window still stored,
+  // the database growing about 660 MB a day against windows (D39) whose whole job is to hold it near 3 GB.
+  // The reorder that put prune before probe was the right half of this fix; this is the other half.
+  const resumingProbe = state.phase === "probe";
+  let phase: Phase = !resumingProbe && (PHASES as readonly string[]).includes(state.phase) ? (state.phase as Phase) : "listed";
+  // The probe's lastId survives the phases in front of it — they have no cursor of their own and must not
+  // discard its walk — and is cleared only where it always was: by the run that finishes the walk, at the
+  // end of this function. Every phase transition below therefore carries it rather than writing "".
+  let afterId = resumingProbe || phase === state.phase ? state.cursorText : "";
 
   if (phase === "listed") {
     // No request of its own, so no deadline check: one statement over the whole table.
     r.listed = await recomputeListedPools(db, "all");
     phase = "prune";
-    await saveCursors(db, "nightly", { phase, cursorText: "" });
+    await saveCursors(db, "nightly", { phase, cursorText: afterId });
   }
   if (phase === "prune") {
     // Neither has a request or a cursor of its own (retention.ts) — a deadline stop just leaves rows for the
@@ -117,8 +131,7 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     r.prunedCandles = candles.deleted;
     if (!swaps.done || !candles.done) return finish(false, "prune");
     phase = "holders";
-    afterId = "";
-    await saveCursors(db, "nightly", { phase, cursorText: "" });
+    await saveCursors(db, "nightly", { phase, cursorText: afterId });
   }
   if (phase === "holders") {
     // Design section 7: keep the table's tokens and anything opened in the last week, drop the rest.
@@ -148,8 +161,7 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     r.prunedHolders = pruned.tokens;
     if (!pruned.done) return finish(false, "holders");
     phase = "probe";
-    afterId = "";
-    await saveCursors(db, "nightly", { phase, cursorText: "" });
+    await saveCursors(db, "nightly", { phase, cursorText: afterId });
   }
   if (phase === "probe") {
     if (opts.quoter) {

@@ -74,23 +74,30 @@ describe("runNightly", () => {
     expect(await nightly()).toMatchObject({ done: true, phase: "", listed: 2 });
   });
 
-  it('resumes a stored "probe" phase after its cursor, skipping "listed" again — and, because "probe" is still the last phase, also skips "prune" and "holders" for this one invocation (a leftover from the pre-reorder order; see nightly.ts\'s doc comment)', async () => {
+  it('treats a stored "probe" phase as a resume POINT, not a starting phase: "listed", "prune" and "holders" all still run, and the walk keeps its place (24 Sep 2026, found live)', async () => {
+    // Probe is deliberately the one phase allowed to end a run not-done, and it stays unfinished for weeks.
+    // Until this was fixed, resuming AT it skipped the three cheap phases on every night after the first:
+    // production that morning held 980,942 trades a day past the retention window, with about 69 nights of
+    // probe still to walk, so the prune that protects the disk would not have run again until December.
     await upsertQuotes(db, [quoteRec()], [priceRec()]);
     await seedTokensAndPools();
-    await db.query("update market.tokens set listed_pool_id = null"); // proves "listed" really did not re-run below
+    await db.query("update market.tokens set listed_pool_id = null"); // "listed" must re-run and fill these in
     const cutoff = retentionCutoff(T0 + 1000);
-    await insertSwaps(db, [swapRec({ txHash: txHash(0xe9), timestamp: cutoff - 10 })]); // stale, but "prune" is skipped this cycle
-    await seedHolderList(TOKEN_D, T0 + 1000 - KEEP_REQUESTED_SEC - 86_400); // long past its keep window, but "holders" is skipped too
+    await insertSwaps(db, [swapRec({ txHash: txHash(0xe9), timestamp: cutoff - 10 })]); // "prune" must take this
+    await seedHolderList(TOKEN_D, T0 + 1000 - KEEP_REQUESTED_SEC - 86_400); // "holders" must drop this
     await saveCursors(db, "nightly", { phase: "probe", cursorText: POOL_A });
     const quoter: Quoter = { exactIn: async () => 1n, exactOut: async () => { throw new Error("unused by probePools"); } };
+
     const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
-    // only POOL_B, strictly after POOL_A; pruned/prunedCandles/prunedHolders stay 0 — each block only runs when
-    // `phase` is literally its own name on entry, and this resume starts at "probe" directly, past all three.
-    expect(result).toMatchObject({ done: true, phase: "", listed: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, probed: 1, routable: 1 });
-    expect(await holderTokens()).toEqual([{ token_id: TOKEN_D }]);
-    expect(await listed()).toEqual([{ id: TOKEN_A, listed_pool_id: null }, { id: TOKEN_B, listed_pool_id: null }]);
-    // The stale swap survives THIS run (prune skipped) — proving the skip is real, not just an unchecked count.
-    expect(await db.query("select tx_hash from market.swaps")).toEqual([{ tx_hash: txHash(0xe9) }]);
+
+    // Every cheap phase ran ...
+    expect(result).toMatchObject({ done: true, phase: "", listed: 2, pruned: 1, prunedHolders: 1 });
+    expect(await db.query("select tx_hash from market.swaps")).toEqual([]);
+    expect(await holderTokens()).toEqual([]);
+    expect(await listed()).toEqual([{ id: TOKEN_A, listed_pool_id: POOL_A }, { id: TOKEN_B, listed_pool_id: POOL_B }]);
+    // ... and the walk resumed rather than restarting: POOL_A is behind the cursor, so only POOL_B is probed.
+    expect(result).toMatchObject({ probed: 1, routable: 1 });
+    expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "" });
   });
 
   it('resumes a stored "prune" phase directly, skipping "listed" again, then continues into "probe" in the same invocation (a run interrupted mid-prune, and a leftover phase from the pre-reorder order too)', async () => {
