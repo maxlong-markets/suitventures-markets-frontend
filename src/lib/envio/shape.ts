@@ -110,8 +110,8 @@ export function shapePairs(
     const priceUsd = priceQuote * usdPrice;
     const supply = Number(BigInt(t.totalSupply)) / 10 ** t.decimals;
     const tvlQuote = units(p.tvlQuote, p.quote.decimals);
-    const tvlToken = units(p.tvlToken, t.decimals);
-    const liquidity = q === null || tvlQuote === null || tvlToken === null ? null : (tvlQuote + tvlToken * priceQuote) * q;
+    // Quote side only — see dbShape.pairFromRow for why (D43). These two must stay in step.
+    const liquidity = q === null || tvlQuote === null ? null : tvlQuote * q;
     const w = windows.get(p.id);
     const ref1 = w?.ref1h ?? undefined;
     const ref24 = w?.ref24h ?? undefined;

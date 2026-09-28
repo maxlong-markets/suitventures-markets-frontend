@@ -29,8 +29,10 @@ export function pairFromRow(row: PairRow, stats: WindowStats | undefined, nowSec
   const priceUsd = priceQuote * usdPrice;
   const supply = Number(BigInt(row.total_supply)) / 10 ** row.decimals;
   const tvlQuote = units(row.tvl_quote, row.quote_decimals);
-  const tvlToken = units(row.tvl_token, row.decimals);
-  const liquidity = q === null || tvlQuote === null || tvlToken === null ? null : (tvlQuote + tvlToken * priceQuote) * q;
+  // Quote side only: the real money in the pool, and the side a seller is paid out of. The token
+  // side at the token's own price values a one-sided position at its market cap — KIDKOBS, a
+  // Doppler launch, read $20,005 of "liquidity" against about $1 of USDG on 28 Sep 2026 (D43).
+  const liquidity = q === null || tvlQuote === null ? null : tvlQuote * q;
   const ref1 = stats?.ref1h ?? undefined;
   const ref24 = stats?.ref24h ?? undefined;
   const origin = toOrigin(row.pool_origin);

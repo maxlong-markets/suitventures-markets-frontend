@@ -52,8 +52,9 @@ describe("shapePairs", () => {
     expect(pair!.fdv).toBeCloseTo(0.000866 * 224.4 * 1e9, 3);
     expect(pair!.mcap).toBe(pair!.fdv);
     expect(pair!.vol24h).toBeCloseTo(18.6 * 224.4, 6);
-    // liquidity = (10000 NVDA + 1,000,000 AI * 0.000866) * 224.4
-    expect(pair!.liquidity).toBeCloseTo((10_000 + 1_000_000 * 0.000866) * 224.4, 3);
+    // liquidity = the quote side only (D43): 10,000 NVDA * 224.4. The 1,000,000 AI on the token
+    // side is deliberately not counted.
+    expect(pair!.liquidity).toBeCloseTo(10_000 * 224.4, 3);
   });
   it("computes changes against the hour buckets an hour and a day ago", () => {
     expect(pair!.change1h).toBeCloseTo((0.000866 / 0.00088 - 1) * 100, 9);

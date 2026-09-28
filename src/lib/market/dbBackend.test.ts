@@ -162,7 +162,9 @@ describe("createDbBackend reads", () => {
     expect(out[0]!.priceUsd).toBeCloseTo(0.000866 * 120.5, 12);
     expect(out[0]!.change1h).toBeCloseTo((0.000866 / 0.00088 - 1) * 100, 9);
     expect(out[0]!.vol24h).toBeCloseTo(18.6 * 120.5, 6);
-    expect(out[1]).toMatchObject({ poolId: PB, origin: "Pons", quote: "USDG", stale: false, liquidity: 5 + 1_000_000 * 0.5 });
+    // liquidity is the quote side alone (D43): 5 USDG. The 1,000,000 tokens at 0.5 USDG that the
+    // old both-sides formula added are deliberately not counted.
+    expect(out[1]).toMatchObject({ poolId: PB, origin: "Pons", quote: "USDG", stale: false, liquidity: 5 });
     expect(out[2]).toMatchObject({ stale: true, priceUsd: 0, liquidity: null, change1h: null, hook: "None" });
     expect(out[3]).toMatchObject({ stale: true, feeTier: "Dynamic", createdAt: (NOW - 5_000_000) * 1000 });
   });

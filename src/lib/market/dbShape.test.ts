@@ -28,6 +28,22 @@ describe("pairFromRow tradeable", () => {
   });
 });
 
+describe("pairFromRow liquidity", () => {
+  it("counts the quote side only", () => {
+    // 1,000 NVDA at $100. The 1,000 tokens at 0.5 NVDA each would have added $50,000 before D43.
+    expect(pairFromRow(row, undefined, NOW).liquidity).toBeCloseTo(100_000, 6);
+  });
+
+  it("reads zero for a one-sided pool holding a whole supply and no money", () => {
+    const oneSided = { ...row, tvl_quote: "0", tvl_token: "1000000000000000000000000000" };
+    expect(pairFromRow(oneSided, undefined, NOW).liquidity).toBe(0);
+  });
+
+  it("is null when the quote has no fresh USD price", () => {
+    expect(pairFromRow({ ...row, usd_price: null }, undefined, NOW).liquidity).toBeNull();
+  });
+});
+
 describe("pairFromRow hookAddress", () => {
   it("lowercases the listed pool's hooks field", () => {
     expect(pairFromRow(row, undefined, NOW).hookAddress).toBe("0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544");

@@ -331,10 +331,7 @@ function recomputePrimaryPool(state: FoldState, tokenId: string, ctx: FoldContex
   const ranks: PoolRank[] = pools.map((p) => ({
     id: p.id,
     quoteId: p.quoteId,
-    tvlToken: p.tvlToken ?? undefined,
     tvlQuote: p.tvlQuote ?? undefined,
-    priceQuote: p.priceQuote,
-    tokenDecimals: token.decimals,
     quoteDecimals: resolveQuoteDecimals(state, p.quoteId),
     swapCount: p.swapCount,
     createdAt: p.createdAt,

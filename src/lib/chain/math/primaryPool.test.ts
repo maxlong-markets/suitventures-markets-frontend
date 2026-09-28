@@ -7,8 +7,7 @@ const usd = (q: string) => (q === NVDA ? 224.4 : q === USDG ? 1 : undefined);
 
 function pool(over: Partial<PoolRank>): PoolRank {
   return {
-    id: "p", quoteId: NVDA, tvlToken: 0n, tvlQuote: 0n, priceQuote: 0.001,
-    tokenDecimals: 18, quoteDecimals: 18, swapCount: 0, createdAt: 100, ...over,
+    id: "p", quoteId: NVDA, tvlQuote: 0n, quoteDecimals: 18, swapCount: 0, createdAt: 100, ...over,
   };
 }
 
@@ -17,23 +16,23 @@ describe("choosePrimaryPool", () => {
     expect(choosePrimaryPool([], usd)).toBeUndefined();
   });
   it("picks the highest USD TVL across quotes", () => {
-    const a = pool({ id: "a", quoteId: NVDA, tvlQuote: 10n * 10n ** 18n, tvlToken: 0n }); // 10 NVDA = $2,244
-    const b = pool({ id: "b", quoteId: USDG, quoteDecimals: 6, tvlQuote: 3000n * 10n ** 6n, tvlToken: 0n }); // $3,000
+    const a = pool({ id: "a", quoteId: NVDA, tvlQuote: 10n * 10n ** 18n }); // 10 NVDA = $2,244
+    const b = pool({ id: "b", quoteId: USDG, quoteDecimals: 6, tvlQuote: 3000n * 10n ** 6n }); // $3,000
     expect(choosePrimaryPool([a, b], usd)).toBe("b");
   });
-  it("counts the token side at the pool price", () => {
-    const a = pool({ id: "a", tvlQuote: 1n * 10n ** 18n, tvlToken: 0n }); // 1 NVDA
-    const b = pool({ id: "b", tvlQuote: 0n, tvlToken: 5000n * 10n ** 18n, priceQuote: 0.001 }); // 5 NVDA of token
-    expect(choosePrimaryPool([a, b], usd)).toBe("b");
+  it("ignores the token side, so a one-sided pool loses to any pool holding real money", () => {
+    const a = pool({ id: "a", tvlQuote: 1n * 10n ** 18n }); // 1 NVDA of real money, never traded
+    const b = pool({ id: "b", tvlQuote: 0n, swapCount: 99 }); // a whole supply, no money in the pool
+    expect(choosePrimaryPool([a, b], usd)).toBe("a");
   });
   it("falls back to swap count when TVL is unavailable", () => {
-    const a = pool({ id: "a", tvlQuote: undefined, tvlToken: undefined, swapCount: 3 });
-    const b = pool({ id: "b", tvlQuote: undefined, tvlToken: undefined, swapCount: 9 });
+    const a = pool({ id: "a", tvlQuote: undefined, swapCount: 3 });
+    const b = pool({ id: "b", tvlQuote: undefined, swapCount: 9 });
     expect(choosePrimaryPool([a, b], usd)).toBe("b");
   });
   it("falls back to the earliest pool last", () => {
-    const a = pool({ id: "a", tvlQuote: undefined, tvlToken: undefined, createdAt: 50 });
-    const b = pool({ id: "b", tvlQuote: undefined, tvlToken: undefined, createdAt: 60 });
+    const a = pool({ id: "a", tvlQuote: undefined, createdAt: 50 });
+    const b = pool({ id: "b", tvlQuote: undefined, createdAt: 60 });
     expect(choosePrimaryPool([a, b], usd)).toBe("a");
   });
   it("treats a quote without a USD price as zero TVL", () => {
