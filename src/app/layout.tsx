@@ -18,12 +18,17 @@ const yellowtail = Yellowtail({
 
 export const metadata: Metadata = {
   title: {
-    default: "SuitVentures Markets",
-    template: "%s · SuitVentures Markets",
+    default: "MaxLong Markets",
+    template: "%s · MaxLong Markets",
   },
+  // Under 160 characters so Google shows it whole, and written as one self-contained factual
+  // sentence pair, because an AI search engine quotes a line like this verbatim — so every
+  // entity in it has to be real. "Bags" was named here before and is not a launchpad this app
+  // recognises (Origin in src/lib/types.ts); a wrong fact is worse than a vague one, since it
+  // gets repeated. "Stock-paired" is the part nothing else on this chain can claim.
   description:
-    "Every memecoin pair on Robinhood Chain — LONG, Pons, Bags and SuitVentures launches in one table, swapped through the SuitVentures router.",
-  applicationName: "SuitVentures Markets",
+    "Every memecoin pair on Robinhood Chain, in one table. Live prices, volume and holders for stock-paired tokens from LONG, Pons and any Uniswap v4 pool.",
+  applicationName: "MaxLong Markets",
 };
 
 export const viewport: Viewport = {

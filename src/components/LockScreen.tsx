@@ -99,7 +99,7 @@ function connectContent(openConnectModal?: () => void): Content {
     headline: "This floor is for Suits.",
     // Non-breaking spaces hold the collection's name together: text-balance evens the two
     // lines, and left alone it will happily break after "The".
-    sub: "LongMarkets is open to holders of The Suits NFT. Connect your wallet to check.",
+    sub: "MaxLong Markets is open to holders of The Suits NFT. Connect your wallet to check.",
     action: (
       <button type="button" onClick={openConnectModal} className={PRIMARY_BTN}>
         Connect Wallet
@@ -133,8 +133,8 @@ function getContent(
         // `short()` answers "" for a missing address, which would open the sentence on a bare
         // space. A wallet is always connected to be denied, but the copy should not depend on it.
         sub: ctx.address
-          ? `${short(ctx.address)} holds 0 Suits. A Suit is the key to LongMarkets.`
-          : "This wallet holds 0 Suits. A Suit is the key to LongMarkets.",
+          ? `${short(ctx.address)} holds 0 Suits. A Suit is the key to MaxLong Markets.`
+          : "This wallet holds 0 Suits. A Suit is the key to MaxLong Markets.",
         action: (
           <>
             <a
@@ -212,7 +212,7 @@ export default function LockScreen({
         <div className="mx-auto w-full max-w-[440px] text-center">
           <SuitsMark size={40} className="mx-auto opacity-90" />
           <div className="mt-[18px] flex items-baseline justify-center gap-2">
-            <span className="font-script text-[30px] leading-none text-chalk">SuitVentures</span>
+            <span className="font-script text-[30px] leading-none text-chalk">MaxLong</span>
             <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-ink-50">
               Markets
             </span>

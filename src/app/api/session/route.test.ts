@@ -11,7 +11,7 @@ const { verifySiwe } = vi.hoisted(() => ({
 }));
 // The real verifier has its own test with real signatures and a mock transport; here the route's own
 // job is under test — the nonce cookie, the domain it passes on, and the two cookies it writes.
-vi.mock("@/lib/session/siwe", () => ({ verifySiwe, SIWE_STATEMENT: "Sign in to SuitVentures Markets" }));
+vi.mock("@/lib/session/siwe", () => ({ verifySiwe, SIWE_STATEMENT: "Sign in to MaxLong Markets" }));
 
 const SECRET = "0123456789abcdef0123456789abcdef";
 const ADDR = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266" as Address;
@@ -20,7 +20,7 @@ const MESSAGE = [
   "localhost:3000 wants you to sign in with your Ethereum account:",
   "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
   "",
-  "Sign in to SuitVentures Markets",
+  "Sign in to MaxLong Markets",
   "",
   "URI: http://localhost:3000",
   "Version: 1",

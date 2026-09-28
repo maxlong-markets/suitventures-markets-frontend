@@ -291,7 +291,7 @@ describe("EnvioDataSource sessions and user data", () => {
     expect(parsed.uri).toBe("https://markets.suitventures.xyz");
     expect(parsed.chainId).toBe(4663);
     expect(parsed.version).toBe("1");
-    expect(parsed.statement).toBe("Sign in to SuitVentures Markets");
+    expect(parsed.statement).toBe("Sign in to MaxLong Markets");
     expect(parsed.nonce).toBe("cafebabe");
     expect(parsed.address?.toLowerCase()).toBe(WALLET.toLowerCase());
     const issuedAt = parsed.issuedAt as Date;

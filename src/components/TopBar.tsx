@@ -52,7 +52,7 @@ export default function TopBar() {
             <SuitsMark size={22} />
             <span className="flex items-baseline gap-2">
               <span className="font-script text-[22px] leading-none text-chalk">
-                SuitVentures
+                MaxLong
               </span>
               <span className="hidden font-mono text-[9.5px] uppercase tracking-[0.22em] text-ink-50 tablet:inline">
                 Markets

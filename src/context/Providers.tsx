@@ -106,7 +106,7 @@ export default function Providers({
           theme={theme}
           modalSize="wide"
           initialChain={robinhoodChain.id}
-          appInfo={{ appName: "SuitVentures Markets" }}
+          appInfo={{ appName: "MaxLong Markets" }}
         >
           <DataSourceProvider>
             <AppStateProvider>{children}</AppStateProvider>

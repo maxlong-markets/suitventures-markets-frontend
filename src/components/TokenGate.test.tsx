@@ -11,6 +11,7 @@ const h = vi.hoisted(() => ({
   gateEnabled: vi.fn(() => true),
   /** Records what TokenGate actually asked the balance of, so the pass-through is testable. */
   askedFor: vi.fn(),
+  pathname: "/" as string,
 }));
 
 vi.mock("@/context/AppState", () => ({ useAppState: () => ({ address: h.address }) }));
@@ -21,6 +22,7 @@ vi.mock("@/lib/suits", () => ({
   },
   gateEnabled: h.gateEnabled,
 }));
+vi.mock("next/navigation", () => ({ usePathname: () => h.pathname }));
 // A stub that surfaces only what this suite needs to see — the status TokenGate handed it, and
 // the wallet it named — so a wrong branch shows up as wrong text rather than requiring this file
 // to know anything about LockScreen's real markup, which has its own tests.
@@ -39,6 +41,7 @@ describe("TokenGate", () => {
     h.address = WALLET;
     h.gateEnabled.mockReset().mockReturnValue(true);
     h.askedFor.mockClear();
+    h.pathname = "/";
   });
 
   // The gate deliberately has no mount gate: pinning the address to undefined until after
@@ -101,5 +104,41 @@ describe("TokenGate", () => {
     render(<TokenGate>{CHILDREN}</TokenGate>);
     expect(screen.getByTestId("app")).toBeTruthy();
     expect(screen.queryByTestId("lock-screen")).toBeNull();
+  });
+
+  // The whole reason /t/[address] is exempt: Googlebot is always denied, and it must still get
+  // the page's own public facts layer rather than the lock screen (2026-09-28 SEO work).
+  it("renders children on a /t/... path even when access is denied", () => {
+    h.pathname = "/t/0xabc";
+    h.access = { status: "denied", count: 0n };
+    render(<TokenGate>{CHILDREN}</TokenGate>);
+    expect(screen.getByTestId("app")).toBeTruthy();
+    expect(screen.queryByTestId("lock-screen")).toBeNull();
+  });
+
+  it("renders children on a /t/... path even when checking or erroring", () => {
+    h.pathname = "/t/0xabc";
+    h.access = { status: "error", retry: vi.fn() };
+    render(<TokenGate>{CHILDREN}</TokenGate>);
+    expect(screen.getByTestId("app")).toBeTruthy();
+    expect(screen.queryByTestId("lock-screen")).toBeNull();
+  });
+
+  // The prefix trap: "/traders" starts with the same two letters as "/t/" but has no public
+  // layer of its own, so it must stay fully gated — a naive `startsWith("/t")` would exempt it.
+  it("still renders the lock screen on /traders when denied", () => {
+    h.pathname = "/traders";
+    h.access = { status: "denied", count: 0n };
+    render(<TokenGate>{CHILDREN}</TokenGate>);
+    expect(screen.queryByTestId("app")).toBeNull();
+    expect(screen.getByTestId("lock-screen").textContent).toBe("denied");
+  });
+
+  it("renders the lock screen on / when denied, unchanged", () => {
+    h.pathname = "/";
+    h.access = { status: "denied", count: 0n };
+    render(<TokenGate>{CHILDREN}</TokenGate>);
+    expect(screen.queryByTestId("app")).toBeNull();
+    expect(screen.getByTestId("lock-screen").textContent).toBe("denied");
   });
 });

@@ -23,7 +23,7 @@ export const projectId =
 export const hasWalletConnectProjectId = projectId !== PLACEHOLDER_PROJECT_ID;
 
 export const wagmiConfig = getDefaultConfig({
-  appName: "SuitVentures Markets",
+  appName: "MaxLong Markets",
   projectId,
   chains: [robinhoodChain],
   // Public node first, the paid endpoint (NEXT_PUBLIC_RPC_URL) only when the public one refuses or

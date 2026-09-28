@@ -3,7 +3,7 @@ import { parseSiweMessage, verifySiweMessage } from "viem/siwe";
 import { robinhoodChain } from "@/lib/chain";
 
 /** The one line the wallet shows above the fields. The client builds the message with it; this module is what checks the result. */
-export const SIWE_STATEMENT = "Sign in to SuitVentures Markets";
+export const SIWE_STATEMENT = "Sign in to MaxLong Markets";
 
 export type SiweVerifyInput = { message: string; signature: Hex; expectedNonce: string; domain: string; now: number };
 

@@ -32,7 +32,7 @@ describe("SignModal", () => {
 
   it("shows what is about to be signed without inventing a message", () => {
     render(<SignModal />);
-    expect(screen.getByText(`Sign in to SuitVentures Markets · ${short(WALLET)} · Chain 4663`)).toBeTruthy();
+    expect(screen.getByText(`Sign in to MaxLong Markets · ${short(WALLET)} · Chain 4663`)).toBeTruthy();
     expect(screen.getByText("Sign to save your watchlist")).toBeTruthy();
   });
 

@@ -27,7 +27,7 @@ function SignDialog({
    * sign time around a nonce only the server can issue, so it does not exist yet. The address is
    * shortened for the eye; the message carries it in full.
    */
-  const preview = `Sign in to SuitVentures Markets · ${short(address)} · Chain ${robinhoodChain.id}`;
+  const preview = `Sign in to MaxLong Markets · ${short(address)} · Chain ${robinhoodChain.id}`;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

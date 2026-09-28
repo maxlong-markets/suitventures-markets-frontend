@@ -1,7 +1,7 @@
 import type { SwapCall } from "./quote/price";
 
 /**
- * Typed models for SuitVentures Markets. Every component consumes these —
+ * Typed models for MaxLong Markets. Every component consumes these —
  * never literals — so the Envio/Alchemy layer can replace the mock source
  * without touching UI code. The core interface is copied from the design
  * handoff README; additions are marked at the bottom.

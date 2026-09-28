@@ -42,7 +42,7 @@ const RPC_TIMEOUT_MS = 5_000;
 const DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/tokens/";
 
 /** DexScreener asks for an identifying agent; it rate-limits anonymous clients harder. */
-export const USER_AGENT = "LongMarkets/0.1 (+https://github.com/KobeSergio)";
+export const USER_AGENT = "MaxLongMarkets/0.1 (+https://github.com/KobeSergio)";
 
 /**
  * The whole lookup's budget, comfortably inside the route's `maxDuration = 30`. Four gateways

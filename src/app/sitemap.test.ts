@@ -1,0 +1,54 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PairsScope } from "@/lib/envio/pairs";
+import type { TokenPair } from "@/lib/types";
+import sitemap from "./sitemap";
+
+const { pairs } = vi.hoisted(() => ({
+  pairs: vi.fn<(scope: PairsScope) => Promise<TokenPair[]>>(),
+}));
+vi.mock("@/lib/market/backend", () => ({ getBackend: () => ({ kind: "db", pairs }) }));
+
+const T1 = `0x${"1".repeat(40)}`;
+const pair = (address: string) => ({ address, id: address }) as TokenPair;
+
+beforeEach(() => {
+  pairs.mockReset();
+});
+
+describe("sitemap", () => {
+  it("includes the homepage and a token entry per listed pair", async () => {
+    pairs.mockResolvedValue([pair(T1)]);
+    const entries = await sitemap();
+    const urls = entries.map((e) => e.url);
+    expect(urls).toContain("https://www.maxlong.markets");
+    expect(urls).toContain(`https://www.maxlong.markets/t/${T1}`);
+  });
+
+  // /traders and /watchlist are still gated, so both return the same lock screen `/` does.
+  // Listing them would submit three URLs of identical content — duplicate, thin, and a waste of
+  // the crawl budget the token pages need. They come back the day the gate lifts.
+  it("leaves the still-gated routes out, so no two submitted URLs render the same page", async () => {
+    pairs.mockResolvedValue([pair(T1)]);
+    const urls = (await sitemap()).map((e) => e.url);
+    expect(urls).not.toContain("https://www.maxlong.markets/traders");
+    expect(urls).not.toContain("https://www.maxlong.markets/watchlist");
+  });
+
+  it("lowercases the token address in case the backend ever hands back a checksummed one", async () => {
+    pairs.mockResolvedValue([pair(`0x${"A".repeat(40)}`)]);
+    const entries = await sitemap();
+    expect(entries.map((e) => e.url)).toContain(`https://www.maxlong.markets/t/0x${"a".repeat(40)}`);
+  });
+
+  it("returns just the static routes, not a 500, when the backend throws", async () => {
+    pairs.mockRejectedValue(new Error("db unavailable"));
+    const entries = await sitemap();
+    expect(entries.map((e) => e.url)).toEqual(["https://www.maxlong.markets"]);
+  });
+
+  it("caps the token entries well under Google's per-sitemap comfort zone", async () => {
+    pairs.mockResolvedValue(Array.from({ length: 500 }, (_, i) => pair(`0x${String(i).padStart(40, "0")}`)));
+    const entries = await sitemap();
+    expect(entries.length).toBeLessThanOrEqual(301); // the homepage + the 300-token cap
+  });
+});
