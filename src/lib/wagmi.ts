@@ -1,11 +1,9 @@
 import { cookieStorage, createStorage } from "wagmi";
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import {
-  coinbaseWallet,
   injectedWallet,
   metaMaskWallet,
   rabbyWallet,
-  walletConnectWallet,
 } from "@rainbow-me/rainbowkit/wallets";
 import { fallback, http } from "wagmi";
 import { BROWSER_RPC_URLS, robinhoodChain } from "./chain";
@@ -37,16 +35,18 @@ export const wagmiConfig = getDefaultConfig({
   // `injectedWallet` leads as the "Browser Wallet" fallback for any browser
   // wallet: it connects straight to whatever `window.ethereum` the page has,
   // so an extension the branded tiles below fail to detect still works.
+  //
+  // Coinbase Wallet and the standalone WalletConnect tile were dropped
+  // (28 Sep 2026, K). Note this removes the tiles, NOT the protocol: on a phone
+  // there is no extension to inject `window.ethereum`, so RainbowKit's MetaMask
+  // entry reaches the app through `metamask.app.link/wc?uri=…` — a WalletConnect
+  // URI. Mobile connect therefore still needs the provider package and a real
+  // `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`; dropping either takes iOS Safari down
+  // with it, and the only way in becomes MetaMask's own in-app browser.
   wallets: [
     {
       groupName: "Popular",
-      wallets: [
-        injectedWallet,
-        metaMaskWallet,
-        rabbyWallet,
-        coinbaseWallet,
-        walletConnectWallet,
-      ],
+      wallets: [injectedWallet, metaMaskWallet, rabbyWallet],
     },
   ],
   ssr: true,
