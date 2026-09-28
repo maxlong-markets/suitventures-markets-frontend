@@ -80,6 +80,12 @@
 
   --animate-shimmer: shimmer 1.4s linear infinite;
   --animate-ring: ring-spin 0.9s linear infinite;
+  /* The lock screen's one entrance: 240ms opacity+rise on mount, nowhere else in the app. */
+  --animate-lock-in: lock-in 240ms ease-out;
+  /* The lock screen's two walls of Suits. 90s over a track of 36 tiles is a ~22px/s drift —
+     slow enough to read as a room that is alive rather than a carousel asking to be watched. */
+  --animate-wall: wall 90s linear infinite;
+  --animate-wall-back: wall-back 90s linear infinite;
 
 }
 
@@ -95,6 +101,37 @@
 @keyframes ring-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes lock-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* The tile list is rendered twice, so -50% lands the second copy exactly where the first
+   began and the loop has no seam. */
+@keyframes wall {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes wall-back {
+  from {
+    transform: translateX(-50%);
+  }
+  to {
+    transform: translateX(0);
   }
 }
 
@@ -175,6 +212,17 @@
 
 @media (prefers-reduced-motion: reduce) {
   .skeleton {
+    animation: none;
+  }
+
+  .animate-lock-in {
+    animation: none;
+  }
+
+  /* The walls hold still. They are decoration, and the copy beside them is a locked door — the
+     last thing someone sensitive to motion needs is two rows of faces sliding past it. */
+  .animate-wall,
+  .animate-wall-back {
     animation: none;
   }
 }

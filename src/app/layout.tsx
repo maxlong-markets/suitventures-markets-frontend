@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Yellowtail } from "next/font/google";
 import { headers } from "next/headers";
 import Providers from "@/context/Providers";
+import TokenGate from "@/components/TokenGate";
 import TopBar from "@/components/TopBar";
 import ToastStack from "@/components/ToastStack";
 import SignModal from "@/components/SignModal";
@@ -38,8 +39,12 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     <html lang="en" className={`${yellowtail.variable} h-full antialiased`}>
       <body className="min-h-full">
         <Providers cookies={cookies}>
-          <TopBar />
-          <main>{children}</main>
+          {/* ToastStack and SignModal stay outside the gate: they are portals owned by
+              Providers, not part of the app a non-holder must not see (design doc §4.4). */}
+          <TokenGate>
+            <TopBar />
+            <main>{children}</main>
+          </TokenGate>
           <ToastStack />
           <SignModal />
         </Providers>
