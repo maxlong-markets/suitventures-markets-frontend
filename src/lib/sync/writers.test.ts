@@ -2,7 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import { POOL_A, QUOTE, T0, TOKEN_A, TOKEN_B, addr, candleRec, poolId, poolRec, priceRec, quoteRec, swapRec, tokenRec, txHash } from "./testRows";
-import { dedupe, insertSwaps, markSynced, recomputeListedPools, upsertCandles, upsertPools, upsertQuotes, upsertTokens } from "./writers";
+import {
+  SV_LISTING_WINDOW_SEC, dedupe, insertSwaps, markSynced, recomputeListedPools, svWindowClosedTokens, upsertCandles, upsertPools, upsertQuotes,
+  upsertTokens,
+} from "./writers";
 
 let db: Db;
 beforeAll(async () => { db = await testDb(); });
@@ -144,19 +147,43 @@ describe("recomputeListedPools", () => {
 
   it("takes the primary when it is sane and traded, else the sane traded pool with the most swaps", async () => {
     await seed();
-    expect(await recomputeListedPools(db, [TOKEN_A, TOKEN_B])).toBe(2);
+    expect(await recomputeListedPools(db, [TOKEN_A, TOKEN_B], T0)).toBe(2);
     expect(await listed()).toEqual({ [TOKEN_A]: POOL_A, [TOKEN_B]: poolId(0x14) });
   });
   it("sets null when no sane traded pool exists", async () => {
     await seed();
     await db.query("update market.pools set swap_count = 0 where token_id = $1", [TOKEN_B]);
-    expect(await recomputeListedPools(db, [TOKEN_B])).toBe(1);
+    expect(await recomputeListedPools(db, [TOKEN_B], T0)).toBe(1);
     expect((await listed())[TOKEN_B]).toBeNull();
   });
   it('"all" touches every token and an empty list touches none', async () => {
     await seed();
-    expect(await recomputeListedPools(db, "all")).toBe(2);
+    expect(await recomputeListedPools(db, "all", T0)).toBe(2);
     expect(await listed()).toEqual({ [TOKEN_A]: POOL_A, [TOKEN_B]: poolId(0x14) });
-    expect(await recomputeListedPools(db, [])).toBe(0);
+    expect(await recomputeListedPools(db, [], T0)).toBe(0);
+  });
+
+  it("lists an SV pool with no swaps for its first 24 hours only, and a traded one for good (instant launchpad design, 5.4)", async () => {
+    expect(SV_LISTING_WINDOW_SEC).toBe(86_400);
+    await upsertTokens(db, [tokenRec({ origin: "SV" })], T0);
+    await upsertPools(db, [poolRec({ origin: "SV", swapCount: 0, lastSwapAt: null, createdAt: T0 })], T0);
+    expect(await recomputeListedPools(db, [TOKEN_A], T0 + 86_399)).toBe(1);
+    expect((await listed())[TOKEN_A]).toBe(POOL_A);
+    await recomputeListedPools(db, "all", T0 + 86_400);
+    expect((await listed())[TOKEN_A]).toBeNull();
+    await db.query("update market.pools set swap_count = 1, last_swap_at = $2 where id = $1", [POOL_A, T0 + 90_000]);
+    await recomputeListedPools(db, [TOKEN_A], T0 + 10 * 86_400);
+    expect((await listed())[TOKEN_A]).toBe(POOL_A);
+  });
+
+  it("svWindowClosedTokens names the tokens listed through an unswapped SV pool whose window has closed, and nothing else", async () => {
+    await upsertTokens(db, [tokenRec({ origin: "SV" }), tokenRec({ id: TOKEN_B, address: TOKEN_B, primaryPool_id: poolId(0x12), origin: "SV" })], T0);
+    await upsertPools(db, [
+      poolRec({ origin: "SV", swapCount: 0, lastSwapAt: null, createdAt: T0 }),
+      poolRec({ id: poolId(0x12), token_id: TOKEN_B, origin: "SV", swapCount: 0, lastSwapAt: null, createdAt: T0 + 50_000 }),
+    ], T0);
+    await recomputeListedPools(db, "all", T0 + 60_000);
+    expect(await svWindowClosedTokens(db, T0 + 86_399)).toEqual([]);
+    expect(await svWindowClosedTokens(db, T0 + 86_400)).toEqual([TOKEN_A]);
   });
 });

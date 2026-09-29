@@ -200,7 +200,7 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
       value:
         pair.liquidity === null
           ? liquidity
-          : `${liquidity} · ${fmtAmt(pair.liquidity / 2 / quoteUsd, 2)} ${pair.quote}`,
+          : `${liquidity} · ${fmtAmt(pair.liquidity / quoteUsd, 2)} ${pair.quote}`,
     },
     // The quote asset's address isn't on TokenPair, and nothing in this page's tree already
     // holds useQuotes()'s result to resolve it from — pulling that query into this tab just

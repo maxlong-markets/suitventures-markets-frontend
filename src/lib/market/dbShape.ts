@@ -8,14 +8,27 @@ export type PairRow = {
   quote_symbol: string; quote_decimals: number; usd_price: number | null; usd_updated_at: number | null; aggregator: string | null;
 };
 
-/** One row per listed token. numeric(78,0) columns are cast to text so both drivers hand back strings. */
-export const PAIR_SELECT = `
+const PAIR_COLUMNS = `
 select t.id, t.symbol, t.name, t.address, t.decimals, t.total_supply::text as total_supply, t.holders_count,
   p.id as pool_id, p.quote_id, p.origin as pool_origin, p.hooks, p.fee, p.created_at as pool_created_at,
   p.price_quote, p.tvl_token::text as tvl_token, p.tvl_quote::text as tvl_quote, p.routable,
-  q.symbol as quote_symbol, q.decimals as quote_decimals, q.usd_price, q.usd_updated_at, q.aggregator
+  q.symbol as quote_symbol, q.decimals as quote_decimals, q.usd_price, q.usd_updated_at, q.aggregator`;
+
+/** One row per listed token. numeric(78,0) columns are cast to text so both drivers hand back strings. */
+export const PAIR_SELECT = `${PAIR_COLUMNS}
 from market.tokens t
 join market.pools p on p.id = t.listed_pool_id
+join market.quotes q on q.id = p.quote_id`;
+
+/**
+ * The single-token variant (instant launchpad design, section 5.4): a launch delisted by its 24-hour window keeps its
+ * page, because the fee panel lives there, so an unlisted token falls back to its launch pool. The 500-row list query
+ * keeps PAIR_SELECT and does not show it.
+ */
+export const PAIR_ONE_SELECT = `${PAIR_COLUMNS}
+from market.tokens t
+left join market.launches l on l.token_id = t.id
+join market.pools p on p.id = coalesce(t.listed_pool_id, l.pool_id)
 join market.quotes q on q.id = p.quote_id`;
 
 /** Same arithmetic and field order as shapePairs(); `stats` from windowStats() keyed by pool id. */

@@ -115,7 +115,7 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
 
   if (phase === "listed") {
     // No request of its own, so no deadline check: one statement over the whole table.
-    r.listed = await recomputeListedPools(db, "all");
+    r.listed = await recomputeListedPools(db, "all", opts.now);
     phase = "prune";
     await saveCursors(db, "nightly", { phase, cursorText: afterId });
   }

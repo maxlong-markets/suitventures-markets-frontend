@@ -784,4 +784,12 @@ describe("applyFold and loadFoldState: the launchpad (instant launchpad design, 
     expect(state.pools.get(POOL_B)?.origin).toBe("Uniswap");
     expect(state.tokens.get(TOKEN_A)?.primaryPoolId).toBe(POOL_B);
   });
+
+  it("takes an unswapped SV launch off the table on the first applyFold after its 24 hours (spec 5.4)", async () => {
+    await applyFold(db, result({ pools: [pool({ origin: "SV", swapCount: 0, lastSwapAt: null, createdAt: T0 })], tokens: [token({ origin: "SV" })] }), 1, T0 + 10);
+    expect(await db.query("select listed_pool_id from market.tokens where id = $1", [TOKEN_A])).toEqual([{ listed_pool_id: POOL_A }]);
+    // An empty batch: result()'s defaults carry a swapped pool, which would list the token again.
+    await applyFold(db, result({ pools: [], tokens: [], candles: [], trades: [] }), 2, T0 + 86_400);
+    expect(await db.query("select listed_pool_id from market.tokens where id = $1", [TOKEN_A])).toEqual([{ listed_pool_id: null }]);
+  });
 });

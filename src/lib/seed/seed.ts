@@ -241,7 +241,7 @@ export async function runSeed(db: Db, source: EnvioSource, opts: SeedOpts): Prom
                where r.token_id = b.token_id and r.holder = b.holder and r.rn > $1`,
               [kept],
             );
-            await recomputeListedPools(t, "all");
+            await recomputeListedPools(t, "all", opts.now());
           });
           // Every pool's swaps and candles are stored up to the seed's start (the id walks are complete), so the first
           // cycles fetch from an hour before it for the pools that traded since; a higher watermark is never lowered.

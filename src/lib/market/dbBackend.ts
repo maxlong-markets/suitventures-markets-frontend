@@ -4,11 +4,12 @@ import { PAIRS_LIMIT, PAIRS_TTL, type PairsScope } from "@/lib/envio/pairs";
 import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, WindowRow } from "@/lib/envio/queries";
 import { isStale, shapeCandles, shapeHolders, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
 import { refreshRow, requestBuild, STALE_SEC } from "@/lib/holders/store";
+import { readLaunchInfo } from "@/lib/launch/read";
 import { launchHealth } from "@/lib/launch/store";
 import { nowSec } from "@/lib/time";
 import type { HoldersStatus } from "@/lib/types";
 import type { HealthReport, MarketBackend } from "./backend";
-import { PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
+import { PAIR_ONE_SELECT, PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
 import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
 const SYNC_OK_WITHIN_SEC = 300;
@@ -43,11 +44,13 @@ function quoteUsd(q: QuoteCols, now: number): number | null {
   return isStale({ updatedAt: q.usd_updated_at, aggregator: q.aggregator ?? "" }, now) ? null : q.usd_price;
 }
 
-const ORDER = `order by p.last_swap_at desc nulls last, p.id limit ${PAIRS_LIMIT}`;
+// Spec 5.4: an unswapped launch sorts by its launch time until its first trade, so the 500-row cap cannot push it off
+// during its listing window. Every other listed pool has swapped, so their order is unchanged. Backed by pools_activity.
+const ORDER = `order by coalesce(p.last_swap_at, p.created_at) desc, p.id limit ${PAIRS_LIMIT}`;
 const PAIRS_SQL: Record<PairsScope, string> = {
   all: `${PAIR_SELECT} ${ORDER}`,
   // A token's origin equals its pools' origin (the indexer keeps them equal); tokens_origin_listed carries this.
-  launchpad: `${PAIR_SELECT} where t.origin in ('LONG', 'Pons') ${ORDER}`,
+  launchpad: `${PAIR_SELECT} where t.origin in ('LONG', 'Pons', 'SV') ${ORDER}`,
 };
 const WINDOW_SQL = `select pool_id, t, open, close, volume_quote as "volumeQuote" from market.candles
   where pool_id = any($1::text[]) and interval = 'h1' and t >= $2 order by t`;
@@ -198,8 +201,12 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
     // Envio backend's `pairs:${scope}` entry stays separate so the parity script can hold both in one process.
     pairs: (scope) => ttlCache(`pairs:db:${scope}`, PAIRS_TTL * 1000, async () => shapeRows(await db.query<PairRow>(PAIRS_SQL[scope]), now())),
     async pair(id) {
-      const rows = await db.query<PairRow>(`${PAIR_SELECT} where t.id = $1`, [id]);
-      return (await shapeRows(rows, now()))[0] ?? null;
+      const rows = await db.query<PairRow>(`${PAIR_ONE_SELECT} where t.id = $1`, [id]);
+      const pair = (await shapeRows(rows, now()))[0];
+      if (!pair) return null;
+      // Spec 5.5: the launch block rides the single-token answer only; `/api/tokens/[address]` and the token page share it
+      // through the `pair:${id}` memo, so neither needs a change.
+      return { ...pair, launch: await readLaunchInfo(db, id) };
     },
     async quotes() {
       const at = now();

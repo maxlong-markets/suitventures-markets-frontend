@@ -62,6 +62,41 @@ export interface QuoteAsset {
   stale?: boolean;
 }
 
+/**
+ * A token launched here (instant launchpad design, section 5.5): the single-token response only, never the 500-row list.
+ * Raw amounts are decimal strings in raw units.
+ */
+export type LaunchInfo = {
+  creator: Address;
+  payout: Address;
+  quoteAddress: Address;
+  quoteDecimals: number;
+  tokenIsCurrency0: boolean;
+  openTick: number;
+  /** V', raw quote units for the whole supply, decimal string. */
+  openingValuation: string;
+  firstBuyIn: string;
+  firstBuyTokens: string;
+  creatorShareBps: number;
+  /** unix seconds */
+  launchedAt: number;
+  launchBlock: number;
+  launchTx: Hex;
+  hidden: boolean;
+  /** All "" when hidden. */
+  imageCid: string;
+  description: string;
+  website: string;
+  x: string;
+  telegram: string;
+  /** Router fee taken out of the first buy; firstBuyIn + routerFee is the gross the creator paid. */
+  routerFee: string;
+  /** Summed on read over market.launch_fee_events, raw units, decimal strings; all "0" before any collection. */
+  feesCollected: { tokenToPayout: string; tokenToPlatform: string; quoteToPayout: string; quoteToPlatform: string };
+  /** Unix seconds of the latest collection, 0 before any. */
+  feesCollectedAt: number;
+};
+
 export interface TokenPair {
   /** Token contract address, lowercase. The canonical key: thousands of memecoins share tickers. */
   id: string;
@@ -99,6 +134,8 @@ export interface TokenPair {
   /** The listed pool's `hooks` field, lowercase; the zero address when the pool has no hook. */
   hookAddress: Address;
   feeTier: string;
+  /** Instant launchpad (spec 5.5): undefined on list rows, null for a token not launched here. */
+  launch?: LaunchInfo | null;
 }
 
 export interface Candle {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { addressUrl, ZERO_ADDRESS } from "@/lib/chain";
-import { fmtAmt, short } from "@/lib/format";
+import { fmtAmt, fmtUsdOrDash, short } from "@/lib/format";
 import type { Address, Holder, HoldersView, TokenPair, Trade } from "@/lib/types";
 import { render, screen, within } from "@/test/dom";
 import ActivityTabs, { type ActivityTab } from "./ActivityTabs";
@@ -119,6 +119,12 @@ describe("ActivityTabs", () => {
       />,
     );
     expect(screen.getByText(pair.hook).closest("a")).toBeNull();
+  });
+
+  it("shows the quote-side liquidity in the quote asset without halving it (D43: liquidity is the quote side alone)", () => {
+    show("info");
+    const quoteUsd = pair.priceUsd / pair.priceQuote;
+    expect(screen.getByText(`${fmtUsdOrDash(pair.liquidity)} · ${fmtAmt(pair.liquidity! / quoteUsd, 2)} ${pair.quote}`)).toBeTruthy();
   });
 });
 

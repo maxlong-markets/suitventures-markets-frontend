@@ -144,7 +144,7 @@ describe("createDbBackend reads", () => {
     await insertSwaps(db, swaps);
     await upsertCandles(db, candles);
     await seedBalances(A, stored);
-    await recomputeListedPools(db, "all");
+    await recomputeListedPools(db, "all", NOW);
   });
   afterAll(() => db.end());
   beforeEach(() => {
@@ -174,7 +174,7 @@ describe("createDbBackend reads", () => {
   });
 
   it("pair() answers one listed token and null for an unlisted or unknown one", async () => {
-    expect(await backend().pair(B)).toEqual(expected[1]);
+    expect(await backend().pair(B)).toEqual({ ...expected[1], launch: null });
     expect(await backend().pair(D)).toBeNull();
     expect(await backend().pair(addr("f"))).toBeNull();
   });
@@ -277,7 +277,7 @@ describe("createDbBackend limits", () => {
     await upsertQuotes(db, [quotes[0]!], [prices[0]!]);
     await upsertTokens(db, Array.from({ length: n }, (_, i) => tokenRec(hex(i + 1, 40), `T${i}`, "LONG", hex(i + 1, 64))), NOW);
     await upsertPools(db, Array.from({ length: n }, (_, i) => poolRec(hex(i + 1, 64), hex(i + 1, 40), NVDA, { lastSwapAt: NOW - i })), NOW);
-    await recomputeListedPools(db, "all");
+    await recomputeListedPools(db, "all", NOW);
     await upsertCandles(db, Array.from({ length: 310 }, (_, i) => candle(hex(1, 64), "m1", NOW - 60 * i, 1, 1, 1)));
     await insertSwaps(db, Array.from({ length: 60 }, (_, i) => ({ ...swap(1, NOW - i, "buy"), id: `${hex(1, 64)}-${i}`, pool_id: hex(1, 64), token_id: hex(1, 40), txHash: hex(1, 64) })));
     const backend = createDbBackend(db, { now: () => NOW });
@@ -599,7 +599,7 @@ describe("createDbBackend poolKey", () => {
       ],
       NOW,
     );
-    await recomputeListedPools(db, "all");
+    await recomputeListedPools(db, "all", NOW);
   });
   afterAll(() => db.end());
 
@@ -705,7 +705,7 @@ describe("tradeability parity: db reads the column, envio probes the quoter", ()
       })],
       ENVIO_NOW,
     );
-    await recomputeListedPools(db, "all");
+    await recomputeListedPools(db, "all", NOW);
     await db.query("update market.pools set routable = false where id = $1", [ENVIO_POOL]);
     const dbPair = await createDbBackend(db, { now: () => ENVIO_NOW }).pair(AI);
     expect(dbPair?.tradeable).toBe(false);

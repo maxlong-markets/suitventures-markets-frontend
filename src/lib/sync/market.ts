@@ -124,7 +124,7 @@ export async function runMarketCycle(db: Db, source: EnvioSource, opts: CycleOpt
     for (const ids of batches([...new Set(tokenIds)], TOKEN_BATCH)) {
       if (!canQuery()) return false;
       r.tokens += await upsertTokens(db, await source.tokensById(ids), opts.now);
-      await recomputeListedPools(db, ids);
+      await recomputeListedPools(db, ids, opts.now);
     }
     return true;
   };

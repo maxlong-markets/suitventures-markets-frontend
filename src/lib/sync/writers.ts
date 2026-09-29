@@ -161,19 +161,55 @@ export async function upsertCandles(db: Db, candles: readonly CandleRec[]): Prom
 // the holder builder (`src/lib/holders/run.ts`) now folds exact balances incrementally and is the only writer
 // of `market.token_balances` and `market.holder_refresh` (top-holders design, sections 3 and 5).
 
-/** Spec section 6: the primary pool when sane and traded, else the sane traded pool with the most swaps, else null. */
-const LISTED_POOL = `coalesce(
-  (select p.id from market.pools p where p.id = t.primary_pool_id and p.swap_count > 0 and p.price_quote > 1e-24 and p.price_quote < 1e18),
-  (select p.id from market.pools p where p.token_id = t.id and p.swap_count > 0 and p.price_quote > 1e-24 and p.price_quote < 1e18
-     order by p.swap_count desc, p.last_swap_at desc nulls last, p.id limit 1))`;
+/**
+ * How long an SV pool with no swaps stays listed after its launch (instant launchpad design, section 5.4; DEFAULT for
+ * Kobe to confirm, spec 12). Without the window, five launches per wallet per day could fill the 500-row table.
+ */
+export const SV_LISTING_WINDOW_SEC = 86_400;
 
-export async function recomputeListedPools(db: Db, tokenIds: readonly string[] | "all"): Promise<number> {
+/**
+ * Spec section 6, widened by spec 5.4: the primary pool when sane and listable, else the sane listable pool with the most
+ * swaps, else null. Listable is "traded", or "a launchpad pool inside its first SV_LISTING_WINDOW_SEC". `now` is the SQL
+ * parameter that holds the clock, so tests set it.
+ */
+function listedPool(now: string): string {
+  const listable = `(p.swap_count > 0 or (p.origin = 'SV' and p.created_at > ${now}::int - ${SV_LISTING_WINDOW_SEC}))`;
+  return `coalesce(
+  (select p.id from market.pools p where p.id = t.primary_pool_id
+     and ${listable}
+     and p.price_quote > 1e-24 and p.price_quote < 1e18),
+  (select p.id from market.pools p where p.token_id = t.id
+     and ${listable}
+     and p.price_quote > 1e-24 and p.price_quote < 1e18
+     order by p.swap_count desc, p.last_swap_at desc nulls last, p.id limit 1))`;
+}
+
+export async function recomputeListedPools(db: Db, tokenIds: readonly string[] | "all", now: number): Promise<number> {
   if (tokenIds !== "all" && tokenIds.length === 0) return 0;
-  const where = tokenIds === "all" ? "" : "where t.id = any($1::text[])";
-  const params = tokenIds === "all" ? [] : [[...tokenIds]];
-  const [row] = await db.query<{ n: unknown }>(
-    `with u as (update market.tokens t set listed_pool_id = ${LISTED_POOL} ${where} returning 1) select count(*) as n from u`,
-    params,
-  );
+  const [row] =
+    tokenIds === "all"
+      ? await db.query<{ n: unknown }>(
+          `with u as (update market.tokens t set listed_pool_id = ${listedPool("$1")} returning 1) select count(*) as n from u`,
+          [now],
+        )
+      : await db.query<{ n: unknown }>(
+          `with u as (update market.tokens t set listed_pool_id = ${listedPool("$2")} where t.id = any($1::text[]) returning 1)
+           select count(*) as n from u`,
+          [[...tokenIds], now],
+        );
   return Number(row.n);
+}
+
+/**
+ * The tokens still listed through an SV pool that never traded and whose window has closed (spec 5.4). Almost always
+ * empty; `applyFold` recomputes whatever it names, which is how an unswapped launch leaves the table. Backed by the
+ * partial index pools_sv_unswapped.
+ */
+export async function svWindowClosedTokens(db: Db, now: number): Promise<string[]> {
+  const rows = await db.query<{ token_id: string }>(
+    `select p.token_id from market.pools p join market.tokens t on t.id = p.token_id and t.listed_pool_id = p.id
+     where p.origin = 'SV' and p.swap_count = 0 and p.created_at <= $1::int - ${SV_LISTING_WINDOW_SEC}`,
+    [now],
+  );
+  return rows.map((r) => r.token_id);
 }
