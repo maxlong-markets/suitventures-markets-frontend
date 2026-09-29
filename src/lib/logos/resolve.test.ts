@@ -30,6 +30,7 @@ type MockDeps = {
   readString: Mock<LogoDeps["readString"]>;
   fetchJson: Mock<LogoDeps["fetchJson"]>;
   now: Mock<LogoDeps["now"]>;
+  launchImage: Mock<LogoDeps["launchImage"]>;
 };
 
 /** Every dep answers "nothing" unless a case overrides it, so no test can reach the network. */
@@ -40,6 +41,7 @@ function deps(over: Partial<MockDeps> = {}): MockDeps {
       throw new Error("unexpected fetch");
     }),
     now: vi.fn<LogoDeps["now"]>(() => NOW),
+    launchImage: vi.fn<LogoDeps["launchImage"]>(async () => ({ ok: true, row: null })),
     ...over,
   };
 }
@@ -51,8 +53,9 @@ beforeEach(() => {
 describe("toHttpCandidates", () => {
   it("maps an ipfs uri onto every gateway, in order", () => {
     expect(toHttpCandidates(`ipfs://${CID}`)).toEqual(gateways(CID));
-    expect(toHttpCandidates(`ipfs://${CID}`)).toHaveLength(4);
-    expect(toHttpCandidates(`ipfs://${CID}`)[0]).toBe(`https://gateway.pinata.cloud/ipfs/${CID}`);
+    expect(toHttpCandidates(`ipfs://${CID}`)).toHaveLength(5);
+    expect(toHttpCandidates(`ipfs://${CID}`)[0]).toBe(`https://ipfs.filebase.io/ipfs/${CID}`);
+    expect(toHttpCandidates(`ipfs://${CID}`)[1]).toBe(`https://gateway.pinata.cloud/ipfs/${CID}`);
   });
 
   it("keeps the path that follows the CID", () => {
@@ -105,7 +108,7 @@ describe("resolveLogo", () => {
     });
     expect(d.readString.mock.calls.map((c) => c[1])).toEqual(["logo", "tokenURI"]);
     expect(d.fetchJson).toHaveBeenCalledTimes(1);
-    expect(d.fetchJson).toHaveBeenCalledWith(`https://gateway.pinata.cloud/ipfs/${CID}`, 5000);
+    expect(d.fetchJson).toHaveBeenCalledWith(`https://ipfs.filebase.io/ipfs/${CID}`, 5000);
   });
 
   it("accepts image as an alias for image_hash", async () => {
@@ -131,8 +134,8 @@ describe("resolveLogo", () => {
       definite: true,
     });
     expect(fetchJson.mock.calls.map((c) => c[0])).toEqual([
+      `https://ipfs.filebase.io/ipfs/${CID}`,
       `https://gateway.pinata.cloud/ipfs/${CID}`,
-      `https://dweb.link/ipfs/${CID}`,
     ]);
   });
 
@@ -409,5 +412,59 @@ describe("guardedFetch", () => {
     stubFetch(vi.fn(async () => new Response("nope", { status: 429 })));
     const res = await guardedFetch("https://gateway.pinata.cloud/ipfs/bafy", init());
     expect(res?.status).toBe(429);
+  });
+});
+
+describe("resolveLogo: a launch made here (instant launchpad design, section 5.6)", () => {
+  const SV = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+  const row = (o: Partial<{ imageCid: string; metadataUri: string; hidden: boolean }> = {}) =>
+    vi.fn<LogoDeps["launchImage"]>(async () => ({ ok: true, row: { imageCid: IMAGE_CID, metadataUri: `ipfs://${CID}`, hidden: false, ...o } }));
+
+  it("answers the launch's image on the Filebase gateway first, source launch, without asking the chain", async () => {
+    const d = deps({ launchImage: row() });
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: { candidates: gateways(IMAGE_CID), source: "launch" }, definite: true });
+    expect(gateways(IMAGE_CID)[0]).toBe(`https://ipfs.filebase.io/ipfs/${IMAGE_CID}`);
+    expect(d.readString).not.toHaveBeenCalled();
+    expect(d.fetchJson).not.toHaveBeenCalled();
+  });
+
+  it("answers a definite no logo for a hidden launch, and never reaches DexScreener", async () => {
+    const d = deps({ launchImage: row({ hidden: true }), fetchJson: vi.fn<LogoDeps["fetchJson"]>(async () => ({ pairs: [{ info: { imageUrl: "https://dd.dexscreener.com/a.png" } }] })) });
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: null, definite: true });
+    expect(d.fetchJson).not.toHaveBeenCalled();
+    expect(d.readString).not.toHaveBeenCalled();
+  });
+
+  it("reads the metadata JSON's image when the launch has no image CID of its own", async () => {
+    const d = deps({ launchImage: row({ imageCid: "" }), fetchJson: vi.fn<LogoDeps["fetchJson"]>(async () => ({ image: `ipfs://${IMAGE_CID}` })) });
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: { candidates: gateways(IMAGE_CID), source: "launch" }, definite: true });
+    expect(d.fetchJson).toHaveBeenCalledWith(`https://ipfs.filebase.io/ipfs/${CID}`, 5000);
+  });
+
+  it("answers no logo, uncached, when the launch row cannot be read, without falling through to DexScreener", async () => {
+    const launchImage = vi.fn<LogoDeps["launchImage"]>(async () => ({ ok: false }));
+    const d = deps({ launchImage, fetchJson: vi.fn<LogoDeps["fetchJson"]>(async () => ({ pairs: [{ info: { imageUrl: "https://dd.dexscreener.com/a.png" } }] })) });
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: null, definite: false });
+    expect(d.fetchJson).not.toHaveBeenCalled();
+    await resolveLogo(SV, d);
+    expect(launchImage).toHaveBeenCalledTimes(2); // not memoised
+  });
+
+  it("holds a launch hit for one hour, not a day, so a takedown reaches everyone within the hour", async () => {
+    const launchImage = row();
+    const d = deps({ launchImage });
+    await resolveLogo(SV, d);
+    d.now.mockReturnValue(NOW + 59 * 60_000);
+    await resolveLogo(SV, d);
+    expect(launchImage).toHaveBeenCalledTimes(1);
+    d.now.mockReturnValue(NOW + 60 * 60_000 + 1);
+    await resolveLogo(SV, d);
+    expect(launchImage).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls through to the existing stages for a token not launched here", async () => {
+    const d = deps({ readString: answers("logo", `ipfs://${CID}`) });
+    await expect(resolveLogo(BABYHOOD, d)).resolves.toEqual({ logo: { candidates: gateways(CID), source: "pons" }, definite: true });
+    expect(d.launchImage).toHaveBeenCalledWith(BABYHOOD);
   });
 });

@@ -31,6 +31,19 @@ describe("syncDeps (I2a: a severed probe is silent unless the wiring itself is t
     expect(deps.quoter).toBeUndefined();
   });
 
+  it("gives the nightly job an upload cleaner only while the three Filebase names are set (instant launchpad, section 6)", () => {
+    vi.stubEnv("DATABASE_URL", FAKE_URL);
+    vi.stubEnv("FILEBASE_ACCESS_KEY", "");
+    expect(syncDeps("nightly").uploads).toBeUndefined();
+    vi.stubEnv("FILEBASE_ACCESS_KEY", "test-access");
+    vi.stubEnv("FILEBASE_SECRET_KEY", "test-secret");
+    vi.stubEnv("FILEBASE_BUCKET", "test-bucket");
+    const uploads = syncDeps("nightly").uploads;
+    expect(typeof uploads?.deleteObject).toBe("function");
+    expect(typeof uploads?.blockTimestamp).toBe("function");
+    expect(syncDeps("market").uploads).toBeUndefined();
+  });
+
   it("gives every job a dead EnvioSource stub whose methods throw if actually called (Task 6: Envio is gone)", async () => {
     vi.stubEnv("DATABASE_URL", FAKE_URL);
     const nightly = syncDeps("nightly");

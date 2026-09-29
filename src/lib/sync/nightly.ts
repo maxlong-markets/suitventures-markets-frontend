@@ -5,6 +5,7 @@ import type { Quoter } from "@/lib/quote/quoter";
 import type { CycleOpts } from "./market";
 import { probePools } from "./probe";
 import { pruneCandles, pruneSwaps } from "./retention";
+import { cleanUploads, type UploadCleaner } from "@/lib/launch/cleanup";
 import { readState, saveCursors } from "./state";
 import { recomputeListedPools } from "./writers";
 
@@ -17,10 +18,13 @@ export type NightlyResult = {
   /** Candles the prune phase deleted for being outside their interval's own retention window (retention.ts's CANDLE_RETENTION_SEC), run right after pruned; every run, quoter or not. */
   prunedCandles: number;
   /** Tokens whose top-holder list the holders phase dropped (store.ts's pruneHolders, tokens — not rows); every run, quoter or not. */
-  prunedHolders: number; queries: number;
+  prunedHolders: number;
+  /** Uploads whose objects the "uploads" phase removed this run (instant launchpad design, section 6). */
+  uploadsDeleted: number;
+  queries: number;
 };
 
-const PHASES = ["listed", "prune", "holders", "probe"] as const;
+const PHASES = ["listed", "prune", "holders", "uploads", "probe"] as const;
 type Phase = (typeof PHASES)[number];
 
 /**
@@ -88,9 +92,9 @@ type Phase = (typeof PHASES)[number];
  * nightly job. Without it (as in every other phase's own tests) probing is a no-op — pruning still runs, and
  * runs first — and the run still finishes.
  */
-export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }): Promise<NightlyResult> {
+export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter; uploads?: UploadCleaner }): Promise<NightlyResult> {
   const state = await readState(db, "nightly");
-  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, queries: 0 };
+  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, queries: 0 };
   const finish = (done: boolean, phase: string) => {
     r.done = done;
     r.phase = phase;
@@ -160,6 +164,19 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter }):
     const pruned = await pruneHolders(db, kept, opts.now, { deadlineMs: opts.deadlineMs });
     r.prunedHolders = pruned.tokens;
     if (!pruned.done) return finish(false, "holders");
+    phase = "uploads";
+    await saveCursors(db, "nightly", { phase, cursorText: afterId });
+  }
+  if (phase === "uploads") {
+    // Instant launchpad (design section 6): the orphan clean-up. It sits before probe for prune's reason: bounded, with
+    // no cursor of its own, and it must never be starved by a probe that can take weeks. Skipped without a cleaner
+    // (the Filebase names unset, and every other phase's tests).
+    if (opts.uploads) {
+      if (Date.now() >= opts.deadlineMs) return finish(false, "uploads");
+      const cleaned = await cleanUploads(db, opts.uploads, opts.now, opts.deadlineMs);
+      r.uploadsDeleted = cleaned.deleted;
+      if (!cleaned.done) return finish(false, "uploads");
+    }
     phase = "probe";
     await saveCursors(db, "nightly", { phase, cursorText: afterId });
   }

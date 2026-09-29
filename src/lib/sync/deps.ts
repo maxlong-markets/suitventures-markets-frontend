@@ -5,6 +5,7 @@ import type { ChainRunDeps } from "@/lib/chain/run";
 import { getDb, type Db } from "@/lib/db/client";
 import type { HoldersRunDeps } from "@/lib/holders/run";
 import { createQuoter, type Quoter } from "@/lib/quote/quoter";
+import { createUploadCleaner, type UploadCleaner } from "@/lib/launch/cleanup";
 import type { EnvioSource } from "./source";
 import type { SyncJob } from "./state";
 
@@ -51,7 +52,7 @@ function deadEnvioSource(): EnvioSource {
  * than going through this factory — has no use for one. The chain job has its own shape entirely: see
  * ChainDeps/chainDeps below.
  */
-export type SyncDeps = { db: Db; source: EnvioSource; quoter?: Quoter };
+export type SyncDeps = { db: Db; source: EnvioSource; quoter?: Quoter; uploads?: UploadCleaner };
 type Factory = (job: SyncJob) => SyncDeps;
 let override: Factory | null = null;
 
@@ -62,7 +63,7 @@ let override: Factory | null = null;
 export function syncDeps(job: SyncJob): SyncDeps {
   if (override) return override(job);
   const deps: SyncDeps = { db: getDb(), source: deadEnvioSource() };
-  return job === "nightly" ? { ...deps, quoter: createQuoter() } : deps;
+  return job === "nightly" ? { ...deps, quoter: createQuoter(), uploads: createUploadCleaner() } : deps;
 }
 /** Tests only: substitute PGlite and a FakeSource (the factory may ignore the job); null restores the defaults. */
 export function setSyncDeps(factory: Factory | null): void {

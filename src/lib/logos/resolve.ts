@@ -7,6 +7,8 @@ import {
   http,
 } from "viem";
 import { robinhoodChain } from "@/lib/chain";
+import { getDb, hasDb } from "@/lib/db/client";
+import { filebaseGatewayBase } from "@/lib/launch/gateway";
 
 /**
  * Where a token's logo comes from, in one place.
@@ -27,10 +29,12 @@ import { robinhoodChain } from "@/lib/chain";
  */
 
 /**
- * Tried in order; the first that answers wins. Each already ends in `/ipfs/`.
+ * Tried in order; the first that answers wins. Each already ends in `/ipfs/`. The Filebase gateway leads (instant
+ * launchpad design, section 5.6): launch images are pinned there, so it answers them fastest.
  * w3s.link answers with a redirect to another gateway, which `guardedFetch` follows.
  */
 export const IPFS_GATEWAYS: readonly string[] = [
+  `${filebaseGatewayBase()}/ipfs/`,
   "https://gateway.pinata.cloud/ipfs/",
   "https://dweb.link/ipfs/",
   "https://w3s.link/ipfs/",
@@ -53,12 +57,19 @@ export const TOTAL_BUDGET_MS = 25_000;
 
 const HIT_TTL_MS = 24 * 60 * 60 * 1000;
 const MISS_TTL_MS = 60 * 60 * 1000;
+/** A launch's logo, hit or hidden, is held for an hour, not a day: setting `hidden` must reach every visitor within the hour. */
+export const LAUNCH_TTL_MS = 60 * 60 * 1000;
 
 export type ResolvedLogo = {
   /** Fetchable URLs, best first; the proxy route walks them until one returns an image. */
   candidates: string[];
-  source: "pons" | "long" | "dexscreener";
+  source: "launch" | "pons" | "long" | "dexscreener";
 };
+
+/** A launch made here, as market.launches holds it (spec 5.6). */
+export type LaunchImageRow = { imageCid: string; metadataUri: string; hidden: boolean };
+/** `{ ok: false }` is a database error: the lookup answers "no logo" for this request, never cached, never falling through. */
+export type LaunchImageRead = { ok: true; row: LaunchImageRow | null } | { ok: false };
 
 /** A stage either answered (with a value or a definite nothing) or could not be asked. */
 export type ReadResult = { ok: true; value: string | null } | { ok: false };
@@ -78,6 +89,8 @@ export type LogoDeps = {
   readString(address: string, fn: "logo" | "tokenURI", timeoutMs: number): Promise<ReadResult>;
   fetchJson(url: string, timeoutMs: number): Promise<unknown>;
   now(): number;
+  /** The launch row for this token, if it was launched here. */
+  launchImage(address: string): Promise<LaunchImageRead>;
 };
 
 const LOGO_ABI = [
@@ -149,6 +162,20 @@ const defaultDeps: LogoDeps = {
     return res.json();
   },
   now: Date.now,
+  async launchImage(address) {
+    if (!hasDb()) return { ok: true, row: null };
+    try {
+      const [row] = await getDb().query<{ image_cid: string; metadata_uri: string; hidden: boolean }>(
+        "select image_cid, metadata_uri, hidden from market.launches where token_id = $1",
+        [address],
+      );
+      return { ok: true, row: row ? { imageCid: row.image_cid, metadataUri: row.metadata_uri, hidden: row.hidden } : null };
+    } catch (err) {
+      // Visible in the logs as well as in /api/health's `launches.error`: a missing table (migration not applied) lands here.
+      console.warn(`logo: launch row unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return { ok: false };
+    }
+  },
 };
 
 /**
@@ -331,6 +358,17 @@ async function fromDexScreener(address: string, ctx: Ctx): Promise<ResolvedLogo 
   return null;
 }
 
+/** The launch's own image CID, else its metadata JSON's `image`, like a LONG `tokenURI` (spec 5.6's table). */
+async function fromLaunchRow(row: LaunchImageRow, ctx: Ctx): Promise<ResolvedLogo | null> {
+  if (row.imageCid !== "") return { candidates: toHttpCandidates(`ipfs://${row.imageCid}`), source: "launch" };
+  if (row.metadataUri === "") return null;
+  const doc = await fetchJsonFromCandidates(toHttpCandidates(row.metadataUri), ctx);
+  if (!doc.ok) return null;
+  const image = pick(doc.value, "image");
+  const candidates = image ? toHttpCandidates(image) : [];
+  return candidates.length > 0 ? { candidates, source: "launch" } : null;
+}
+
 type Entry = { value: ResolvedLogo | null; expires: number };
 const memo = new Map<string, Entry>();
 /** The route is public, so the key space is every address anyone cares to ask for. */
@@ -377,6 +415,22 @@ export async function resolveLogo(
   if (cached && cached.expires > now) return { logo: cached.value, definite: true };
 
   const ctx: Ctx = { deps: d, deadline: deadline ?? now + TOTAL_BUDGET_MS, incomplete: false };
+
+  // Spec 5.6: a launch made here answers from its own row first. A failed read answers "no logo" for this request only:
+  // falling through could answer, and cache, a DexScreener image for a hidden launch.
+  const launch = await d.launchImage(key);
+  if (!launch.ok) return { logo: null, definite: false };
+  if (launch.row?.hidden) {
+    remember(key, { value: null, expires: now + LAUNCH_TTL_MS });
+    return { logo: null, definite: true };
+  }
+  if (launch.row) {
+    const own = await fromLaunchRow(launch.row, ctx);
+    if (own) {
+      remember(key, { value: own, expires: now + LAUNCH_TTL_MS });
+      return { logo: own, definite: true };
+    }
+  }
 
   let logo: ResolvedLogo | null = null;
   const direct = await read(key, "logo", ctx);

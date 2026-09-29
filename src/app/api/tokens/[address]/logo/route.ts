@@ -16,6 +16,8 @@ const MAX_BYTES = 2 * 1024 * 1024;
 
 /** A day in the browser, a week at the edge: a token's logo effectively never changes. */
 const HIT_CACHE = "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400";
+/** A launch's logo (spec 5.6): an hour at both layers, so a takedown through `hidden` reaches everyone within the hour. */
+const LAUNCH_CACHE = "public, max-age=3600, s-maxage=3600";
 /**
  * Settled answers that are not images: no logo anywhere, a malformed address, a query string.
  * All three are stable facts about the request, so the CDN can answer them instead of us.
@@ -135,7 +137,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
     return new Response(image.bytes, {
       headers: {
         "Content-Type": image.contentType,
-        "Cache-Control": HIT_CACHE,
+        "Cache-Control": logo.source === "launch" ? LAUNCH_CACHE : HIT_CACHE,
         "X-Content-Type-Options": "nosniff",
       },
     });

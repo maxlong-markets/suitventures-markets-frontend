@@ -165,4 +165,12 @@ describe("GET /api/tokens/[address]/logo", () => {
     await call();
     expect(resolveLogoMock).toHaveBeenCalledWith(ADDR, undefined, t0 + TOTAL_BUDGET_MS);
   });
+
+  it("serves a launch logo with a one-hour cache, so hiding a launch reaches every visitor within the hour (spec 5.6)", async () => {
+    resolveLogoMock.mockResolvedValue({ logo: { candidates: [A], source: "launch" }, definite: true });
+    fetchMock.mockResolvedValue(image(10));
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600, s-maxage=3600");
+  });
 });
