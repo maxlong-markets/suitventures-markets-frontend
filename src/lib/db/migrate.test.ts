@@ -7,7 +7,10 @@ import { MIGRATIONS_DIR, migrate } from "./migrate";
 import { createPgliteDb } from "./pglite";
 
 const MARKET = "20260917000000_market.sql";
-const TABLES = ["candles", "holder_refresh", "pools", "quotes", "schema_migrations", "swaps", "sync_state", "token_balances", "tokens"];
+const TABLES = [
+  "candles", "holder_refresh", "launch_fee_events", "launch_uploads", "launches", "pools", "quotes", "schema_migrations", "swaps",
+  "sync_state", "token_balances", "tokens",
+];
 
 describe("migrate", () => {
   let db: Db;
@@ -41,6 +44,55 @@ describe("migrate", () => {
     expect(rows).toEqual([{ balance: "1" + "0".repeat(30) }]);
     const [count] = await db.query<{ n: number | string }>("select count(*) as n from market.holder_refresh");
     expect(Number(count.n)).toBe(2);
+  });
+
+  it("creates the instant launchpad's three tables, their checks and every index spec 5.1 names", async () => {
+    await migrate(db); // idempotent, so this case also passes when run alone
+    const columns = async (table: string) =>
+      db.query<{ column_name: string; data_type: string }>(
+        "select column_name, data_type from information_schema.columns where table_schema = 'market' and table_name = $1 order by ordinal_position",
+        [table],
+      );
+    const launches = await columns("launches");
+    expect(launches.map((c) => c.column_name)).toEqual([
+      "token_id", "pool_id", "quote_id", "creator", "payout", "token_is_currency0", "creator_share_bps", "open_tick",
+      "opening_valuation", "liquidity", "tokens_in_pool", "first_buy_in", "first_buy_tokens", "router_fee", "creation_fee",
+      "hook", "name", "symbol", "metadata_uri", "metadata_cid", "image_cid", "description", "website", "x", "telegram",
+      "launch_block", "launch_log_index", "launch_tx", "launched_at", "payout_block", "payout_log_index", "hidden", "updated_at",
+    ]);
+    // Raw chain integers are numeric, never int or float, so a uint256 round-trips as its exact digits.
+    for (const name of ["opening_valuation", "liquidity", "tokens_in_pool", "first_buy_in", "first_buy_tokens", "router_fee", "creation_fee"]) {
+      expect(launches.find((c) => c.column_name === name)?.data_type).toBe("numeric");
+    }
+    expect((await columns("launch_fee_events")).map((c) => c.column_name)).toEqual([
+      "tx_hash", "log_index", "token_id", "payout", "token_payout", "token_platform", "quote_payout", "quote_platform", "block", "ts",
+    ]);
+    expect((await columns("launch_uploads")).map((c) => c.column_name)).toEqual([
+      "id", "wallet", "image_cid", "metadata_cid", "image_key", "metadata_key", "name", "symbol", "description", "website", "x",
+      "telegram", "status", "created_at", "used_at", "token_id",
+    ]);
+    const indexes = await db.query<{ indexname: string }>("select indexname from pg_indexes where schemaname = 'market' order by indexname");
+    expect(indexes.map((i) => i.indexname)).toEqual(
+      expect.arrayContaining([
+        "launches_creator", "launches_metadata_cid", "launch_fee_events_token", "launch_uploads_wallet_created",
+        "launch_uploads_metadata_cid", "launch_uploads_image_cid", "launch_uploads_cleanable", "pools_activity", "pools_sv_unswapped",
+      ]),
+    );
+    // The status enumeration and the tick-spacing check are enforced by the database, not only by the code.
+    await expect(
+      db.query(
+        `insert into market.launch_uploads (wallet, image_cid, metadata_cid, image_key, metadata_key, name, symbol, status, created_at)
+         values ('0xa', 'i', 'm', 'ik', 'mk', 'N', 'S', 'lost', 1)`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      db.query(
+        `insert into market.launches (token_id, pool_id, quote_id, creator, payout, token_is_currency0, creator_share_bps, open_tick,
+           opening_valuation, liquidity, tokens_in_pool, first_buy_in, first_buy_tokens, router_fee, creation_fee, hook, name, symbol,
+           metadata_uri, launch_block, launch_log_index, launch_tx, launched_at, payout_block, payout_log_index, updated_at)
+         values ('0xt', '0xp', '0xq', '0xc', '0xc', true, 7000, 150, 1, 1, 1, 0, 0, 0, 0, '0x0', 'N', 'S', '', 1, 0, '0xtx', 1, 1, 0, 1)`,
+      ),
+    ).rejects.toThrow();
   });
 
   it("rolls a failing file back and records nothing for it", async () => {

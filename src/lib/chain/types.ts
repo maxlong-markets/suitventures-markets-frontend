@@ -212,3 +212,25 @@ export type FoldResult = {
    */
   skippedLiquidity: number;
 };
+
+/**
+ * One `Launched` event, shaped for market.launches (instant launchpad design, section 5.2). `metadataCid` is the part
+ * after `ipfs://` when `metadataUri` matches `^ipfs://[A-Za-z0-9]{46,128}$`, else "".
+ */
+export type LaunchRow = {
+  tokenId: string; poolId: string; quoteId: string; creator: string; payout: string; hook: string;
+  tokenIsCurrency0: boolean; creatorShareBps: number; openTick: number; openingValuation: bigint; liquidity: bigint;
+  tokensInPool: bigint; firstBuyIn: bigint; firstBuyTokens: bigint; routerFee: bigint; creationFee: bigint;
+  name: string; symbol: string; metadataUri: string; metadataCid: string;
+  block: number; logIndex: number; txHash: string; timestamp: number;
+};
+
+/** One `FeesCollected` log, the key of market.launch_fee_events. Platform amounts are the event's total minus its payout amount. */
+export type LaunchFeesRow = {
+  txHash: string; logIndex: number;
+  tokenId: string; payout: string; tokenPayout: bigint; tokenPlatform: bigint; quotePayout: bigint; quotePlatform: bigint;
+  timestamp: number; block: number;
+};
+
+/** The last `PayoutChanged` of a token in a batch, applied only over an older (block, log index). */
+export type PayoutRow = { tokenId: string; payout: string; block: number; logIndex: number };
