@@ -136,6 +136,17 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     }
   });
 
+  it("waits while the opening read is pending, so a click never uses a stale snapped valuation", async () => {
+    h.opening = { token: TOKEN, openTick: -398_400, snapped: SNAPPED, pending: true };
+    render(<LaunchForm />);
+    fill();
+    expect(screen.getByText("Working out the opening price.")).toBeTruthy();
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+    await press();
+    expect(h.upload).not.toHaveBeenCalled();
+    expect(h.execute).not.toHaveBeenCalled();
+  });
+
   it("refuses to launch while the launchpad has a hook set, as the contracts README promises", () => {
     h.settings = { ...h.settings, hook: "0x00000000000000000000000000000000000000c0" };
     render(<LaunchForm />);

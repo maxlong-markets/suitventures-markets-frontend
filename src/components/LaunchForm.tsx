@@ -193,7 +193,8 @@ export default function LaunchForm() {
     if (payoutOpen && payout !== "" && !isAddress(payout)) return "Enter a valid payout address.";
     if (chainId !== undefined && chainId !== robinhoodChain.id) return "Switch your wallet to Robinhood Chain.";
     if (!walletClient || !publicClient) return "Connecting to your wallet.";
-    if (!snapped) return "Working out the opening price.";
+    // The opening read lags the valuation by a 300 ms debounce; a click in that window would use the old snapped value.
+    if (!snapped || opening.pending) return "Working out the opening price.";
     return null;
   }
   const reason = reasonText();

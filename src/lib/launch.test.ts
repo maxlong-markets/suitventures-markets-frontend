@@ -165,6 +165,30 @@ describe("executeLaunch (spec 7.2, submit steps 3 to 6)", () => {
     await expect(executeLaunch({ ...INPUT, firstBuy: 1n }, t.deps)).rejects.toThrow(new LaunchRejectedError(LAUNCH_MESSAGES.rejected));
   });
 
+  it("says gas was spent when the signature is refused after the approval ran", async () => {
+    const t = harness({ allowance: 10n });
+    t.signTypedData.mockRejectedValueOnce(new UserRejectedRequestError(new Error("User rejected the request.")));
+    await expect(executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps)).rejects.toThrow(
+      new LaunchRejectedError("Cancelled in wallet. Nothing was spent except gas."),
+    );
+  });
+
+  it("says gas was spent when the launch is cancelled in the wallet after the approval ran", async () => {
+    const t = harness({ allowance: 10n });
+    t.writeContract
+      .mockResolvedValueOnce(APPROVE_HASH)
+      .mockRejectedValueOnce(new UserRejectedRequestError(new Error("User rejected the request.")));
+    await expect(executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps)).rejects.toThrow(
+      new LaunchRejectedError("Cancelled in wallet. Nothing was spent except gas."),
+    );
+  });
+
+  it("keeps 'Nothing was spent.' when the approval itself is cancelled", async () => {
+    const t = harness({ allowance: 10n });
+    t.writeContract.mockRejectedValueOnce(new UserRejectedRequestError(new Error("User rejected the request.")));
+    await expect(executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps)).rejects.toThrow(new LaunchRejectedError("Cancelled in wallet. Nothing was spent."));
+  });
+
   it("replays a mined revert with eth_call at its block, same sender, data and value, and decodes the reason from the replay", async () => {
     const t = harness({ status: "reverted" });
     t.call.mockRejectedValueOnce(new RawContractError({ data: encodeErrorResult({ abi: svLaunchpadAbi, errorName: "FirstBuyTooSmall", args: [1n, 2n] }) }));

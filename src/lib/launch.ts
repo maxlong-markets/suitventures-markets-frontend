@@ -67,6 +67,7 @@ export class LaunchUnconfirmedError extends Error {
 
 export const LAUNCH_MESSAGES = {
   rejected: "Cancelled in wallet. Nothing was spent.",
+  rejectedAfterApprove: "Cancelled in wallet. Nothing was spent except gas.",
   unconfirmed: "Sent, but we could not confirm it. Check the transaction before trying again.",
   notLive: "Launching is not live yet.",
   wrongChain: "Switch your wallet to Robinhood Chain and try again. Nothing was sent.",
@@ -190,6 +191,8 @@ export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep
   };
   let permit = { permitted: { token: zeroAddress as Address, amount: 0n }, nonce: 0n, deadline: 0n };
   let signature: Hex = "0x";
+  // Once the approval has been sent its gas is spent, so a later cancel must not say nothing was.
+  let approvalSent = false;
   try {
     await requireRobinhood(deps);
     if (total > 0n) {
@@ -201,6 +204,7 @@ export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep
         const approval = await deps.wallet.writeContract({
           address: input.quote, abi: erc20Abi, functionName: "approve", args: [PERMIT2_ADDRESS, maxUint256], account: deps.account, chain: robinhoodChain,
         });
+        approvalSent = true;
         const approved = await deps.publicClient.waitForTransactionReceipt({ hash: approval });
         if (approved.status === "reverted") throw new LaunchFailedError(LAUNCH_MESSAGES.approveFailed);
       }
@@ -221,7 +225,8 @@ export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep
     void confirmation.catch(() => {});
     return { hash, confirmation };
   } catch (err) {
-    throw mapLaunchError(err);
+    const mapped = mapLaunchError(err);
+    throw approvalSent && mapped instanceof LaunchRejectedError ? new LaunchRejectedError(LAUNCH_MESSAGES.rejectedAfterApprove) : mapped;
   }
 }
 
