@@ -99,6 +99,14 @@ describe("attachUploads", () => {
     expect(await launchHealth(db)).toEqual({ missingUploads: 1, deletedUploads: 1 });
   });
 
+  it("never copies from a refused upload, whose objects the clean-up will remove: the launch gets nothing and the row stays refused", async () => {
+    const refused = await upload({ status: "refused", website: "https://chalk.test" });
+    await insertLaunches(db, [launchRow()], T0);
+    await attachUploads(db, [TOKEN], T0 + 5);
+    expect(await launch()).toMatchObject({ image_cid: "", description: "", website: "", x: "", telegram: "", updated_at: T0 });
+    expect((await uploadRows()).map((r) => [Number(r.id), r.status, r.used_at, r.token_id])).toEqual([[refused, "refused", 0, ""]]);
+  });
+
   it("leaves a launch whose URI carried no ipfs CID alone", async () => {
     await upload({ metadataCid: "" });
     await insertLaunches(db, [launchRow({ metadataUri: "https://example.test/meta.json", metadataCid: "" })], T0);
@@ -137,5 +145,17 @@ describe("applyPayouts", () => {
     expect(await launch()).toMatchObject({ payout: PAYOUT, payout_block: 120, payout_log_index: 3, updated_at: T0 + 1 });
     expect(await applyPayouts(db, [{ tokenId: TOKEN, payout: CREATOR, block: 121, logIndex: 0 }], T0 + 4)).toBe(1);
     expect(await launch()).toMatchObject({ payout: CREATOR, payout_block: 121, payout_log_index: 0 });
+  });
+
+  it("keeps only the latest change when one token appears twice in one call, in either order", async () => {
+    await insertLaunches(db, [launchRow()], T0);
+    const later = { tokenId: TOKEN, payout: PAYOUT, block: 130, logIndex: 1 };
+    const earlier = { tokenId: TOKEN, payout: CREATOR, block: 130, logIndex: 0 };
+    expect(await applyPayouts(db, [later, earlier], T0 + 1)).toBe(1);
+    expect(await launch()).toMatchObject({ payout: PAYOUT, payout_block: 130, payout_log_index: 1 });
+    const third = { tokenId: TOKEN, payout: CREATOR, block: 131, logIndex: 0 };
+    const fourth = { tokenId: TOKEN, payout: PAYOUT, block: 131, logIndex: 4 };
+    expect(await applyPayouts(db, [third, fourth], T0 + 2)).toBe(1);
+    expect(await launch()).toMatchObject({ payout: PAYOUT, payout_block: 131, payout_log_index: 4 });
   });
 });

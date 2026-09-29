@@ -54,8 +54,9 @@ export async function insertLaunches(db: Db, rows: readonly LaunchRow[], now: nu
 
 /**
  * Links and the image CID reach a launch from market.launch_uploads by metadata CID (design 5.2 step 2): the newest
- * upload that is not `deleted` wins, then every `pending` upload of that CID becomes `used` by this token. A deleted
- * upload's objects are gone, so it is never copied from and never revived; its launch shows no image and health counts it.
+ * `pending` or `used` upload wins, then every `pending` upload of that CID becomes `used` by this token. A deleted
+ * upload's objects are gone and a refused one's are about to be, so neither is ever copied from nor revived; such a
+ * launch shows no image and health counts it.
  */
 export async function attachUploads(db: Db, tokenIds: readonly string[], now: number): Promise<void> {
   if (tokenIds.length === 0) return;
@@ -64,7 +65,7 @@ export async function attachUploads(db: Db, tokenIds: readonly string[], now: nu
     `update market.launches l set image_cid = u.image_cid, description = u.description, website = u.website,
        x = u.x, telegram = u.telegram, updated_at = $2::int
      from (select distinct on (metadata_cid) * from market.launch_uploads
-           where status <> 'deleted'
+           where status in ('pending', 'used')
              and metadata_cid in (select metadata_cid from market.launches where token_id = any($1::text[]))
            order by metadata_cid, id desc) u
      where l.token_id = any($1::text[]) and l.metadata_cid <> '' and u.metadata_cid = l.metadata_cid`,
@@ -101,10 +102,18 @@ export async function insertLaunchFees(db: Db, rows: readonly LaunchFeesRow[]): 
   return inserted;
 }
 
-/** Last-write-wins by position (design 5.2 step 4): the stored (block, log index) makes a replay a no-op. */
+/**
+ * Last-write-wins by position (design 5.2 step 4): the stored (block, log index) makes a replay a no-op. Only the latest
+ * change per token is sent, since an UPDATE … FROM that joins one target row to several source rows applies an arbitrary one.
+ */
 export async function applyPayouts(db: Db, rows: readonly PayoutRow[], now: number): Promise<number> {
+  const latest = new Map<string, PayoutRow>();
+  for (const r of rows) {
+    const seen = latest.get(r.tokenId);
+    if (!seen || r.block > seen.block || (r.block === seen.block && r.logIndex > seen.logIndex)) latest.set(r.tokenId, r);
+  }
   let updated = 0;
-  for (const c of chunk(rows)) {
+  for (const c of chunk([...latest.values()])) {
     const out = await db.query<{ token_id: string }>(
       `update market.launches l set payout = u.payout, payout_block = u.block, payout_log_index = u.log_index, updated_at = $5::int
        from unnest($1::text[], $2::text[], $3::int[], $4::int[]) as u(token_id, payout, block, log_index)
