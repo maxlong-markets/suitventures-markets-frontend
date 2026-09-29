@@ -45,8 +45,11 @@ export type HealthReport = {
    * Launches whose upload was not found, and uploads the nightly clean-up removed (spec section 13). When the launch
    * tables cannot be read (the migration not applied yet, above all) it says so and `ok` turns false: every launch
    * logo then answers "no logo" and the reader's applyFold throws, so this must be loud, not silently absent.
+   * `storage` is the Filebase bucket check (`storageStatus`): whether this deployment's keys reach its bucket.
    */
-  launches?: { missingUploads: number; deletedUploads: number } | { error: string };
+  launches?:
+    | { missingUploads: number; deletedUploads: number; storage: { status: string; bucket?: string; accessKeyLength?: number; secretKeyLength?: number } }
+    | { error: string };
   error?: string;
 };
 

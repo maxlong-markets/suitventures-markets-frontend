@@ -4,6 +4,7 @@ import { PAIRS_LIMIT, PAIRS_TTL, type PairsScope } from "@/lib/envio/pairs";
 import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, WindowRow } from "@/lib/envio/queries";
 import { isStale, shapeCandles, shapeHolders, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
 import { refreshRow, requestBuild, STALE_SEC } from "@/lib/holders/store";
+import { filebaseConfig, storageStatus } from "@/lib/launch/filebase";
 import { readLaunchInfo } from "@/lib/launch/read";
 import { launchHealth } from "@/lib/launch/store";
 import { nowSec } from "@/lib/time";
@@ -333,7 +334,10 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
       // also blanks every launch logo (the logo resolver's launchImage read fails) and stops the reader's applyFold.
       let launches: NonNullable<HealthReport["launches"]>;
       try {
-        launches = await launchHealth(db);
+        // The bucket check rides along, capped well under the route's own budget: "answered 403" is a wrong access key
+        // or secret on this deployment, "answered 404" a wrong bucket name, and a key length one off is a stray character.
+        const [counts, storage] = await Promise.all([launchHealth(db), storageStatus(filebaseConfig(), 5_000)]);
+        launches = { ...counts, storage };
       } catch (err) {
         console.warn(`health: launch tables unavailable: ${message(err)}`);
         launches = { error: "launch tables unavailable" };

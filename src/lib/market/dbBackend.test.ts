@@ -376,7 +376,11 @@ describe("createDbBackend health", () => {
     });
     await finishRun(db, "chain", { now: NOW - 20, ok: true, rows: 1, queries: 1, report: { ...report, launchEvents: 4 } });
     expect((await backend().health()).sync?.lastCycle?.launchEvents).toBe(4);
-    expect((await backend().health()).launches).toEqual({ missingUploads: 0, deletedUploads: 0 });
+    // No Filebase names in the test environment: the bucket check reports "unset" without a request.
+    vi.stubEnv("FILEBASE_ACCESS_KEY", "");
+    vi.stubEnv("FILEBASE_SECRET_KEY", "");
+    vi.stubEnv("FILEBASE_BUCKET", "");
+    expect((await backend().health()).launches).toEqual({ missingUploads: 0, deletedUploads: 0, storage: { status: "unset" } });
     await db.query(
       `insert into market.launches (token_id, pool_id, quote_id, creator, payout, token_is_currency0, creator_share_bps, open_tick,
          opening_valuation, liquidity, tokens_in_pool, first_buy_in, first_buy_tokens, router_fee, creation_fee, hook, name, symbol,
@@ -387,7 +391,8 @@ describe("createDbBackend health", () => {
       `insert into market.launch_uploads (wallet, image_cid, metadata_cid, image_key, metadata_key, name, symbol, status, created_at)
        values ('0xc', 'i', 'bafy', 'ik', 'mk', 'N', 'S', 'deleted', 1)`,
     );
-    expect((await backend().health()).launches).toEqual({ missingUploads: 1, deletedUploads: 1 });
+    expect((await backend().health()).launches).toEqual({ missingUploads: 1, deletedUploads: 1, storage: { status: "unset" } });
+    vi.unstubAllEnvs();
     await db.exec("delete from market.launches; delete from market.launch_uploads");
   });
 

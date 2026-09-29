@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FilebaseError, deleteObject, filebaseConfig, headObject, putObject, type FilebaseConfig } from "./filebase";
+import { FilebaseError, deleteObject, filebaseConfig, headObject, putObject, storageStatus, type FilebaseConfig } from "./filebase";
 
 const CFG: FilebaseConfig = { accessKey: "test-access", secretKey: "test-secret", bucket: "test-bucket" };
 const CID = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq";
@@ -65,6 +65,24 @@ describe("putObject and deleteObject (spec 6 step 11 and the orphan phase)", () 
     fetchMock.mockImplementationOnce(async () => new Response(null, { status: 200, headers: { "x-amz-meta-cid": v0 } }));
     await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).resolves.toBe(v0);
     await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).resolves.toBe(CID);
+  });
+
+  it("reports the bucket check for health: ok, Filebase's own answer, no answer, or unset, with the configuration's shape", async () => {
+    fetchMock.mockImplementationOnce(async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      seen.push(req);
+      return new Response(null, { status: 200 });
+    });
+    await expect(storageStatus(CFG)).resolves.toEqual({ status: "ok", bucket: "test-bucket", accessKeyLength: 11, secretKeyLength: 11 });
+    expect([seen[0]!.method, seen[0]!.url]).toEqual(["HEAD", "https://s3.filebase.com/test-bucket"]);
+    expect(seen[0]!.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 Credential=test-access\//);
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 403 }));
+    await expect(storageStatus(CFG)).resolves.toMatchObject({ status: "answered 403", bucket: "test-bucket" });
+    fetchMock.mockImplementationOnce(async () => {
+      throw new TypeError("fetch failed");
+    });
+    await expect(storageStatus(CFG)).resolves.toMatchObject({ status: "no answer" });
+    await expect(storageStatus(null)).resolves.toEqual({ status: "unset" });
   });
 
   it("deletes a key, treating an already-missing object as deleted", async () => {

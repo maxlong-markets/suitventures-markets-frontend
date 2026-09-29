@@ -73,6 +73,27 @@ export async function deleteObject(cfg: FilebaseConfig, key: string, timeoutMs =
   if (!res.ok && res.status !== 404) throw new FilebaseError(`DELETE ${key} answered ${res.status}`);
 }
 
+/** What `/api/health` says about the upload path: a status, and the shape of the configuration behind it, never a value. */
+export type StorageStatus = { status: string; bucket?: string; accessKeyLength?: number; secretKeyLength?: number };
+
+/**
+ * HeadBucket, for `/api/health`: "ok" when the configured keys reach the configured bucket; otherwise Filebase's own
+ * answer ("answered 403" is a wrong access key or secret, "answered 404" a wrong bucket name), "no answer" for a
+ * network failure, or "unset" while `filebaseConfig()` is null. The bucket name and the two key lengths ride along,
+ * so a value pasted with a stray character shows up as a length one off, without any value ever leaving the server.
+ */
+export async function storageStatus(cfg: FilebaseConfig | null, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<StorageStatus> {
+  if (!cfg) return { status: "unset" };
+  const shape = { bucket: cfg.bucket, accessKeyLength: cfg.accessKey.length, secretKeyLength: cfg.secretKey.length };
+  let res: Response;
+  try {
+    res = await client(cfg).fetch(`${FILEBASE_S3_URL}/${encodeURIComponent(cfg.bucket)}`, { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) });
+  } catch {
+    return { status: "no answer", ...shape };
+  }
+  return { status: res.ok ? "ok" : `answered ${res.status}`, ...shape };
+}
+
 /**
  * HeadObject: the object's Last-Modified in unix seconds, or null when it is already gone (404). The nightly clean-up
  * asks this right before each delete, because a re-upload of the same content re-pins the same key after the rows were
