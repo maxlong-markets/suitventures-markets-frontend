@@ -40,7 +40,7 @@ export interface Toast {
   hash?: string;
 }
 
-export type GateKind = "star" | "vote";
+export type GateKind = "star" | "vote" | "launch";
 interface GateContext {
   /** The signed-in address. M4's two gated actions no longer need it — the cookie is the
    *  identity — but the gate keeps handing it over for the ones that will. */
@@ -78,6 +78,14 @@ export interface AppState {
   signModal: { kind: GateKind } | null;
   /** Opens the connect or sign-in flow with nothing queued behind it; `/watchlist` uses it. */
   promptSignIn(): void;
+  /**
+   * The same connect-then-sign gate the star and the vote use, for any action: `run` fires once a session exists. The
+   * launch form (instant launchpad design, section 7.2, submit step 1) passes a no-op and resumes itself when `signed`
+   * flips, because its submit closes over the form's state. `onCancel` fires whenever the queued action is abandoned
+   * (the sign modal closed, the signature refused, the connect modal closed with no wallet, or a newer gesture replacing
+   * it), so the caller can drop what it queued.
+   */
+  withSignIn(kind: GateKind, run: () => void, onCancel?: () => void): void;
   completeSign(sign: SignMessage, address: Address): Promise<void>;
   cancelSign(): void;
 
@@ -118,7 +126,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const { address, isConnected } = useAccount();
   const isHolder = useIsSuitHolder(address);
-  const { openConnectModal } = useConnectModal();
+  const { openConnectModal, connectModalOpen } = useConnectModal();
 
   // --- filters ---------------------------------------------------------
   const [filters, setFilters] = useState<MarketFilters>(DEFAULT_FILTERS);
@@ -184,7 +192,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [sessionLoading, setSessionLoading] = useState(true);
   const signed = sameAddress(session?.address, address);
   const [signModal, setSignModal] = useState<{ kind: GateKind } | null>(null);
-  const pendingRef = useRef<{ kind: GateKind; run: GatedAction } | null>(null);
+  const pendingRef = useRef<{ kind: GateKind; run: GatedAction; onCancel?: () => void } | null>(null);
 
   // On load the cookie says whether this browser is already signed in, so a wallet that signed in
   // on another device sees its watchlist here without signing again. A failed probe means "not
@@ -236,14 +244,21 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   const gate = useCallback(
-    (kind: GateKind, run: GatedAction) => {
+    (kind: GateKind, run: GatedAction, onCancel?: () => void) => {
+      // A new gesture replaces whatever was queued: the replaced action is abandoned, so its owner is told
+      // (a star pressed while a launch waits for its signature must never let that launch fire later).
+      const replace = (next: { kind: GateKind; run: GatedAction; onCancel?: () => void }) => {
+        const previous = pendingRef.current;
+        pendingRef.current = next;
+        if (previous && previous !== next) previous.onCancel?.();
+      };
       if (!isConnected || !address) {
-        pendingRef.current = { kind, run };
+        replace({ kind, run, onCancel });
         openConnectModal?.();
         return;
       }
       if (!sameAddress(session?.address, address)) {
-        pendingRef.current = { kind, run };
+        replace({ kind, run, onCancel });
         setSignModal({ kind });
         return;
       }
@@ -259,6 +274,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
    */
   const promptSignIn = useCallback(() => gate("star", () => {}), [gate]);
 
+  const withSignIn = useCallback(
+    (kind: GateKind, run: () => void, onCancel?: () => void) => gate(kind, () => run(), onCancel),
+    [gate],
+  );
+
   // A wallet connected while an action was waiting: continue to the signature.
   useEffect(() => {
     if (!isConnected || !address || !pendingRef.current) return;
@@ -270,6 +290,21 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setSignModal({ kind: pendingRef.current.kind });
     }
   }, [isConnected, address, fire, session]);
+
+  // The connect modal closed and no wallet arrived: the action queued behind it is abandoned (its owner is told).
+  const connectWasOpen = useRef(false);
+  useEffect(() => {
+    if (connectModalOpen) {
+      connectWasOpen.current = true;
+      return;
+    }
+    if (!connectWasOpen.current) return;
+    connectWasOpen.current = false;
+    if (isConnected) return; // connected: the effect above carries the action on
+    const abandoned = pendingRef.current;
+    pendingRef.current = null;
+    abandoned?.onCancel?.();
+  }, [connectModalOpen, isConnected]);
 
   /**
    * Nonce, message, signature, cookie — all inside the data source. It throws when the wallet
@@ -284,7 +319,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         // A refusal — the wallet's or the server's — drops the queued action rather than leaving
         // it to fire on some later, unrelated sign-in; only a fresh gesture may queue another one.
+        const abandoned = pendingRef.current;
         pendingRef.current = null;
+        abandoned?.onCancel?.();
         throw err;
       }
       setSession({ address: signedAddress });
@@ -297,8 +334,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   const cancelSign = useCallback(() => {
+    // Closed without signing: the queued action is dropped, and its owner is told so it can undo what it showed.
+    const pending = pendingRef.current;
     pendingRef.current = null;
     setSignModal(null);
+    pending?.onCancel?.();
   }, []);
 
   // --- watchlist -------------------------------------------------------
@@ -468,6 +508,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       votePending,
       signModal,
       promptSignIn,
+      withSignIn,
       completeSign,
       cancelSign,
       toasts,
@@ -497,6 +538,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       votePending,
       signModal,
       promptSignIn,
+      withSignIn,
       completeSign,
       cancelSign,
       toasts,

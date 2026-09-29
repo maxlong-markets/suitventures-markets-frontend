@@ -8,7 +8,7 @@ const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
 
 const h = vi.hoisted(() => ({
   state: {
-    signModal: { kind: "star" as "star" | "vote" },
+    signModal: { kind: "star" as "star" | "vote" | "launch" },
     address: "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as string | undefined,
     completeSign: vi.fn<(sign: (m: string) => Promise<string>, address: string) => Promise<void>>(),
     cancelSign: vi.fn(),
@@ -64,5 +64,12 @@ describe("SignModal", () => {
     h.state.address = undefined;
     const { container } = render(<SignModal />);
     expect(container.firstChild).toBeNull();
+  });
+
+  it("says what a launch sign-in is for", () => {
+    h.state.signModal = { kind: "launch" };
+    render(<SignModal />);
+    expect(screen.getByText("Sign to launch a token")).toBeTruthy();
+    expect(screen.getByText(/ties your uploads to this address/)).toBeTruthy();
   });
 });

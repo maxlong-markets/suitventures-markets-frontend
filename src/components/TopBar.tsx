@@ -11,6 +11,7 @@ const NAV = [
   { href: "/", label: "Markets" },
   { href: "/watchlist", label: "Watchlist" },
   { href: "/traders", label: "Traders" },
+  { href: "/launch", label: "Launch" },
 ] as const;
 
 function navClass(active: boolean): string {

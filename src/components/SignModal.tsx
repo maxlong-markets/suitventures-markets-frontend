@@ -75,11 +75,12 @@ function SignDialog({
           </button>
         </div>
         <div id="sign-title" className="mt-4 text-[17px] font-medium">
-          {kind === "vote" ? "Sign to cast your vote" : "Sign to save your watchlist"}
+          {kind === "vote" ? "Sign to cast your vote" : kind === "launch" ? "Sign to launch a token" : "Sign to save your watchlist"}
         </div>
         <p className="mt-2 text-pretty text-[12.5px] leading-[1.55] text-ink-55">
-          A one-time signature ties your watchlist and votes to this address. No gas,
-          no transaction, nothing moves.
+          {kind === "launch"
+            ? "A one-time signature ties your uploads to this address. No gas, no transaction, nothing moves."
+            : "A one-time signature ties your watchlist and votes to this address. No gas, no transaction, nothing moves."}
         </p>
         <div className="mt-4 break-all border border-hairline px-3 py-[10px] font-mono text-[10.5px] leading-[1.6] text-ink-50">
           {preview}

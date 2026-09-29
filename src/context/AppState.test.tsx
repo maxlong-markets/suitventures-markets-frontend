@@ -16,6 +16,9 @@ const pairRow = (bull: number, bear: number): TokenPair => ({ id: TOKEN, ticker:
 const h = vi.hoisted(() => ({
   account: { address: undefined as string | undefined, isConnected: false },
   openConnectModal: vi.fn(),
+  connectModalOpen: false,
+  launchRun: vi.fn(),
+  launchCancel: vi.fn(),
   ds: {
     session: vi.fn<() => Promise<string | null>>(),
     signIn: vi.fn<(sign: SignMessage, address: string) => Promise<string>>(),
@@ -29,7 +32,9 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("wagmi", () => ({ useAccount: () => h.account }));
-vi.mock("@rainbow-me/rainbowkit", () => ({ useConnectModal: () => ({ openConnectModal: h.openConnectModal }) }));
+vi.mock("@rainbow-me/rainbowkit", () => ({
+  useConnectModal: () => ({ openConnectModal: h.openConnectModal, connectModalOpen: h.connectModalOpen }),
+}));
 vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false }));
 // `AppState.tsx` imports this as "./DataSource"; Vitest keys mocks by resolved path, and the `@/`
 // alias resolves to the same file, so the spelling here does not have to match the import's.
@@ -129,6 +134,9 @@ function Probe() {
       <button type="button" onClick={() => s.vote(TOKEN, "bear")}>
         vote bear
       </button>
+      <button type="button" onClick={() => s.withSignIn("launch", h.launchRun, h.launchCancel)}>
+        launch
+      </button>
       <button
         type="button"
         // The real `SignModal` awaits inside a try/catch; the button must not float a rejection
@@ -173,6 +181,65 @@ describe("AppStateProvider sign-in", () => {
     h.ds.vote.mockReset().mockResolvedValue({ dir: "bull", bull: 1, bear: 0 });
     h.ds.pairs.mockReset().mockResolvedValue([pairRow(0, 0)]);
     (sign as ReturnType<typeof vi.fn>).mockClear();
+    h.connectModalOpen = false;
+    h.launchRun.mockReset();
+    h.launchCancel.mockReset();
+  });
+
+  it("tells a queued launch it was abandoned when the signature is refused, and a later unrelated sign-in does not launch", async () => {
+    h.ds.signIn.mockRejectedValueOnce(new Error("401"));
+    show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("launch"));
+    expect(screen.getByTestId("modal").textContent).toBe("launch");
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.launchCancel).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    expect(h.launchRun).not.toHaveBeenCalled();
+  });
+
+  it("tells a queued launch it was abandoned when a star replaces it, and the sign-in then runs only the star", async () => {
+    show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("launch"));
+    fireEvent.click(screen.getByText("star"));
+    expect(h.launchCancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.ds.setWatch).toHaveBeenCalledWith(TOKEN, true));
+    expect(h.launchRun).not.toHaveBeenCalled();
+  });
+
+  it("tells a queued launch it was abandoned when the connect modal closes with no wallet", async () => {
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    fireEvent.click(screen.getByText("launch"));
+    expect(h.openConnectModal).toHaveBeenCalled();
+    h.connectModalOpen = true;
+    rerenderApp();
+    expect(h.launchCancel).not.toHaveBeenCalled();
+    h.connectModalOpen = false;
+    rerenderApp();
+    expect(h.launchCancel).toHaveBeenCalledTimes(1);
+    expect(h.launchRun).not.toHaveBeenCalled();
+  });
+
+  it("tells a queued launch nothing when the sign-in succeeds, and runs it", async () => {
+    show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("launch"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.launchRun).toHaveBeenCalledTimes(1));
+    expect(h.launchCancel).not.toHaveBeenCalled();
   });
 
   it("seeds the session from the cookie, matching a lowercase address to a checksummed wallet", async () => {
