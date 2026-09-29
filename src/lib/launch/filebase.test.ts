@@ -31,6 +31,15 @@ describe("filebaseConfig", () => {
     vi.stubEnv("FILEBASE_GATEWAY_URL", "");
     expect(filebaseConfig()).toEqual({ accessKey: "a", secretKey: "s", bucket: "b" });
   });
+
+  it("ignores whitespace pasted around a value, and treats a whitespace-only value as unset", () => {
+    vi.stubEnv("FILEBASE_ACCESS_KEY", " a ");
+    vi.stubEnv("FILEBASE_SECRET_KEY", "s\n");
+    vi.stubEnv("FILEBASE_BUCKET", "\nb");
+    expect(filebaseConfig()).toEqual({ accessKey: "a", secretKey: "s", bucket: "b" });
+    vi.stubEnv("FILEBASE_BUCKET", " \n");
+    expect(filebaseConfig()).toBeNull();
+  });
 });
 
 describe("putObject and deleteObject (spec 6 step 11 and the orphan phase)", () => {
@@ -73,11 +82,11 @@ describe("putObject and deleteObject (spec 6 step 11 and the orphan phase)", () 
       seen.push(req);
       return new Response(null, { status: 200 });
     });
-    await expect(storageStatus(CFG)).resolves.toEqual({ status: "ok", bucket: "test-bucket", accessKeyLength: 11, secretKeyLength: 11 });
+    await expect(storageStatus(CFG)).resolves.toEqual({ status: "ok", accessKeyLength: 11, secretKeyLength: 11, bucketLength: 11 });
     expect([seen[0]!.method, seen[0]!.url]).toEqual(["HEAD", "https://s3.filebase.com/test-bucket"]);
     expect(seen[0]!.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 Credential=test-access\//);
     fetchMock.mockImplementationOnce(async () => new Response(null, { status: 403 }));
-    await expect(storageStatus(CFG)).resolves.toMatchObject({ status: "answered 403", bucket: "test-bucket" });
+    await expect(storageStatus(CFG)).resolves.toMatchObject({ status: "answered 403", bucketLength: 11 });
     fetchMock.mockImplementationOnce(async () => {
       throw new TypeError("fetch failed");
     });

@@ -1426,8 +1426,9 @@ more than one pool per launch; a Suits fee discount.
 `launches.missingUploads` counts launches whose upload was not found, and `launches.deletedUploads` the uploads the
 nightly clean-up removed (5.2, section 6). `launches.storage` (added 29 Sep 2026) is the Filebase bucket check: a HEAD
 on the configured bucket with the configured keys, reported as `ok`, Filebase's own answer (`answered 403` is a wrong
-key or secret, `answered 404` a wrong bucket name), `no answer`, or `unset`, with the bucket name and the two key
-lengths beside it so a value pasted with a stray character shows as a length one off. No value leaves the server.
+key or secret, `answered 404` a wrong bucket name), `no answer`, or `unset`, with the lengths of the three values
+beside it so one pasted with a stray character shows as a length one off. Health is public: neither a value nor the
+bucket's name leaves the server, and the three readers trim surrounding whitespace before use.
 
 ## 14. Engineering details this spec settled
 

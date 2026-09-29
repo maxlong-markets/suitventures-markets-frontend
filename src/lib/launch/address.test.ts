@@ -12,6 +12,9 @@ describe("parseLaunchpadAddress", () => {
     expect(parseLaunchpadAddress("0x5555555555555555555555555555555555555555")).toBe("0x5555555555555555555555555555555555555555");
     expect(parseLaunchpadAddress("0xabcdef0000000000000000000000000000000000")).toBe("0xabcdef0000000000000000000000000000000000");
     expect(parseLaunchpadAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168")).toBe("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
+    // Pasted with a newline or spaces around it, as a dashboard field can hold it: the same address.
+    expect(parseLaunchpadAddress("\n0x5555555555555555555555555555555555555555 ")).toBe("0x5555555555555555555555555555555555555555");
+    expect(parseLaunchpadAddress(" \n")).toBeUndefined();
   });
   it("is undefined for a mixed-case value whose checksum is wrong, so a typo reads as not live", () => {
     expect(parseLaunchpadAddress("0xAbCdEf0000000000000000000000000000000000")).toBeUndefined();

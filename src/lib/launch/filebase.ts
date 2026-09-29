@@ -24,9 +24,12 @@ export class FilebaseError extends Error {
 
 /** The three required names, or null: the route answers 503 "not-live" and the nightly phase is skipped. Values never logged. */
 export function filebaseConfig(): FilebaseConfig | null {
-  const accessKey = process.env.FILEBASE_ACCESS_KEY || "";
-  const secretKey = process.env.FILEBASE_SECRET_KEY || "";
-  const bucket = process.env.FILEBASE_BUCKET || "";
+  // Trimmed: a value pasted into a dashboard with a newline or a space around it is that value, not another one. A
+  // bucket name or an S3 key never contains whitespace, so nothing real is lost (a leading newline on the bucket name
+  // sent every production upload to a bucket that does not exist, 29 Sep 2026).
+  const accessKey = (process.env.FILEBASE_ACCESS_KEY || "").trim();
+  const secretKey = (process.env.FILEBASE_SECRET_KEY || "").trim();
+  const bucket = (process.env.FILEBASE_BUCKET || "").trim();
   return accessKey && secretKey && bucket ? { accessKey, secretKey, bucket } : null;
 }
 
@@ -73,18 +76,18 @@ export async function deleteObject(cfg: FilebaseConfig, key: string, timeoutMs =
   if (!res.ok && res.status !== 404) throw new FilebaseError(`DELETE ${key} answered ${res.status}`);
 }
 
-/** What `/api/health` says about the upload path: a status, and the shape of the configuration behind it, never a value. */
-export type StorageStatus = { status: string; bucket?: string; accessKeyLength?: number; secretKeyLength?: number };
+/** What `/api/health` says about the upload path: a status and the lengths of the values behind it, never a value or a name. */
+export type StorageStatus = { status: string; accessKeyLength?: number; secretKeyLength?: number; bucketLength?: number };
 
 /**
  * HeadBucket, for `/api/health`: "ok" when the configured keys reach the configured bucket; otherwise Filebase's own
  * answer ("answered 403" is a wrong access key or secret, "answered 404" a wrong bucket name), "no answer" for a
- * network failure, or "unset" while `filebaseConfig()` is null. The bucket name and the two key lengths ride along,
- * so a value pasted with a stray character shows up as a length one off, without any value ever leaving the server.
+ * network failure, or "unset" while `filebaseConfig()` is null. The three lengths ride along, so a value pasted with a
+ * stray character shows up as a length one off; health is public, so neither a value nor the bucket's name leaves.
  */
 export async function storageStatus(cfg: FilebaseConfig | null, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<StorageStatus> {
   if (!cfg) return { status: "unset" };
-  const shape = { bucket: cfg.bucket, accessKeyLength: cfg.accessKey.length, secretKeyLength: cfg.secretKey.length };
+  const shape = { accessKeyLength: cfg.accessKey.length, secretKeyLength: cfg.secretKey.length, bucketLength: cfg.bucket.length };
   let res: Response;
   try {
     res = await client(cfg).fetch(`${FILEBASE_S3_URL}/${encodeURIComponent(cfg.bucket)}`, { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) });

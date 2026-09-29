@@ -48,7 +48,7 @@ export type HealthReport = {
    * `storage` is the Filebase bucket check (`storageStatus`): whether this deployment's keys reach its bucket.
    */
   launches?:
-    | { missingUploads: number; deletedUploads: number; storage: { status: string; bucket?: string; accessKeyLength?: number; secretKeyLength?: number } }
+    | { missingUploads: number; deletedUploads: number; storage: { status: string; accessKeyLength?: number; secretKeyLength?: number; bucketLength?: number } }
     | { error: string };
   error?: string;
 };

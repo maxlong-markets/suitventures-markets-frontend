@@ -4,9 +4,11 @@ import type { Address } from "@/lib/types";
 /**
  * An address, or undefined for anything else: an unset `NEXT_PUBLIC_*` reaches the bundle as "". A mixed-case value
  * must carry a correct checksum, so a mistyped address reads as not live instead of pointing at the wrong contract.
+ * Whitespace around the value is ignored: a newline pasted into a dashboard is not a different address.
  */
 export function parseLaunchpadAddress(raw: string | undefined): Address | undefined {
-  return raw !== undefined && isAddress(raw, { strict: true }) ? (raw as Address) : undefined;
+  const value = raw?.trim();
+  return value !== undefined && isAddress(value, { strict: true }) ? (value as Address) : undefined;
 }
 
 /**
