@@ -715,11 +715,20 @@ function metadataCidOf(uri: string): string {
 }
 
 /**
+ * Postgres text refuses a NUL byte, and the contract checks only byte lengths, so one NUL in a Launched string would
+ * make applyFold throw and the reader retry the same batch for ever. Stripped as onchain.ts's `clean` does for token reads.
+ */
+function stripNul(s: string): string {
+  return s.replace(/\x00/g, "");
+}
+
+/**
  * Spec 5.2 step 4. The row is appended whatever the state holds; the relabel is for the one case where a launch's
  * Initialize fell into an earlier batch, so the pre-scan could not label the pool when it was created.
  */
 function handleLaunched(event: LaunchedEvent, state: FoldState, ctx: FoldContext): void {
   ctx.launchEvents += 1;
+  const metadataUri = stripNul(event.metadataUri);
   ctx.launches.push({
     tokenId: event.token,
     poolId: event.poolId,
@@ -737,10 +746,10 @@ function handleLaunched(event: LaunchedEvent, state: FoldState, ctx: FoldContext
     firstBuyTokens: event.firstBuyTokens,
     routerFee: event.routerFee,
     creationFee: event.creationFee,
-    name: event.name,
-    symbol: event.symbol,
-    metadataUri: event.metadataUri,
-    metadataCid: metadataCidOf(event.metadataUri),
+    name: stripNul(event.name),
+    symbol: stripNul(event.symbol),
+    metadataUri,
+    metadataCid: metadataCidOf(metadataUri),
     block: event.block,
     logIndex: event.logIndex,
     txHash: event.txHash,

@@ -54,9 +54,10 @@ export async function insertLaunches(db: Db, rows: readonly LaunchRow[], now: nu
 
 /**
  * Links and the image CID reach a launch from market.launch_uploads by metadata CID (design 5.2 step 2): the newest
- * `pending` or `used` upload wins, then every `pending` upload of that CID becomes `used` by this token. A deleted
- * upload's objects are gone and a refused one's are about to be, so neither is ever copied from nor revived; such a
- * launch shows no image and health counts it.
+ * `pending` or `used` upload wins, then every `pending` upload of that CID becomes `used` by this token. Only an upload
+ * made by the launch's own creator counts (both addresses are stored lowercase), so one creator cannot borrow another's
+ * image and links by reusing their metadata URI. A deleted upload's objects are gone and a refused one's are about to
+ * be, so neither is ever copied from nor revived; such a launch shows no image and health counts it.
  */
 export async function attachUploads(db: Db, tokenIds: readonly string[], now: number): Promise<void> {
   if (tokenIds.length === 0) return;
@@ -64,18 +65,18 @@ export async function attachUploads(db: Db, tokenIds: readonly string[], now: nu
   await db.query(
     `update market.launches l set image_cid = u.image_cid, description = u.description, website = u.website,
        x = u.x, telegram = u.telegram, updated_at = $2::int
-     from (select distinct on (metadata_cid) * from market.launch_uploads
+     from (select distinct on (metadata_cid, wallet) * from market.launch_uploads
            where status in ('pending', 'used')
              and metadata_cid in (select metadata_cid from market.launches where token_id = any($1::text[]))
-           order by metadata_cid, id desc) u
-     where l.token_id = any($1::text[]) and l.metadata_cid <> '' and u.metadata_cid = l.metadata_cid`,
+           order by metadata_cid, wallet, id desc) u
+     where l.token_id = any($1::text[]) and l.metadata_cid <> '' and u.metadata_cid = l.metadata_cid and u.wallet = l.creator`,
     [ids, now],
   );
   await db.query(
     `update market.launch_uploads u set status = 'used', used_at = $2::int, token_id = l.token_id
      from market.launches l
      where l.token_id = any($1::text[]) and l.metadata_cid <> '' and u.metadata_cid = l.metadata_cid
-       and u.status = 'pending'`,
+       and u.wallet = l.creator and u.status = 'pending'`,
     [ids, now],
   );
 }

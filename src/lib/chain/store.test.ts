@@ -756,6 +756,27 @@ describe("applyFold and loadFoldState: the launchpad (instant launchpad design, 
     expect(await readChainCursor(db)).toBe(150);
   });
 
+  it("applies a Launched whose name, symbol and metadata URI carry NUL bytes, stripped, and advances the cursor (Postgres refuses NUL in text)", async () => {
+    await db.query(
+      `insert into market.launch_uploads (wallet, image_cid, metadata_cid, image_key, metadata_key, name, symbol, website, status, created_at)
+       values ($1, $2, $3, 'launch/img/k.webp', 'launch/meta/k.json', 'Tailor''s Chalk', 'CHALK', '', 'pending', $4)`,
+      [WALLET, IMAGE_CID, META_CID, T0 - 30],
+    );
+    const launchedEvent: LaunchedEvent = {
+      kind: "launched", ...base(190), token: LAUNCH_TOKEN, creator: WALLET, quote: QUOTE, poolId: POOL_B, payout: WALLET, hook: addr(0),
+      tokenIsCurrency0: true, openTick: 0, openingValuation: 1n, liquidity: 1n, tokensInPool: 1n, firstBuyIn: 0n, firstBuyTokens: 0n,
+      routerFee: 0n, creationFee: 0n, creatorShareBps: 7000, name: "Chalk\u0000", symbol: "\u0000CH\u0000K",
+      metadataUri: `ipfs://${META_CID}\u0000`,
+    };
+    const state = await loadFoldState(db, [launchedEvent]);
+    const folded = foldEvents([launchedEvent], state);
+    await applyFold(db, folded, 190, T0 + 300);
+    expect(await db.query("select name, symbol, metadata_uri, metadata_cid, image_cid from market.launches")).toEqual([
+      { name: "Chalk", symbol: "CHK", metadata_uri: `ipfs://${META_CID}`, metadata_cid: META_CID, image_cid: IMAGE_CID },
+    ]);
+    expect(await readChainCursor(db)).toBe(190);
+  });
+
   it("rolls the launch rows back with the cursor when any statement of the batch throws", async () => {
     const bad = result({ launches: [launchRow()], launchFees: [feeRow({ tokenPlatform: -1n })] }); // violates token_platform >= 0
     await expect(applyFold(db, bad, 160, T0)).rejects.toThrow();

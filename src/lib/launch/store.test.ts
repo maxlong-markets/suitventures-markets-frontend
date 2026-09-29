@@ -42,12 +42,14 @@ function feeRow(o: Partial<LaunchFeesRow> = {}): LaunchFeesRow {
   };
 }
 /** One market.launch_uploads row, written straight: the route's own insert is uploads.ts's business. */
-async function upload(o: { metadataCid?: string; imageCid?: string; status?: string; createdAt?: number; website?: string } = {}): Promise<number> {
+async function upload(
+  o: { metadataCid?: string; imageCid?: string; status?: string; createdAt?: number; website?: string; wallet?: string } = {},
+): Promise<number> {
   const [row] = await db.query<{ id: number | string }>(
     `insert into market.launch_uploads (wallet, image_cid, metadata_cid, image_key, metadata_key, name, symbol, description, website, x, telegram, status, created_at)
      values ($1, $2, $3, 'launch/img/k.webp', 'launch/meta/k.json', 'Tailor''s Chalk', 'CHALK', 'Chalk for tailors.', $4, 'https://x.com/chalk', '', $5, $6)
      returning id`,
-    [CREATOR, o.imageCid ?? IMAGE_CID, o.metadataCid ?? META_CID, o.website ?? "", o.status ?? "pending", o.createdAt ?? T0 - 60],
+    [o.wallet ?? CREATOR, o.imageCid ?? IMAGE_CID, o.metadataCid ?? META_CID, o.website ?? "", o.status ?? "pending", o.createdAt ?? T0 - 60],
   );
   return Number(row!.id);
 }
@@ -114,6 +116,26 @@ describe("attachUploads", () => {
     expect(await launch()).toMatchObject({ image_cid: "" });
     expect((await uploadRows())[0]!.status).toBe("pending");
     expect(await launchHealth(db)).toEqual({ missingUploads: 0, deletedUploads: 0 });
+  });
+
+  it("attaches only an upload made by the launch's creator: another wallet's upload of the same metadata CID is never borrowed", async () => {
+    const theirs = await upload({ wallet: PAYOUT, imageCid: NEWER_IMAGE_CID, website: "https://borrowed.test", createdAt: T0 - 30 });
+    const mine = await upload({ createdAt: T0 - 600 });
+    await insertLaunches(db, [launchRow()], T0);
+    await attachUploads(db, [TOKEN], T0 + 5);
+    expect(await launch()).toMatchObject({ image_cid: IMAGE_CID, website: "", description: "Chalk for tailors." });
+    expect((await uploadRows()).map((r) => [Number(r.id), r.status, r.token_id])).toEqual([
+      [theirs, "pending", ""],
+      [mine, "used", TOKEN],
+    ]);
+  });
+
+  it("attaches nothing when the only upload of that metadata CID came from another wallet", async () => {
+    const theirs = await upload({ wallet: PAYOUT });
+    await insertLaunches(db, [launchRow()], T0);
+    await attachUploads(db, [TOKEN], T0 + 5);
+    expect(await launch()).toMatchObject({ image_cid: "", description: "", website: "", x: "", updated_at: T0 });
+    expect((await uploadRows()).map((r) => [Number(r.id), r.status, r.token_id])).toEqual([[theirs, "pending", ""]]);
   });
 
   it("does nothing for an empty list", async () => {
