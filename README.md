@@ -117,7 +117,8 @@ RPC those reads use, defaulting to the public one.
 The design is `docs/superpowers/specs/2026-09-28-instant-launchpad-design.md`. The reader adds the launchpad as a
 second log selection in its per-minute HyperSync request and folds `Launched`, `FeesCollected` and `PayoutChanged`
 into `market.launches` and `market.launch_fee_events`. A launched token lists with the `SV` badge from its launch
-block. One nobody has bought leaves the table after the listing window below and returns with its first trade; its
+block. A launched token keeps the SV origin, but the badge and the SV filter follow the listed pool, so if another pool
+becomes the listed one the badge can differ. One nobody has bought leaves the table after the listing window below and returns with its first trade; its
 page stays up. `POST /api/launch/upload` re-encodes a creator's image to a WebP and pins it and a metadata JSON on
 Filebase before the launch. Only Suits holders may upload, within the per-wallet limits below. The nightly job's
 `uploads` phase unpins what no launch used.
@@ -129,7 +130,7 @@ Filebase before the launch. Only Suits holders may upload, within the per-wallet
 | Launch image | 512 x 512 WebP |
 | Listing window for a token nobody has bought | 24 hours |
 | Token page re-reads after a launch | every 5 seconds, for up to 5 minutes |
-| A hidden launch's logo answers "no logo" | within 1 hour |
+| A hidden launch's logo answers "no logo" | within about 2 hours at worst |
 
 To hide a launch's image and links, run this in the Supabase SQL editor:
 
@@ -137,14 +138,15 @@ To hide a launch's image and links, run this in the Supabase SQL editor:
 
 Rollout, in this order:
 
-1. Apply the migration with `npm run db:migrate` before pushing. Without the launch tables `/api/health` answers
-   503, the chain job stalls on its first cycle, and logos across the whole site fail, because every logo lookup
-   reads `market.launches`.
+1. Apply the migration with `npm run db:migrate` before pushing. Without the launch tables every token page and
+   `GET /api/tokens/[address]` fail, because the single-token query joins `market.launches`. `/api/health` answers
+   503, and logos across the whole site fail, because every logo lookup reads `market.launches`.
 2. Before rollout, run `EXPLAIN (ANALYZE, BUFFERS)` in production on the pairs query for both scopes, `all` and
    `launchpad`, and confirm the new order uses the `pools_activity` index. The query is `ORDER` in
    `src/lib/market/dbBackend.ts`.
 3. Set `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` only after the contract is deployed, and before anyone launches: a launch the
-   reader has already passed over needs a catch-up rewind to appear.
+   reader has already passed over needs a catch-up rewind to appear. The value is fixed at build time, so setting or
+   changing it takes a redeploy.
 4. Set the Filebase names on Vercel. `FILEBASE_ACCESS_KEY`, `FILEBASE_SECRET_KEY` and `FILEBASE_BUCKET` are
    required. `FILEBASE_GATEWAY_URL` is optional and takes an https origin only.
 
