@@ -245,7 +245,7 @@ export interface MarketsDataSource {
 
   // --- Session ----------------------------------------------------------
 
-  /** The signed-in address, or null: nobody signed in, or sessions are not configured. */
+  /** The signed-in address, or null for nobody signed in. Rejects with `SessionsOffError` where sessions are not configured. */
   session(): Promise<Address | null>;
   /** Nonce, EIP-4361 message, signature, cookie. Answers the address the server accepted. */
   signIn(sign: SignMessage, address: Address): Promise<Address>;

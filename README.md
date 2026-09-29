@@ -258,7 +258,7 @@ sequenceDiagram
   F->>L: currency for the picked quote
   F->>L: predictToken, then openingFor, 300 ms after the last edit
   C->>F: press Launch
-  opt no session yet
+  opt no session yet, normally signed when the wallet connects
     F->>S: GET /api/session/nonce
     S-->>F: nonce and a signed nonce cookie
     F->>W: sign the SIWE message
@@ -551,8 +551,8 @@ Next.js routes and pages:
 | `/launch` | page | creator | none to view | contract views through the wallet RPC | nothing |
 | `/t/[address]` | page | anyone, and the redirect with `?launched=<tx>` | none | the store through the backend | nothing |
 | `/` with the SV origin filter | page | anyone | none | `GET /api/pairs` | nothing |
-| `/api/session/nonce` | GET | form, before sign-in | per-IP budget | nothing | nonce cookie, 10 minutes |
-| `/api/session` | POST | form, after the SIWE signature | nonce cookie, SIWE signature | nonce cookie | session cookie, 7 days |
+| `/api/session/nonce` | GET | the sign-in asked at wallet connect, or the form's fallback step | per-IP budget | nothing | nonce cookie, 10 minutes |
+| `/api/session` | POST | the same, after the SIWE signature | nonce cookie, SIWE signature | nonce cookie | session cookie, 7 days |
 | `/api/session` | GET | app | session cookie | session cookie | nothing |
 | `/api/session` | DELETE | sign out | none | nothing | clears both cookies |
 | `/api/launch/upload` | POST | form, on Launch | session cookie, 60 writes a minute per wallet, 10 uploads a minute per IP, 5 an hour and 20 a day per wallet | `isAllowedLauncher`, `market.launch_uploads` | Filebase PUT twice, one `market.launch_uploads` row |

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { GateKind } from "@/context/AppState";
 import type { Address } from "@/lib/types";
 import { short } from "@/lib/format";
 import { act, fireEvent, render, screen, waitFor } from "@/test/dom";
@@ -8,8 +9,9 @@ const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
 
 const h = vi.hoisted(() => ({
   state: {
-    signModal: { kind: "star" as "star" | "vote" | "launch" },
+    signModal: { kind: "star" } as { kind: GateKind; for?: string },
     address: "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as string | undefined,
+    signed: false,
     completeSign: vi.fn<(sign: (m: string) => Promise<string>, address: string) => Promise<void>>(),
     cancelSign: vi.fn(),
   },
@@ -25,6 +27,7 @@ describe("SignModal", () => {
   beforeEach(() => {
     h.state.signModal = { kind: "star" };
     h.state.address = WALLET;
+    h.state.signed = false;
     h.state.completeSign.mockReset().mockResolvedValue(undefined);
     h.state.cancelSign.mockReset();
     h.signMessageAsync.mockClear();
@@ -71,5 +74,25 @@ describe("SignModal", () => {
     render(<SignModal />);
     expect(screen.getByText("Sign to launch a token")).toBeTruthy();
     expect(screen.getByText(/ties your uploads to this address/)).toBeTruthy();
+  });
+
+  it("says what the connect-time sign-in is for", () => {
+    h.state.signModal = { kind: "connect", for: WALLET.toLowerCase() };
+    render(<SignModal />);
+    expect(screen.getByText("Sign in to MaxLong Markets")).toBeTruthy();
+    expect(screen.getByText(/watchlist, votes and launch images/)).toBeTruthy();
+  });
+
+  it("shows nothing for a connect-time ask once the wallet is signed in", () => {
+    h.state.signModal = { kind: "connect", for: WALLET };
+    h.state.signed = true;
+    const { container } = render(<SignModal />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("shows nothing for a connect-time ask meant for another wallet", () => {
+    h.state.signModal = { kind: "connect", for: "0x1111111111111111111111111111111111111111" };
+    const { container } = render(<SignModal />);
+    expect(container.firstChild).toBeNull();
   });
 });

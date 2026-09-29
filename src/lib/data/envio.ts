@@ -3,6 +3,7 @@ import type { Address, Candle, Denom, HoldersView, Interval, MarketsDataSource, 
 import type { PriceResult } from "@/lib/quote/price";
 import { robinhoodChain } from "@/lib/chain";
 import { localQuote, poolFeePctFor } from "@/lib/quote";
+import { SessionsOffError } from "@/lib/session/errors";
 import { SIWE_STATEMENT } from "@/lib/session/siwe";
 
 async function getJson<T>(path: string): Promise<T> {
@@ -192,12 +193,14 @@ export class EnvioDataSource implements MarketsDataSource {
   // --- Session ----------------------------------------------------------
 
   /**
-   * 503 reads as null, not as a failure: `SESSION_SECRET` unset means "nobody can be signed in",
-   * and the whole read-only app must keep working around it (spec section 2).
+   * 401 is "not signed in". 503 is `SessionsOffError`: `SESSION_SECRET` unset means "nobody can be signed in", and
+   * the whole read-only app must keep working around it (spec section 2); AppState catches it, keeps the app signed
+   * out, and asks for no signature at wallet connect, since none could succeed.
    */
   async session(): Promise<Address | null> {
     const res = await fetch("/api/session", { cache: "no-store", credentials: "same-origin" });
-    if (res.status === 401 || res.status === 503) return null;
+    if (res.status === 401) return null;
+    if (res.status === 503) throw new SessionsOffError();
     if (!res.ok) throw new Error(`/api/session: ${res.status}`);
     return ((await res.json()) as { address: Address }).address;
   }

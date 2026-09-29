@@ -1150,7 +1150,12 @@ missing; valuation out of range; first buy above balance; first buy above the ca
 finished ones:
 
 1. **Sign in.** Only without a session: the existing `SignModal` through `AppState`'s gate, with a new `GateKind`
-   `"launch"`.
+   `"launch"`. Amended 29 Sep 2026: the signature is asked as soon as the connect modal hands over a wallet
+   (`GateKind` `"connect"`, nothing queued behind it), once the cookie probe has settled and the holders-only gate has
+   admitted the wallet, and never on a deployment without `SESSION_SECRET`; so a creator normally reaches this form
+   already signed in. This step stays as the fallback for a wallet that declined that prompt, whose 7-day session
+   expired, whose Suits read failed at connect, or that arrived without the connect modal: an automatic reconnect, or
+   an account switch inside the wallet.
 2. **Upload.** `POST /api/launch/upload`. The answer is kept for this image and these fields, so a retry does not
    upload again; an answer older than 12 hours is refreshed, well inside the 24-hour orphan window.
 3. **Approve.** Only when the total is above zero and the currency's Permit2 allowance is short: ERC-20 `approve(PERMIT2,

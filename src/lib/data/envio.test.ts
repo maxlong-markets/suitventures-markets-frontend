@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSiweMessage } from "viem/siwe";
 import type { Address, Hex, HoldersView, Quote, SwapCall, TokenPair } from "@/lib/types";
+import { SessionsOffError } from "@/lib/session/errors";
 import { EnvioDataSource, StoreUnavailableError } from "./envio";
 
 const TOKEN = "0x000000000000000000000000000000000000000a";
@@ -260,9 +261,14 @@ describe("EnvioDataSource sessions and user data", () => {
     await expect(source().session()).resolves.toBe(WALLET.toLowerCase());
   });
 
-  it.each([401, 503])("answers null when the session route says %i", async (status) => {
-    routes["GET /api/session"] = { status };
+  it("answers null when the session route says 401", async () => {
+    routes["GET /api/session"] = { status: 401 };
     await expect(source().session()).resolves.toBeNull();
+  });
+
+  it("tells sessions being off apart from not being signed in: a 503 is SessionsOffError", async () => {
+    routes["GET /api/session"] = { status: 503 };
+    await expect(source().session()).rejects.toBeInstanceOf(SessionsOffError);
   });
 
   it("signs in: nonce, then the signed message, then the cookie", async () => {

@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Address, Hex, SignMessage, TokenPair, VoteDir, VoteResult } from "@/lib/types";
+import type { SuitsAccess } from "@/lib/suits";
+import { SessionsOffError } from "@/lib/session/errors";
 import { keys, usePairs } from "@/hooks/useMarketsData";
 import { act, fireEvent, queryHarness, render, screen, waitFor } from "@/test/dom";
 import { AppStateProvider, useAppState, type AppState } from "./AppState";
@@ -8,6 +10,8 @@ import { AppStateProvider, useAppState, type AppState } from "./AppState";
 /** Checksummed, as wagmi reports it; the server's copy below is lowercase, as the cookie carries it. */
 const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
 const LOWER = WALLET.toLowerCase() as Address;
+/** A second account in the same wallet, for the switch cases. */
+const OTHER = "0x1111111111111111111111111111111111111111" as Address;
 const TOKEN = "0x000000000000000000000000000000000000000a";
 
 /** Only the four fields the vote flow reads; the rest of a pair never reaches these assertions. */
@@ -15,8 +19,13 @@ const pairRow = (bull: number, bear: number): TokenPair => ({ id: TOKEN, ticker:
 
 const h = vi.hoisted(() => ({
   account: { address: undefined as string | undefined, isConnected: false },
+  /** What AppState registered with wagmi's account effect, so a test can disconnect the wallet the way wagmi would. */
+  accountEffect: null as null | { onDisconnect?: () => void },
   openConnectModal: vi.fn(),
   connectModalOpen: false,
+  /** The holders-only gate as the connect-time ask sees it: on, and this wallet admitted, unless a case says otherwise. */
+  gateOn: true,
+  access: { status: "granted", count: 1n } as SuitsAccess,
   launchRun: vi.fn(),
   launchCancel: vi.fn(),
   ds: {
@@ -31,11 +40,16 @@ const h = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("wagmi", () => ({ useAccount: () => h.account }));
+vi.mock("wagmi", () => ({
+  useAccount: () => h.account,
+  useAccountEffect: (cfg: { onDisconnect?: () => void }) => {
+    h.accountEffect = cfg;
+  },
+}));
 vi.mock("@rainbow-me/rainbowkit", () => ({
   useConnectModal: () => ({ openConnectModal: h.openConnectModal, connectModalOpen: h.connectModalOpen }),
 }));
-vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false }));
+vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false, gateEnabled: () => h.gateOn, useSuitsAccess: () => h.access }));
 // `AppState.tsx` imports this as "./DataSource"; Vitest keys mocks by resolved path, and the `@/`
 // alias resolves to the same file, so the spelling here does not have to match the import's.
 vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
@@ -182,6 +196,9 @@ describe("AppStateProvider sign-in", () => {
     h.ds.pairs.mockReset().mockResolvedValue([pairRow(0, 0)]);
     (sign as ReturnType<typeof vi.fn>).mockClear();
     h.connectModalOpen = false;
+    h.accountEffect = null;
+    h.gateOn = true;
+    h.access = { status: "granted", count: 1n };
     h.launchRun.mockReset();
     h.launchCancel.mockReset();
   });
@@ -240,6 +257,262 @@ describe("AppStateProvider sign-in", () => {
     });
     await waitFor(() => expect(h.launchRun).toHaveBeenCalledTimes(1));
     expect(h.launchCancel).not.toHaveBeenCalled();
+  });
+
+  /** The connect modal opens, then closes with a wallet in hand: RainbowKit's hand-over, as the mocks see it. */
+  function connectThroughModal(rerenderApp: () => void) {
+    h.connectModalOpen = true;
+    rerenderApp();
+    h.account = { address: WALLET, isConnected: true };
+    h.connectModalOpen = false;
+    rerenderApp();
+  }
+
+  /** The order RainbowKit usually produces: the wallet is in hand one commit before the modal closes. */
+  function connectThenClose(rerenderApp: () => void) {
+    h.connectModalOpen = true;
+    rerenderApp();
+    h.account = { address: WALLET, isConnected: true };
+    rerenderApp();
+    h.connectModalOpen = false;
+    rerenderApp();
+  }
+
+  it("asks for the signature as soon as the connect modal hands over a wallet, so a launch then has no sign-in step", async () => {
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    // Nothing was queued behind the connect-time signature, so nothing ran on it.
+    expect(h.launchRun).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("launch"));
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    await waitFor(() => expect(h.launchRun).toHaveBeenCalledTimes(1));
+  });
+
+  it("asks the same way when the wallet is in hand a commit before the modal closes", async () => {
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    connectThenClose(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+  });
+
+  it("asks nothing at connect when the cookie already holds this wallet's session", async () => {
+    h.ds.session.mockResolvedValue(LOWER);
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("waits for the cookie probe before deciding whether to ask at connect", async () => {
+    const probe = deferred<string | null>();
+    h.ds.session.mockReturnValue(probe.promise);
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    connectThroughModal(rerenderApp);
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    await act(async () => probe.settle(null));
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+  });
+
+  it("lets an action queued behind the connect own the prompt, and asks nothing more once it is declined", async () => {
+    const probe = deferred<string | null>();
+    h.ds.session.mockReturnValue(probe.promise);
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    fireEvent.click(screen.getByText("launch"));
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("launch"));
+    act(() => api!.cancelSign());
+    expect(h.launchCancel).toHaveBeenCalledTimes(1);
+    // The probe settling late finds the one "no" already given.
+    await act(async () => probe.settle(null));
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    expect(h.launchRun).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing more when a star pressed during a slow probe is declined", async () => {
+    const probe = deferred<string | null>();
+    h.ds.session.mockReturnValue(probe.promise);
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    connectThroughModal(rerenderApp);
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    fireEvent.click(screen.getByText("star"));
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+    act(() => api!.cancelSign());
+    await act(async () => probe.settle(null));
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("asks nothing on a reload's automatic reconnect, and a launch then asks in its own step", async () => {
+    // Connected from the first render with the connect modal never opened: how a reload looks.
+    show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    fireEvent.click(screen.getByText("launch"));
+    expect(screen.getByTestId("modal").textContent).toBe("launch");
+  });
+
+  it("leaves a wallet that declined the connect-time signature connected, and asks again on a launch", async () => {
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+    act(() => api!.cancelSign());
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    expect(screen.getByTestId("signed").textContent).toBe("false");
+    expect(h.launchCancel).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("launch"));
+    expect(screen.getByTestId("modal").textContent).toBe("launch");
+  });
+
+  it("waits for the holders-only gate, and asks once the wallet is admitted", async () => {
+    h.access = { status: "checking" };
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    connectThroughModal(rerenderApp);
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    h.access = { status: "granted", count: 1n };
+    rerenderApp();
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+  });
+
+  it("never asks a wallet the gate turns away, so the lock screen stays signature-free", async () => {
+    h.access = { status: "denied", count: 0n };
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    connectThroughModal(rerenderApp);
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("asks at connect with the gate off, whatever the Suits read says", async () => {
+    h.gateOn = false;
+    h.access = { status: "idle" };
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+  });
+
+  it("asks nothing at connect on a deployment with sessions off", async () => {
+    h.ds.session.mockRejectedValue(new SessionsOffError());
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    await flush();
+    connectThroughModal(rerenderApp);
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("closes a connect-time ask when the wallet leaves, and the next hand-over starts clean", async () => {
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+    act(() => {
+      h.account = { address: undefined, isConnected: false };
+      h.accountEffect?.onDisconnect?.();
+    });
+    rerenderApp();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
+  });
+
+  it("closes an action's dialog when the cookie probe finds the session late, and runs the action", async () => {
+    const probe = deferred<string | null>();
+    h.ds.session.mockReturnValue(probe.promise);
+    show();
+    fireEvent.click(screen.getByText("star"));
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+    await act(async () => probe.settle(LOWER));
+    await waitFor(() => expect(h.ds.setWatch).toHaveBeenCalledWith(TOKEN, true));
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("keeps a refused star dialog as it is when the probe settles late, instead of turning it into the connect ask", async () => {
+    const probe = deferred<string | null>();
+    h.ds.session.mockReturnValue(probe.promise);
+    h.ds.signIn.mockRejectedValueOnce(new Error("401"));
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    connectThroughModal(rerenderApp);
+    await flush();
+    fireEvent.click(screen.getByText("star"));
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await act(async () => probe.settle(null));
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("star");
+  });
+
+  it("keeps a queued launch's refused dialog as it is when the probe settles late", async () => {
+    const probe = deferred<string | null>();
+    h.ds.session.mockReturnValue(probe.promise);
+    h.ds.signIn.mockRejectedValueOnce(new Error("401"));
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    fireEvent.click(screen.getByText("launch"));
+    connectThroughModal(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("launch"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.launchCancel).toHaveBeenCalledTimes(1));
+    await act(async () => probe.settle(null));
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("launch");
+  });
+
+  it("asks a queued launch's own signature once when the wallet is in hand before the modal closes", async () => {
+    h.account = { address: undefined, isConnected: false };
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    fireEvent.click(screen.getByText("launch"));
+    connectThenClose(rerenderApp);
+    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("launch"));
+    await act(async () => {
+      fireEvent.click(screen.getByText("complete"));
+    });
+    await waitFor(() => expect(h.launchRun).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+  });
+
+  it("asks nothing when the wallet switches accounts inside the extension", async () => {
+    const { rerenderApp } = show();
+    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
+    await flush();
+    h.account = { address: OTHER, isConnected: true };
+    rerenderApp();
+    await flush();
+    expect(screen.getByTestId("modal").textContent).toBe("none");
+    expect(screen.getByTestId("signed").textContent).toBe("false");
   });
 
   it("seeds the session from the cookie, matching a lowercase address to a checksummed wallet", async () => {

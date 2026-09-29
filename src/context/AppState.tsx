@@ -10,7 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useAccount } from "wagmi";
+import { useAccount, useAccountEffect } from "wagmi";
 import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { useQueryClient, type Query } from "@tanstack/react-query";
 import {
@@ -23,7 +23,8 @@ import {
   type SortKey,
 } from "@/lib/markets";
 import type { Address, SignMessage, TokenPair, VoteDir } from "@/lib/types";
-import { useIsSuitHolder } from "@/lib/suits";
+import { gateEnabled, useIsSuitHolder, useSuitsAccess } from "@/lib/suits";
+import { SessionsOffError } from "@/lib/session/errors";
 import { keys, useVotes, useWatchlist } from "@/hooks/useMarketsData";
 import { useDataSource } from "./DataSource";
 
@@ -40,7 +41,12 @@ export interface Toast {
   hash?: string;
 }
 
-export type GateKind = "star" | "vote" | "launch";
+/** What a signature was asked for: one of the gated actions, or "connect", asked as soon as the connect modal hands over a wallet. */
+export type GateKind = "star" | "vote" | "launch" | "connect";
+/** The kinds an action can queue under; a connect-time ask queues nothing. */
+export type ActionKind = Exclude<GateKind, "connect">;
+/** What the sign modal is open for: an action's own prompt, or the connect-time ask, tied to the wallet it was asked of. */
+export type SignRequest = { kind: ActionKind } | { kind: "connect"; for: Address };
 interface GateContext {
   /** The signed-in address. M4's two gated actions no longer need it — the cookie is the
    *  identity — but the gate keeps handing it over for the ones that will. */
@@ -75,7 +81,7 @@ export interface AppState {
    */
   votePending: ReadonlySet<string>;
 
-  signModal: { kind: GateKind } | null;
+  signModal: SignRequest | null;
   /** Opens the connect or sign-in flow with nothing queued behind it; `/watchlist` uses it. */
   promptSignIn(): void;
   /**
@@ -85,7 +91,7 @@ export interface AppState {
    * (the sign modal closed, the signature refused, the connect modal closed with no wallet, or a newer gesture replacing
    * it), so the caller can drop what it queued.
    */
-  withSignIn(kind: GateKind, run: () => void, onCancel?: () => void): void;
+  withSignIn(kind: ActionKind, run: () => void, onCancel?: () => void): void;
   completeSign(sign: SignMessage, address: Address): Promise<void>;
   cancelSign(): void;
 
@@ -191,8 +197,20 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   // (Task 4 review F6).
   const [sessionLoading, setSessionLoading] = useState(true);
   const signed = sameAddress(session?.address, address);
-  const [signModal, setSignModal] = useState<{ kind: GateKind } | null>(null);
-  const pendingRef = useRef<{ kind: GateKind; run: GatedAction; onCancel?: () => void } | null>(null);
+  const [signModal, setSignModal] = useState<SignRequest | null>(null);
+  const pendingRef = useRef<{ kind: ActionKind; run: GatedAction; onCancel?: () => void } | null>(null);
+  /** Armed when the connect modal hands over a wallet; consumed by the hand-over effect, or by whatever asks first. */
+  const askOnHandOver = useRef(false);
+  /** The probe met a 503: `SESSION_SECRET` is unset here, so no sign-in can succeed and none is asked unprompted. */
+  const sessionsOff = useRef(false);
+  /**
+   * The holders-only gate's answer (D44). The connect-time ask waits for it and is dropped for a wallet it turns away,
+   * so the lock screen never asks for a signature. This is the same `balanceOf` read `TokenGate` makes, so no request
+   * is added; a read that failed counts as not admitted, and the gate still asks later for whatever needs a session.
+   */
+  const access = useSuitsAccess(address);
+  const accessPending = gateEnabled() && access.status === "checking";
+  const admitted = !gateEnabled() || access.status === "granted";
 
   // On load the cookie says whether this browser is already signed in, so a wallet that signed in
   // on another device sees its watchlist here without signing again. A failed probe means "not
@@ -204,7 +222,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       .then((addr) => {
         if (alive && addr) setSession((s) => s ?? { address: addr });
       })
-      .catch(() => undefined)
+      .catch((err: unknown) => {
+        if (alive && err instanceof SessionsOffError) sessionsOff.current = true;
+      })
       .finally(() => {
         if (alive) setSessionLoading(false);
       });
@@ -244,10 +264,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   const gate = useCallback(
-    (kind: GateKind, run: GatedAction, onCancel?: () => void) => {
+    (kind: ActionKind, run: GatedAction, onCancel?: () => void) => {
       // A new gesture replaces whatever was queued: the replaced action is abandoned, so its owner is told
       // (a star pressed while a launch waits for its signature must never let that launch fire later).
-      const replace = (next: { kind: GateKind; run: GatedAction; onCancel?: () => void }) => {
+      const replace = (next: { kind: ActionKind; run: GatedAction; onCancel?: () => void }) => {
         const previous = pendingRef.current;
         pendingRef.current = next;
         if (previous && previous !== next) previous.onCancel?.();
@@ -259,6 +279,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
       if (!sameAddress(session?.address, address)) {
         replace({ kind, run, onCancel });
+        // This prompt is the one this wallet gets: a connect-time ask still waiting on the cookie probe stands down.
+        askOnHandOver.current = false;
         setSignModal({ kind });
         return;
       }
@@ -275,36 +297,63 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const promptSignIn = useCallback(() => gate("star", () => {}), [gate]);
 
   const withSignIn = useCallback(
-    (kind: GateKind, run: () => void, onCancel?: () => void) => gate(kind, () => run(), onCancel),
+    (kind: ActionKind, run: () => void, onCancel?: () => void) => gate(kind, () => run(), onCancel),
     [gate],
   );
 
-  // A wallet connected while an action was waiting: continue to the signature.
+  // A wallet connected while an action was waiting: continue to the signature. A session found late (the cookie probe
+  // settling after the action's dialog opened) fires the action and closes that dialog, which has nothing left to ask.
   useEffect(() => {
-    if (!isConnected || !address || !pendingRef.current) return;
-    if (sameAddress(session?.address, address)) {
-      const { run } = pendingRef.current;
+    if (!isConnected || !address) return;
+    const pending = pendingRef.current;
+    if (pending && sameAddress(session?.address, address)) {
       pendingRef.current = null;
-      fire(run, { address });
-    } else {
-      setSignModal({ kind: pendingRef.current.kind });
+      setSignModal(null);
+      fire(pending.run, { address });
+    } else if (pending) {
+      setSignModal({ kind: pending.kind });
     }
   }, [isConnected, address, fire, session]);
 
-  // The connect modal closed and no wallet arrived: the action queued behind it is abandoned (its owner is told).
+  /**
+   * The connect modal closed. With no wallet: the action queued behind it is abandoned (its owner is told). With a
+   * wallet in hand: the signature is asked right here, so the launch form, the star and the vote find a session
+   * instead of each asking in its own moment. It waits for the cookie probe, because a wallet that signed in here
+   * within the last 7 days must not be asked again, and for the holders-only gate, so a wallet it turns away is never
+   * asked. An action queued behind the connect owns the one prompt (the effect above), so the hand-over arms nothing
+   * then. A reload's automatic reconnect never opens the connect modal, so it asks nothing here, and the gate still
+   * asks later for whatever needs a session. Declining leaves the wallet connected and signed out, and the gate asks
+   * again on the next gated action.
+   */
   const connectWasOpen = useRef(false);
   useEffect(() => {
     if (connectModalOpen) {
       connectWasOpen.current = true;
       return;
     }
-    if (!connectWasOpen.current) return;
-    connectWasOpen.current = false;
-    if (isConnected) return; // connected: the effect above carries the action on
-    const abandoned = pendingRef.current;
-    pendingRef.current = null;
-    abandoned?.onCancel?.();
-  }, [connectModalOpen, isConnected]);
+    if (connectWasOpen.current) {
+      connectWasOpen.current = false;
+      if (!isConnected) {
+        const abandoned = pendingRef.current;
+        pendingRef.current = null;
+        abandoned?.onCancel?.();
+        return;
+      }
+      askOnHandOver.current = !pendingRef.current;
+    }
+    if (!askOnHandOver.current || sessionLoading || accessPending) return;
+    askOnHandOver.current = false;
+    if (sessionsOff.current || !admitted || !isConnected || !address || pendingRef.current || sameAddress(session?.address, address)) return;
+    setSignModal({ kind: "connect", for: address });
+  }, [connectModalOpen, isConnected, sessionLoading, accessPending, admitted, address, session]);
+
+  // The wallet left while a connect-time ask was open or still waiting: both are over. A wallet connected later gets
+  // its own hand-over, or nothing, rather than a dialog left behind by the previous one.
+  const onDisconnect = useCallback(() => {
+    askOnHandOver.current = false;
+    setSignModal((m) => (m?.kind === "connect" ? null : m));
+  }, []);
+  useAccountEffect({ onDisconnect });
 
   /**
    * Nonce, message, signature, cookie — all inside the data source. It throws when the wallet
@@ -326,6 +375,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
       setSession({ address: signedAddress });
       setSignModal(null);
+      askOnHandOver.current = false;
       const pending = pendingRef.current;
       pendingRef.current = null;
       if (pending) fire(pending.run, { address: signedAddress });
@@ -334,9 +384,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   const cancelSign = useCallback(() => {
-    // Closed without signing: the queued action is dropped, and its owner is told so it can undo what it showed.
+    // Closed without signing: the queued action is dropped, and its owner is told so it can undo what it showed. A
+    // connect-time ask still waiting on the cookie probe is dropped too: one "no" is the answer to both.
     const pending = pendingRef.current;
     pendingRef.current = null;
+    askOnHandOver.current = false;
     setSignModal(null);
     pending?.onCancel?.();
   }, []);

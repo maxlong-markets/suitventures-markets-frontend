@@ -8,6 +8,21 @@ import type { Address, SignMessage } from "@/lib/types";
 import { short } from "@/lib/format";
 import { Spinner, SuitsMark } from "./ui";
 
+const TITLES: Record<GateKind, string> = {
+  star: "Sign to save your watchlist",
+  vote: "Sign to cast your vote",
+  launch: "Sign to launch a token",
+  connect: "Sign in to MaxLong Markets",
+};
+
+/** Asked at wallet connect, the one signature covers everything a session is for; asked by an action, it says what that action needs it for. */
+const WHAT_FOR: Record<GateKind, string> = {
+  star: "A one-time signature ties your watchlist and votes to this address. No gas, no transaction, nothing moves.",
+  vote: "A one-time signature ties your watchlist and votes to this address. No gas, no transaction, nothing moves.",
+  launch: "A one-time signature ties your uploads to this address. No gas, no transaction, nothing moves.",
+  connect: "A one-time signature ties your watchlist, votes and launch images to this address. No gas, no transaction, nothing moves.",
+};
+
 function SignDialog({
   kind,
   address,
@@ -75,13 +90,9 @@ function SignDialog({
           </button>
         </div>
         <div id="sign-title" className="mt-4 text-[17px] font-medium">
-          {kind === "vote" ? "Sign to cast your vote" : kind === "launch" ? "Sign to launch a token" : "Sign to save your watchlist"}
+          {TITLES[kind]}
         </div>
-        <p className="mt-2 text-pretty text-[12.5px] leading-[1.55] text-ink-55">
-          {kind === "launch"
-            ? "A one-time signature ties your uploads to this address. No gas, no transaction, nothing moves."
-            : "A one-time signature ties your watchlist and votes to this address. No gas, no transaction, nothing moves."}
-        </p>
+        <p className="mt-2 text-pretty text-[12.5px] leading-[1.55] text-ink-55">{WHAT_FOR[kind]}</p>
         <div className="mt-4 break-all border border-hairline px-3 py-[10px] font-mono text-[10.5px] leading-[1.6] text-ink-50">
           {preview}
         </div>
@@ -119,8 +130,12 @@ function SignDialog({
 }
 
 export default function SignModal() {
-  const { signModal, address, completeSign, cancelSign } = useAppState();
+  const { signModal, address, signed, completeSign, cancelSign } = useAppState();
   if (!signModal || !address) return null;
+  // The connect-time ask belongs to the wallet it was asked of, while that wallet holds no session: an account switched
+  // inside the extension is not asked by a dialog meant for another, and one that signed in earlier is not asked at all.
+  // An action's dialog keeps its own closing path in AppState.
+  if (signModal.kind === "connect" && (signed || signModal.for.toLowerCase() !== address.toLowerCase())) return null;
   return (
     <SignDialog
       key={address}
