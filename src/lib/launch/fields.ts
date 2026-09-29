@@ -20,8 +20,14 @@ export function utf8Bytes(s: string): number {
   return encoder.encode(s).length;
 }
 
-/** Every C0 control character and DEL, except the newline. */
-const CONTROL = /[\x00-\x09\x0B-\x1F\x7F]/;
+/** Every C0 control character, DEL and every C1 control character, except the newline. */
+const CONTROL = /[\x00-\x09\x0B-\x1F\x7F-\x9F]/;
+/**
+ * What a name or symbol may not hold, so a token cannot pass itself off as another: C0 and C1 controls and DEL (line
+ * breaks included), U+2028 and U+2029, the bidi controls (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and
+ * the zero-width characters (U+200B to U+200D, U+2060, U+FEFF).
+ */
+const SPOOFING = /[\x00-\x1F\x7F-\x9F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/;
 const X_HANDLE = /^@?([A-Za-z0-9_]{1,15})$/;
 const X_URL = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/?$/;
 const TG_NAME = /^@?([A-Za-z0-9_]{5,32})$/;
@@ -52,17 +58,19 @@ function telegram(raw: string): string | null {
 /** The first failing field in form order, or the fields as they will be stored (links normalised). */
 export function validateFields(raw: LaunchFields): FieldCheck {
   const nameBytes = utf8Bytes(raw.name);
-  if (nameBytes === 0 || nameBytes > NAME_MAX_BYTES) return { ok: false, field: "name" };
+  if (nameBytes === 0 || nameBytes > NAME_MAX_BYTES || SPOOFING.test(raw.name)) return { ok: false, field: "name" };
   const symbolBytes = utf8Bytes(raw.symbol);
-  if (symbolBytes === 0 || symbolBytes > SYMBOL_MAX_BYTES) return { ok: false, field: "symbol" };
-  if ([...raw.description].length > DESCRIPTION_MAX_CHARS || CONTROL.test(raw.description)) return { ok: false, field: "description" };
+  if (symbolBytes === 0 || symbolBytes > SYMBOL_MAX_BYTES || SPOOFING.test(raw.symbol)) return { ok: false, field: "symbol" };
+  // Multipart encoding turns every newline into CRLF; store the newline the person typed. A bare CR stays refused.
+  const description = raw.description.replace(/\r\n/g, "\n");
+  if ([...description].length > DESCRIPTION_MAX_CHARS || CONTROL.test(description)) return { ok: false, field: "description" };
   const site = website(raw.website);
   if (site === null) return { ok: false, field: "website" };
   const x = xProfile(raw.x);
   if (x === null) return { ok: false, field: "x" };
   const tg = telegram(raw.telegram);
   if (tg === null) return { ok: false, field: "telegram" };
-  return { ok: true, fields: { name: raw.name, symbol: raw.symbol, description: raw.description, website: site, x, telegram: tg } };
+  return { ok: true, fields: { name: raw.name, symbol: raw.symbol, description, website: site, x, telegram: tg } };
 }
 
 /** The pinned metadata document (spec 6): keys in this order, no whitespace, empty strings kept. */

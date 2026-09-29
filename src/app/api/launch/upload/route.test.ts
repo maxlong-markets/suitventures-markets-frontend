@@ -189,6 +189,8 @@ describe("POST /api/launch/upload, in the order of spec 6's checks", () => {
     expect(await refusal(await post(form()))).toMatchObject({ status: 502, body: { code: "storage-failed" } });
     filebase.mockImplementationOnce(async () => new Response(null, { status: 200 }));
     expect(await refusal(await post(form()))).toMatchObject({ status: 502, body: { code: "storage-failed" } });
+    filebase.mockImplementationOnce(async () => new Response(null, { status: 200, headers: { "x-amz-meta-cid": "not a cid" } }));
+    expect(await refusal(await post(form()))).toMatchObject({ status: 502, body: { code: "storage-failed" } });
     expect(await rows()).toEqual([]);
   });
 
@@ -207,6 +209,16 @@ describe("POST /api/launch/upload, in the order of spec 6's checks", () => {
       `{"name":"Tailor's Chalk","symbol":"CHALK","description":"Chalk for tailors.","image":"ipfs://${IMAGE_CID}","website":"https://chalk.test","x":"https://x.com/chalk","telegram":""}`,
     );
     expect(await rows()).toEqual([{ status: "pending", wallet: WALLET, x: "https://x.com/chalk", image_key: `launch/img/${sha(img!.body)}.webp` }]);
+  });
+
+  it("6: takes a multi-line description through real multipart encoding and pins the newline, not CRLF", async () => {
+    const res = await post(form({ description: "Chalk for tailors.\nAnd for chalkboards." }));
+    expect(res.status).toBe(200);
+    const pinned = new TextDecoder().decode(calls[1]!.body);
+    expect(pinned).toContain('"description":"Chalk for tailors.\\nAnd for chalkboards."');
+    expect(pinned).not.toContain("\\r");
+    const [row] = await db.query<{ description: string }>("select description from market.launch_uploads");
+    expect(row!.description).toBe("Chalk for tailors.\nAnd for chalkboards.");
   });
 
   it("pins one still frame of an animated GIF, and nothing appended after a PNG's end", async () => {

@@ -24,6 +24,26 @@ describe("validateFields (instant launchpad design, section 6)", () => {
     expect(check({ description: "cr\rhere" })).toEqual({ ok: false, field: "description" });
   });
 
+  it("keeps a multipart CRLF as the newline typed, refuses a bare CR, and refuses C1 controls in the description", () => {
+    expect(check({ description: "line one\r\nline two" })).toEqual({ ok: true, fields: { ...OK, description: "line one\nline two" } });
+    expect(check({ description: "a".repeat(499) + "\r\n" })).toMatchObject({ ok: true }); // 500 once normalised
+    expect(check({ description: "bare\rcr" })).toEqual({ ok: false, field: "description" });
+    expect(check({ description: "c1\u0085here" })).toEqual({ ok: false, field: "description" });
+    expect(check({ description: "c1\u009fhere" })).toEqual({ ok: false, field: "description" });
+  });
+
+  it("refuses spoofing characters in the name and symbol: controls, line breaks, bidi controls, zero-width characters", () => {
+    const controls = ["\u0000", "\u0009", "\u001f", "\u007f", "\u0080", "\u009f"];
+    const breaks = ["\n", "\r", "\r\n", "\u2028", "\u2029"];
+    const bidi = ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069", "\u200e", "\u200f", "\u061c"];
+    const zeroWidth = ["\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"];
+    for (const c of [...controls, ...breaks, ...bidi, ...zeroWidth]) {
+      expect(check({ name: `Chalk${c}` })).toEqual({ ok: false, field: "name" });
+      expect(check({ symbol: `CH${c}K` })).toEqual({ ok: false, field: "symbol" });
+    }
+    expect(check({ name: "Crème Chalk 🚀", symbol: "ÇHALK" })).toMatchObject({ ok: true });
+  });
+
   it("takes an https website of at most 200 characters as typed, and refuses anything else", () => {
     expect(check({ website: "https://chalk.test/about" })).toMatchObject({ ok: true, fields: { website: "https://chalk.test/about" } });
     expect(check({ website: "http://chalk.test" })).toEqual({ ok: false, field: "website" });

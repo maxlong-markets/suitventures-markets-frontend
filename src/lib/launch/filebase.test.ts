@@ -50,10 +50,21 @@ describe("putObject and deleteObject (spec 6 step 11 and the orphan phase)", () 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     fetchMock.mockImplementationOnce(async () => new Response(null, { status: 200 }));
     await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).rejects.toThrow(/no CID/);
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 200, headers: { "x-amz-meta-cid": '"},"x":"javascript:1' } }));
+    await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).rejects.toThrow(/no CID/);
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 200, headers: { "x-amz-meta-cid": "bafyTooShort" } }));
+    await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).rejects.toThrow(/no CID/);
     fetchMock.mockImplementationOnce(async () => {
       throw new TypeError("fetch failed");
     });
     await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).rejects.toBeInstanceOf(FilebaseError);
+  });
+
+  it("accepts a CIDv0 and a base32 CIDv1", async () => {
+    const v0 = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG";
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 200, headers: { "x-amz-meta-cid": v0 } }));
+    await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).resolves.toBe(v0);
+    await expect(putObject(CFG, "k", new Uint8Array([1]), "image/webp")).resolves.toBe(CID);
   });
 
   it("deletes a key, treating an already-missing object as deleted", async () => {

@@ -10,6 +10,8 @@ import { AwsClient } from "aws4fetch";
  */
 export const FILEBASE_S3_URL = "https://s3.filebase.com";
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** A CIDv0 (base58 "Qm…") or a base32 CIDv1 ("b…"): the only shapes the route will put into a metadata document. */
+const CID_SHAPE = /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{20,})$/;
 
 export type FilebaseConfig = { accessKey: string; secretKey: string; bucket: string };
 
@@ -56,7 +58,7 @@ export async function putObject(
   }
   if (!res.ok) throw new FilebaseError(`PUT ${key} answered ${res.status}`);
   const cid = res.headers.get("x-amz-meta-cid");
-  if (!cid) throw new FilebaseError(`PUT ${key} answered no CID`);
+  if (!cid || !CID_SHAPE.test(cid)) throw new FilebaseError(`PUT ${key} answered no CID`);
   return cid;
 }
 
