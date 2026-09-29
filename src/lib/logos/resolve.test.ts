@@ -462,6 +462,35 @@ describe("resolveLogo: a launch made here (instant launchpad design, section 5.6
     expect(launchImage).toHaveBeenCalledTimes(2);
   });
 
+  it("never borrows a DexScreener or chain logo for a launch whose metadata cannot be fetched: unknown, not cached", async () => {
+    const fetchJson = vi.fn<LogoDeps["fetchJson"]>(async (url) => {
+      if (url.includes("dexscreener")) return { pairs: [{ info: { imageUrl: "https://dd.dexscreener.com/a.png" } }] };
+      throw new Error("gateway down");
+    });
+    const launchImage = row({ imageCid: "" });
+    const d = deps({ launchImage, fetchJson, readString: answers("logo", `ipfs://${IMAGE_CID}`) });
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: null, definite: false });
+    expect(fetchJson.mock.calls.some(([url]) => url.includes("dexscreener"))).toBe(false);
+    expect(d.readString).not.toHaveBeenCalled();
+    await resolveLogo(SV, d);
+    expect(launchImage).toHaveBeenCalledTimes(2); // an unknown is never memoised
+  });
+
+  it("answers a definite no logo, held for the hour, for a launch whose metadata has no image, without DexScreener", async () => {
+    const fetchJson = vi.fn<LogoDeps["fetchJson"]>(async (url) =>
+      url.includes("dexscreener") ? { pairs: [{ info: { imageUrl: "https://dd.dexscreener.com/a.png" } }] } : { name: "no image here" });
+    const launchImage = row({ imageCid: "" });
+    const d = deps({ launchImage, fetchJson });
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: null, definite: true });
+    expect(fetchJson.mock.calls.some(([url]) => url.includes("dexscreener"))).toBe(false);
+    d.now.mockReturnValue(NOW + 59 * 60_000);
+    await expect(resolveLogo(SV, d)).resolves.toEqual({ logo: null, definite: true });
+    expect(launchImage).toHaveBeenCalledTimes(1);
+    d.now.mockReturnValue(NOW + 60 * 60_000 + 1);
+    await resolveLogo(SV, d);
+    expect(launchImage).toHaveBeenCalledTimes(2);
+  });
+
   it("falls through to the existing stages for a token not launched here", async () => {
     const d = deps({ readString: answers("logo", `ipfs://${CID}`) });
     await expect(resolveLogo(BABYHOOD, d)).resolves.toEqual({ logo: { candidates: gateways(CID), source: "pons" }, definite: true });

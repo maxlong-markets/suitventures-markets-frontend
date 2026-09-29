@@ -61,7 +61,7 @@ describe("runNightly", () => {
   it("recomputes every listed pool, probes nothing without a quoter, prunes, and ends with an empty phase", async () => {
     await seedTokensAndPools();
     // No quoter supplied: the probe phase is a no-op and the run still finishes (nightly.ts's own doc comment).
-    expect(await nightly()).toEqual({ done: true, phase: "", listed: 2, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, queries: 0 });
+    expect(await nightly()).toEqual({ done: true, phase: "", listed: 2, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, uploadsFailed: 0, uploadsSkipped: "unconfigured", queries: 0 });
     expect(await listed()).toEqual([{ id: TOKEN_A, listed_pool_id: POOL_A }, { id: TOKEN_B, listed_pool_id: POOL_B }]);
     expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "" });
   });
@@ -133,7 +133,7 @@ describe("runNightly", () => {
     await seedTokensAndPools();
     const quoter: Quoter = { exactIn: async () => 1n, exactOut: async () => { throw new Error("unused by probePools"); } };
     const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
-    expect(result).toEqual({ done: true, phase: "", listed: 2, probed: 2, routable: 2, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, queries: 0 });
+    expect(result).toEqual({ done: true, phase: "", listed: 2, probed: 2, routable: 2, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, uploadsFailed: 0, uploadsSkipped: "unconfigured", queries: 0 });
     expect(await db.query("select id, routable, probed_at from market.pools order by id")).toEqual([
       { id: POOL_A, routable: true, probed_at: T0 + 1000 },
       { id: POOL_B, routable: true, probed_at: T0 + 1000 },
@@ -150,7 +150,7 @@ describe("runNightly", () => {
       exactOut: async () => { throw new Error("unused by probePools"); },
     };
     const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
-    expect(result).toEqual({ done: true, phase: "", listed: 2, probed: 2, routable: 0, unroutable: 0, skipped: 2, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, queries: 0 });
+    expect(result).toEqual({ done: true, phase: "", listed: 2, probed: 2, routable: 0, unroutable: 0, skipped: 2, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, uploadsFailed: 0, uploadsSkipped: "unconfigured", queries: 0 });
     // The partial-outage band is observable in the log too (I4): counts only, no address, no URL.
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/2 of 2 candidates skipped/);
@@ -199,7 +199,7 @@ describe("runNightly", () => {
     ]);
     const quoter: Quoter = { exactIn: async () => 1n, exactOut: async () => { throw new Error("unused by probePools"); } };
     const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
-    expect(result).toEqual({ done: true, phase: "", listed: 2, probed: 2, routable: 2, unroutable: 0, skipped: 0, pruned: 1, prunedCandles: 1, prunedHolders: 0, uploadsDeleted: 0, queries: 0 });
+    expect(result).toEqual({ done: true, phase: "", listed: 2, probed: 2, routable: 2, unroutable: 0, skipped: 0, pruned: 1, prunedCandles: 1, prunedHolders: 0, uploadsDeleted: 0, uploadsFailed: 0, uploadsSkipped: "unconfigured", queries: 0 });
     expect(await db.query("select tx_hash from market.swaps")).toEqual([{ tx_hash: txHash(0xe2) }]);
     expect(await db.query("select t from market.candles")).toEqual([{ t: candleStale + 10 }]);
     expect(await readState(db, "nightly")).toMatchObject({ phase: "", cursorText: "" });
@@ -209,7 +209,7 @@ describe("runNightly", () => {
     await seedTokensAndPools();
     const cutoff = retentionCutoff(T0 + 1000);
     await insertSwaps(db, [swapRec({ txHash: txHash(0xe3), timestamp: cutoff - 10 })]);
-    expect(await nightly()).toEqual({ done: true, phase: "", listed: 2, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 1, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, queries: 0 });
+    expect(await nightly()).toEqual({ done: true, phase: "", listed: 2, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 1, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, uploadsFailed: 0, uploadsSkipped: "unconfigured", queries: 0 });
     expect(await db.query("select tx_hash from market.swaps")).toEqual([]);
   });
 
@@ -349,13 +349,42 @@ describe("runNightly", () => {
       [T0 + 1000 - 200_000],
     );
     const withoutCleaner = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000 });
-    expect(withoutCleaner).toMatchObject({ done: true, uploadsDeleted: 0 });
+    expect(withoutCleaner).toMatchObject({ done: true, uploadsDeleted: 0, uploadsSkipped: "unconfigured" });
     const uploads = {
       blockTimestamp: vi.fn<UploadCleaner["blockTimestamp"]>(async () => T0 + 1000),
+      objectModifiedAt: vi.fn<UploadCleaner["objectModifiedAt"]>(async () => T0 - 500_000),
       deleteObject: vi.fn<UploadCleaner["deleteObject"]>(async () => {}),
     };
     const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, uploads });
-    expect(result).toMatchObject({ done: true, phase: "", uploadsDeleted: 1 });
+    expect(result).toMatchObject({ done: true, phase: "", uploadsDeleted: 1, uploadsFailed: 0, uploadsSkipped: null });
     expect(uploads.deleteObject.mock.calls.map(([key]) => key)).toEqual(["launch/meta/m1.json", "launch/img/i1.webp"]);
+  });
+
+  it('ends the "uploads" phase when the cut-off cannot be read, reports it, and still runs the probe behind it', async () => {
+    await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    await seedTokensAndPools();
+    await saveCursors(db, "chain", { cursor: 5_000 });
+    await finishRun(db, "chain", { now: T0 + 1000 - 60, ok: true, rows: 0, queries: 0 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const uploads: UploadCleaner = {
+      blockTimestamp: async () => { throw new Error("rpc down"); },
+      objectModifiedAt: async () => null,
+      deleteObject: async () => {},
+    };
+    const quoter: Quoter = { exactIn: async () => 1n, exactOut: async () => { throw new Error("unused by probePools"); } };
+    const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter, uploads });
+    expect(result).toMatchObject({ done: true, phase: "", uploadsSkipped: "rpc", uploadsDeleted: 0, probed: 2, routable: 2 });
+    warn.mockRestore();
+  });
+
+  it('never starts a night at a stored "uploads" phase: listed, prune and holders run first, the probe cursor kept', async () => {
+    await upsertQuotes(db, [quoteRec()], [priceRec()]);
+    await seedTokensAndPools();
+    await db.query("update market.tokens set listed_pool_id = null"); // "listed" must re-run and fill these in
+    await saveCursors(db, "nightly", { phase: "uploads", cursorText: POOL_A });
+    const quoter: Quoter = { exactIn: async () => 1n, exactOut: async () => { throw new Error("unused by probePools"); } };
+    const result = await runNightly(db, { now: T0 + 1000, queryBudget: 240, deadlineMs: Date.now() + 60_000, quoter });
+    expect(result).toMatchObject({ done: true, phase: "", listed: 2, probed: 1 });
+    expect(await listed()).toEqual([{ id: TOKEN_A, listed_pool_id: POOL_A }, { id: TOKEN_B, listed_pool_id: POOL_B }]);
   });
 });

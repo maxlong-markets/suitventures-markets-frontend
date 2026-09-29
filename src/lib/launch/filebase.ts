@@ -72,3 +72,22 @@ export async function deleteObject(cfg: FilebaseConfig, key: string, timeoutMs =
   // S3 answers 204 whether or not the object existed; a 404 from a gateway in front of it means the same.
   if (!res.ok && res.status !== 404) throw new FilebaseError(`DELETE ${key} answered ${res.status}`);
 }
+
+/**
+ * HeadObject: the object's Last-Modified in unix seconds, or null when it is already gone (404). The nightly clean-up
+ * asks this right before each delete, because a re-upload of the same content re-pins the same key after the rows were
+ * judged. An answer without a readable Last-Modified is an error: nothing proves the object old, so it is not deleted.
+ */
+export async function headObject(cfg: FilebaseConfig, key: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<number | null> {
+  let res: Response;
+  try {
+    res = await client(cfg).fetch(objectUrl(cfg, key), { method: "HEAD", signal: AbortSignal.timeout(timeoutMs) });
+  } catch {
+    throw new FilebaseError(`HEAD ${key} got no answer`);
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new FilebaseError(`HEAD ${key} answered ${res.status}`);
+  const ms = Date.parse(res.headers.get("last-modified") ?? "");
+  if (!Number.isFinite(ms)) throw new FilebaseError(`HEAD ${key} answered no Last-Modified`);
+  return Math.floor(ms / 1000);
+}

@@ -16,7 +16,7 @@ export type UploadRow = {
 };
 export type UploadCounts = { hour: number; day: number };
 export type UploadStatus = "pending" | "refused";
-export type CleanableUpload = { id: number; imageCid: string; metadataCid: string; imageKey: string; metadataKey: string };
+export type CleanableUpload = { id: number; createdAt: number; imageCid: string; metadataCid: string; imageKey: string; metadataKey: string };
 
 const COUNTS_SQL = `select count(*) filter (where created_at > $2::int - 3600) as hour, count(*) as day
   from market.launch_uploads
@@ -51,14 +51,27 @@ export async function recordUpload(db: Db, row: UploadRow, now: number): Promise
   });
 }
 
-export async function cleanableUploads(db: Db, cutoff: number, limit: number): Promise<CleanableUpload[]> {
-  const rows = await db.query<{ id: number | string; image_cid: string; metadata_cid: string; image_key: string; metadata_key: string }>(
-    `select id, image_cid, metadata_cid, image_key, metadata_key from market.launch_uploads
+/**
+ * Up to `limit` cleanable rows, oldest first. `after` is a keyset cursor over (created_at, id): the nightly phase walks
+ * past the rows it just left in place (a failed delete, a re-pinned object) instead of reading them again.
+ */
+export async function cleanableUploads(
+  db: Db,
+  cutoff: number,
+  limit: number,
+  after?: { createdAt: number; id: number },
+): Promise<CleanableUpload[]> {
+  const rows = await db.query<{ id: number | string; created_at: number; image_cid: string; metadata_cid: string; image_key: string; metadata_key: string }>(
+    `select id, created_at, image_cid, metadata_cid, image_key, metadata_key from market.launch_uploads
      where status in ('pending', 'refused') and created_at < $1::int
+       and (created_at, id) > ($3::int, $4::bigint)
      order by created_at, id limit $2::int`,
-    [cutoff, limit],
+    [cutoff, limit, after?.createdAt ?? -1, after?.id ?? -1],
   );
-  return rows.map((r) => ({ id: Number(r.id), imageCid: r.image_cid, metadataCid: r.metadata_cid, imageKey: r.image_key, metadataKey: r.metadata_key }));
+  return rows.map((r) => ({
+    id: Number(r.id), createdAt: Number(r.created_at), imageCid: r.image_cid, metadataCid: r.metadata_cid,
+    imageKey: r.image_key, metadataKey: r.metadata_key,
+  }));
 }
 
 /**
@@ -76,5 +89,6 @@ export async function objectNeeded(db: Db, kind: "image" | "metadata", cid: stri
 }
 
 export async function markUploadDeleted(db: Db, id: number): Promise<void> {
-  await db.query("update market.launch_uploads set status = 'deleted' where id = $1", [id]);
+  // Only a cleanable row: a row the reader marked used in the meantime keeps its status.
+  await db.query("update market.launch_uploads set status = 'deleted' where id = $1 and status in ('pending', 'refused')", [id]);
 }

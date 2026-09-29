@@ -103,8 +103,12 @@ describe("the clean-up queries", () => {
     expect((await cleanableUploads(db, NOW - 1000, 10)).map((r) => r.id)).toEqual([a, b, c]);
     expect((await cleanableUploads(db, NOW - 1000, 2)).map((r) => r.id)).toEqual([a, b]);
     expect((await cleanableUploads(db, NOW - 1000, 1))[0]).toEqual({
-      id: a, imageCid: IMAGE, metadataCid: META, imageKey: "launch/img/aa.webp", metadataKey: "launch/meta/bb.json",
+      id: a, createdAt: NOW - 5000, imageCid: IMAGE, metadataCid: META, imageKey: "launch/img/aa.webp", metadataKey: "launch/meta/bb.json",
     });
+    // The keyset cursor walks on past rows already seen, ties on created_at broken by id.
+    const d = await seed("refused", NOW - 4000);
+    expect((await cleanableUploads(db, NOW - 1000, 10, { createdAt: NOW - 5000, id: a })).map((r) => r.id)).toEqual([b, d, c]);
+    expect((await cleanableUploads(db, NOW - 1000, 10, { createdAt: NOW - 4000, id: b })).map((r) => r.id)).toEqual([d, c]);
   });
 
   it("keeps an object another row still needs: a used row, or a pending or refused row newer than the cut-off", async () => {
@@ -122,9 +126,15 @@ describe("the clean-up queries", () => {
     expect(await objectNeeded(db, "metadata", META, lone, NOW - 1000)).toBe(true);
   });
 
-  it("marks a row deleted", async () => {
+  it("marks a pending or refused row deleted, and never a row the reader has since marked used", async () => {
     const id = await seed("pending", NOW - 5000);
     await markUploadDeleted(db, id);
     expect(await db.query("select status from market.launch_uploads where id = $1", [id])).toEqual([{ status: "deleted" }]);
+    const refused = await seed("refused", NOW - 5000);
+    await markUploadDeleted(db, refused);
+    expect(await db.query("select status from market.launch_uploads where id = $1", [refused])).toEqual([{ status: "deleted" }]);
+    const used = await seed("used", NOW - 5000);
+    await markUploadDeleted(db, used);
+    expect(await db.query("select status from market.launch_uploads where id = $1", [used])).toEqual([{ status: "used" }]);
   });
 });

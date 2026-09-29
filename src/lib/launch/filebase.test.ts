@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FilebaseError, deleteObject, filebaseConfig, putObject, type FilebaseConfig } from "./filebase";
+import { FilebaseError, deleteObject, filebaseConfig, headObject, putObject, type FilebaseConfig } from "./filebase";
 
 const CFG: FilebaseConfig = { accessKey: "test-access", secretKey: "test-secret", bucket: "test-bucket" };
 const CID = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq";
@@ -74,5 +74,26 @@ describe("putObject and deleteObject (spec 6 step 11 and the orphan phase)", () 
     await expect(deleteObject(CFG, "gone")).resolves.toBeUndefined();
     fetchMock.mockImplementationOnce(async () => new Response(null, { status: 403 }));
     await expect(deleteObject(CFG, "k")).rejects.toBeInstanceOf(FilebaseError);
+  });
+
+  it("heads a key with the same signing: Last-Modified in unix seconds, null once the object is gone, an error otherwise", async () => {
+    fetchMock.mockImplementationOnce(async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      seen.push(req);
+      return new Response(null, { status: 200, headers: { "last-modified": "Wed, 21 Oct 2026 07:28:00 GMT" } });
+    });
+    await expect(headObject(CFG, "launch/img/abc.webp")).resolves.toBe(Date.UTC(2026, 9, 21, 7, 28, 0) / 1000);
+    expect([seen[0]!.method, seen[0]!.url]).toEqual(["HEAD", "https://s3.filebase.com/test-bucket/launch/img/abc.webp"]);
+    expect(seen[0]!.headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256 Credential=test-access\//);
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 404 }));
+    await expect(headObject(CFG, "gone")).resolves.toBeNull();
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 200 }));
+    await expect(headObject(CFG, "k")).rejects.toThrow(/Last-Modified/);
+    fetchMock.mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    await expect(headObject(CFG, "k")).rejects.toBeInstanceOf(FilebaseError);
+    fetchMock.mockImplementationOnce(async () => {
+      throw new TypeError("fetch failed");
+    });
+    await expect(headObject(CFG, "k")).rejects.toBeInstanceOf(FilebaseError);
   });
 });

@@ -12,9 +12,19 @@ describe("filebaseGatewayBase (spec 5.6)", () => {
     expect(filebaseGatewayBase()).toBe(FILEBASE_GATEWAY_FALLBACK);
     vi.stubEnv("FILEBASE_GATEWAY_URL", "https://gw.example.test/ipfs");
     expect(filebaseGatewayBase()).toBe(FILEBASE_GATEWAY_FALLBACK);
+    for (const bad of [
+      "https://user:pw@gw.example.test", "https://gw.example.test:8443", "https://gw.example.test/?x=1",
+      "https://gw.example.test/#f", "https://gw.example.test?", "https://GW.example.test", "https://gw.example.test//",
+      "not a url", "https://",
+    ]) {
+      vi.stubEnv("FILEBASE_GATEWAY_URL", bad);
+      expect(filebaseGatewayBase(), bad).toBe(FILEBASE_GATEWAY_FALLBACK);
+    }
   });
-  it("uses the dedicated gateway's origin, trailing slashes dropped", () => {
+  it("uses the dedicated gateway's origin, one trailing slash and surrounding space dropped", () => {
     vi.stubEnv("FILEBASE_GATEWAY_URL", "https://maxlong.myfilebase.com/");
+    expect(filebaseGatewayBase()).toBe("https://maxlong.myfilebase.com");
+    vi.stubEnv("FILEBASE_GATEWAY_URL", "  https://maxlong.myfilebase.com  ");
     expect(filebaseGatewayBase()).toBe("https://maxlong.myfilebase.com");
   });
 });

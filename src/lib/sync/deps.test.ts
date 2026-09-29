@@ -41,6 +41,7 @@ describe("syncDeps (I2a: a severed probe is silent unless the wiring itself is t
     const uploads = syncDeps("nightly").uploads;
     expect(typeof uploads?.deleteObject).toBe("function");
     expect(typeof uploads?.blockTimestamp).toBe("function");
+    expect(typeof uploads?.objectModifiedAt).toBe("function");
     expect(syncDeps("market").uploads).toBeUndefined();
   });
 

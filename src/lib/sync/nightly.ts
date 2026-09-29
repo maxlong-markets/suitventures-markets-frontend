@@ -21,6 +21,10 @@ export type NightlyResult = {
   prunedHolders: number;
   /** Uploads whose objects the "uploads" phase removed this run (instant launchpad design, section 6). */
   uploadsDeleted: number;
+  /** Uploads whose delete failed this run and wait for the next night; non-zero night after night means Filebase is refusing. */
+  uploadsFailed: number;
+  /** Why the "uploads" phase did nothing: "unconfigured" (no Filebase names), "reader-stale", "rpc"; null when it ran or was not reached. */
+  uploadsSkipped: "unconfigured" | "reader-stale" | "rpc" | null;
   queries: number;
 };
 
@@ -94,7 +98,7 @@ type Phase = (typeof PHASES)[number];
  */
 export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter; uploads?: UploadCleaner }): Promise<NightlyResult> {
   const state = await readState(db, "nightly");
-  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, queries: 0 };
+  const r: NightlyResult = { done: false, phase: state.phase, listed: 0, probed: 0, routable: 0, unroutable: 0, skipped: 0, pruned: 0, prunedCandles: 0, prunedHolders: 0, uploadsDeleted: 0, uploadsFailed: 0, uploadsSkipped: null, queries: 0 };
   const finish = (done: boolean, phase: string) => {
     r.done = done;
     r.phase = phase;
@@ -110,12 +114,15 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter; up
   // never ran again. Production that morning: 980,942 trades a day past the retention window still stored,
   // the database growing about 660 MB a day against windows (D39) whose whole job is to hold it near 3 GB.
   // The reorder that put prune before probe was the right half of this fix; this is the other half.
-  const resumingProbe = state.phase === "probe";
-  let phase: Phase = !resumingProbe && (PHASES as readonly string[]).includes(state.phase) ? (state.phase as Phase) : "listed";
+  //
+  // "uploads" (instant launchpad, section 6) gets the same treatment as belt and braces: a clean-up stopped by the
+  // deadline must never become the next night's starting phase ahead of listed, prune and holders.
+  const restartsAtFront = state.phase === "probe" || state.phase === "uploads";
+  let phase: Phase = !restartsAtFront && (PHASES as readonly string[]).includes(state.phase) ? (state.phase as Phase) : "listed";
   // The probe's lastId survives the phases in front of it — they have no cursor of their own and must not
   // discard its walk — and is cleared only where it always was: by the run that finishes the walk, at the
   // end of this function. Every phase transition below therefore carries it rather than writing "".
-  let afterId = resumingProbe || phase === state.phase ? state.cursorText : "";
+  let afterId = restartsAtFront || phase === state.phase ? state.cursorText : "";
 
   if (phase === "listed") {
     // No request of its own, so no deadline check: one statement over the whole table.
@@ -171,10 +178,15 @@ export async function runNightly(db: Db, opts: CycleOpts & { quoter?: Quoter; up
     // Instant launchpad (design section 6): the orphan clean-up. It sits before probe for prune's reason: bounded, with
     // no cursor of its own, and it must never be starved by a probe that can take weeks. Skipped without a cleaner
     // (the Filebase names unset, and every other phase's tests).
-    if (opts.uploads) {
+    // It can never hold the run: cleanUploads ends the phase on any failure of its own and answers not-done only at the
+    // deadline, and a stored "uploads" is never a starting phase (below), so the next night begins at "listed" anyway.
+    if (!opts.uploads) r.uploadsSkipped = "unconfigured";
+    else {
       if (Date.now() >= opts.deadlineMs) return finish(false, "uploads");
       const cleaned = await cleanUploads(db, opts.uploads, opts.now, opts.deadlineMs);
       r.uploadsDeleted = cleaned.deleted;
+      r.uploadsFailed = cleaned.failed;
+      r.uploadsSkipped = cleaned.skipped;
       if (!cleaned.done) return finish(false, "uploads");
     }
     phase = "probe";

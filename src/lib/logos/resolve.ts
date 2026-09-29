@@ -416,20 +416,16 @@ export async function resolveLogo(
 
   const ctx: Ctx = { deps: d, deadline: deadline ?? now + TOTAL_BUDGET_MS, incomplete: false };
 
-  // Spec 5.6: a launch made here answers from its own row first. A failed read answers "no logo" for this request only:
-  // falling through could answer, and cache, a DexScreener image for a hidden launch.
+  // Spec 5.6: a launch made here answers from its own row and nothing else. A failed read answers "no logo" for this
+  // request only, and a launch row never falls through to the later stages: either could answer, and cache, a
+  // DexScreener image for a hidden launch, or one anybody could attach to a launch whose own image is missing.
   const launch = await d.launchImage(key);
   if (!launch.ok) return { logo: null, definite: false };
-  if (launch.row?.hidden) {
-    remember(key, { value: null, expires: now + LAUNCH_TTL_MS });
-    return { logo: null, definite: true };
-  }
   if (launch.row) {
-    const own = await fromLaunchRow(launch.row, ctx);
-    if (own) {
-      remember(key, { value: own, expires: now + LAUNCH_TTL_MS });
-      return { logo: own, definite: true };
-    }
+    const own = launch.row.hidden ? null : await fromLaunchRow(launch.row, ctx);
+    const definite = own !== null || !ctx.incomplete;
+    if (definite) remember(key, { value: own, expires: now + LAUNCH_TTL_MS });
+    return { logo: own, definite };
   }
 
   let logo: ResolvedLogo | null = null;
