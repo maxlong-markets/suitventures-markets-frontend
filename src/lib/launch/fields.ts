@@ -23,7 +23,7 @@ export function utf8Bytes(s: string): number {
 /** Every C0 control character, DEL and every C1 control character, except the newline. */
 const CONTROL = /[\x00-\x09\x0B-\x1F\x7F-\x9F]/;
 /**
- * What a name or symbol may not hold, so a token cannot pass itself off as another: C0 and C1 controls and DEL (line
+ * What a name, symbol or website may not hold, so a token cannot pass itself off as another: C0 and C1 controls and DEL (line
  * breaks included), U+2028 and U+2029, the bidi controls (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and
  * the zero-width characters (U+200B to U+200D, U+2060, U+FEFF).
  */
@@ -33,11 +33,17 @@ const X_URL = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/?$
 const TG_NAME = /^@?([A-Za-z0-9_]{5,32})$/;
 const TG_URL = /^https:\/\/(?:www\.)?t\.me\/([A-Za-z0-9_]{5,32})\/?$/;
 
+/**
+ * An https URL of at most 200 characters, stored as the URL parser writes it. The spoofing characters are refused first:
+ * the parser would silently drop a tab or line break and keep a bidi control, so the link shown could differ from the
+ * one typed.
+ */
 function website(raw: string): string | null {
   if (raw === "") return "";
-  if (raw.length > WEBSITE_MAX_CHARS || !raw.startsWith("https://")) return null;
+  if (raw.length > WEBSITE_MAX_CHARS || !raw.startsWith("https://") || SPOOFING.test(raw)) return null;
   try {
-    return new URL(raw).hostname !== "" ? raw : null;
+    const url = new URL(raw);
+    return url.hostname !== "" && url.href.length <= WEBSITE_MAX_CHARS ? url.href : null;
   } catch {
     return null;
   }

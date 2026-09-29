@@ -1,10 +1,12 @@
+import { isAddress } from "viem";
 import type { Address } from "@/lib/types";
 
-const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-
-/** An address, or undefined for anything else: an unset `NEXT_PUBLIC_*` reaches the bundle as "". */
+/**
+ * An address, or undefined for anything else: an unset `NEXT_PUBLIC_*` reaches the bundle as "". A mixed-case value
+ * must carry a correct checksum, so a mistyped address reads as not live instead of pointing at the wrong contract.
+ */
 export function parseLaunchpadAddress(raw: string | undefined): Address | undefined {
-  return raw !== undefined && ADDRESS.test(raw) ? (raw as Address) : undefined;
+  return raw !== undefined && isAddress(raw, { strict: true }) ? (raw as Address) : undefined;
 }
 
 /**

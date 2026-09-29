@@ -51,6 +51,26 @@ describe("validateFields (instant launchpad design, section 6)", () => {
     expect(check({ website: "https://chalk.test/" + "a".repeat(182) })).toEqual({ ok: false, field: "website" }); // 201 characters
   });
 
+  it("refuses spoofing characters in the website, NUL and the right-to-left override among them, and stores the normalised URL", () => {
+    expect(check({ website: "https://chalk.test/\u0000" })).toEqual({ ok: false, field: "website" });
+    expect(check({ website: "https://chalk.test/‮gnp.exe" })).toEqual({ ok: false, field: "website" });
+    for (const c of ["\u0009", "\n", "\r", "\u0085", " ", "​", "﻿", "⁦"]) {
+      expect(check({ website: `https://chalk.test/a${c}b` })).toEqual({ ok: false, field: "website" });
+      expect(check({ website: `https://chalk.test/a${c}` })).toEqual({ ok: false, field: "website" });
+    }
+    expect(check({ website: "https://Chalk.TEST" })).toMatchObject({ ok: true, fields: { website: "https://chalk.test/" } });
+    expect(check({ website: "https://chalk.test/a b" })).toMatchObject({ ok: true, fields: { website: "https://chalk.test/a%20b" } });
+  });
+
+  it("never lets a spoofing character through the X or Telegram fields", () => {
+    for (const c of ["\u0000", "\n", "‮", "​"]) {
+      expect(check({ x: `chalk${c}` })).toEqual({ ok: false, field: "x" });
+      expect(check({ x: `https://x.com/chalk${c}` })).toEqual({ ok: false, field: "x" });
+      expect(check({ telegram: `chalky${c}` })).toEqual({ ok: false, field: "telegram" });
+      expect(check({ telegram: `https://t.me/chalky${c}` })).toEqual({ ok: false, field: "telegram" });
+    }
+  });
+
   it("stores X as https://x.com/<handle> from a handle or an x.com or twitter.com profile URL", () => {
     const x = (value: string) => check({ x: value });
     expect(x("chalk_1")).toMatchObject({ fields: { x: "https://x.com/chalk_1" } });

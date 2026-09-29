@@ -206,7 +206,7 @@ describe("POST /api/launch/upload, in the order of spec 6's checks", () => {
     expect(await sharp(img!.body).metadata()).toMatchObject({ format: "webp", width: 512, height: 512 });
     expect(meta!.url).toBe(`https://s3.filebase.com/test-bucket/launch/meta/${sha(meta!.body)}.json`);
     expect(new TextDecoder().decode(meta!.body)).toBe(
-      `{"name":"Tailor's Chalk","symbol":"CHALK","description":"Chalk for tailors.","image":"ipfs://${IMAGE_CID}","website":"https://chalk.test","x":"https://x.com/chalk","telegram":""}`,
+      `{"name":"Tailor's Chalk","symbol":"CHALK","description":"Chalk for tailors.","image":"ipfs://${IMAGE_CID}","website":"https://chalk.test/","x":"https://x.com/chalk","telegram":""}`,
     );
     expect(await rows()).toEqual([{ status: "pending", wallet: WALLET, x: "https://x.com/chalk", image_key: `launch/img/${sha(img!.body)}.webp` }]);
   });
