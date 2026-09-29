@@ -40,6 +40,7 @@ export const ORIGIN_OPTIONS: ReadonlyArray<{
   { key: "all", label: "All" },
   { key: "LONG", label: "LONG" },
   { key: "Pons", label: "PONS" },
+  { key: "SV", label: "SV" },
   { key: "Uniswap", label: "UNISWAP" },
   { key: "Other", label: "OTHER" },
 ];

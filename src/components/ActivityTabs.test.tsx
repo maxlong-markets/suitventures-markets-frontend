@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { addressUrl, ZERO_ADDRESS } from "@/lib/chain";
-import { fmtAmt, fmtUsdOrDash, short } from "@/lib/format";
-import type { Address, Holder, HoldersView, TokenPair, Trade } from "@/lib/types";
+import { addressUrl, txUrl, ZERO_ADDRESS } from "@/lib/chain";
+import { ageHours, fmtAge, fmtAmt, fmtISODate, fmtUsd, fmtUsdOrDash, short } from "@/lib/format";
+import type { Address, Holder, HoldersView, LaunchInfo, TokenPair, Trade } from "@/lib/types";
 import { render, screen, within } from "@/test/dom";
 import ActivityTabs, { type ActivityTab } from "./ActivityTabs";
 
@@ -191,5 +191,48 @@ describe("ActivityTabs holders", () => {
     const { container } = show("holders");
     expect(container.querySelector("[aria-busy]")).toBeTruthy();
     expect(screen.queryByText(/Building this token/)).toBeNull();
+  });
+});
+
+describe("ActivityTabs: the launch rows (spec 7.3)", () => {
+  const CREATOR = "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" as Address;
+  const PAYOUT = "0xc2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2" as Address;
+  const LAUNCH_TX = `0x${"33".repeat(32)}` as `0x${string}`;
+  const LAUNCHED_AT = 1_999_990_000; // seconds; NOW_MS is 2_000_000_000_000
+  const launch: LaunchInfo = {
+    creator: CREATOR, payout: PAYOUT, quoteAddress: "0x5fc5360d0400a0fd4f2af552add042d716f1d168" as Address, quoteDecimals: 6,
+    tokenIsCurrency0: false, openTick: 398_400, openingValuation: "4995430000", firstBuyIn: "99500000", firstBuyTokens: "19000000000000000000000000",
+    creatorShareBps: 7000, launchedAt: LAUNCHED_AT, launchBlock: 100, launchTx: LAUNCH_TX, hidden: false, imageCid: "bafyimg",
+    description: "", website: "https://chalk.test", x: "https://x.com/chalk", telegram: "https://t.me/chalks", routerFee: "500000",
+    feesCollected: { tokenToPayout: "0", tokenToPlatform: "0", quoteToPayout: "0", quoteToPlatform: "0" }, feesCollectedAt: 0,
+  };
+  const launched: TokenPair = { ...pair, ticker: "CHALK", quote: "USDG", origin: "SV", priceUsd: 0.000005, priceQuote: 0.000005, launch };
+  const info = (p: TokenPair) => render(<ActivityTabs pair={p} now={NOW_MS} tab="info" onTabChange={vi.fn()} />);
+
+  it("lists creator, payout, opening valuation in USD, the gross first buy, the launch and the fee share, then the links", () => {
+    info(launched);
+    expect(screen.getByRole("link", { name: short(CREATOR) }).getAttribute("href")).toBe(addressUrl(CREATOR));
+    expect(screen.getByRole("link", { name: short(PAYOUT) }).getAttribute("href")).toBe(addressUrl(PAYOUT));
+    expect(screen.getByText(fmtUsd(4995.43))).toBeTruthy();
+    expect(screen.getByText(`${fmtAmt(100)} USDG · ${fmtAmt(19_000_000)} CHALK`)).toBeTruthy(); // 99.5 net plus the 0.5 router fee
+    const at = LAUNCHED_AT * 1000;
+    expect(screen.getByRole("link", { name: `${fmtISODate(at)} · ${fmtAge(ageHours(at, NOW_MS))} ago` }).getAttribute("href")).toBe(txUrl(LAUNCH_TX));
+    expect(screen.getByText("70 % payout · 30 % MaxLong")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "https://chalk.test" }).getAttribute("href")).toBe("https://chalk.test");
+    expect(screen.getByRole("link", { name: "https://x.com/chalk" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "https://t.me/chalks" })).toBeTruthy();
+  });
+
+  it("reads the fee share from the launch, never a fixed 70 / 30, and says None without a first buy", () => {
+    info({ ...launched, launch: { ...launch, creatorShareBps: 6500, firstBuyIn: "0", firstBuyTokens: "0", routerFee: "0" } });
+    expect(screen.getByText("65 % payout · 35 % MaxLong")).toBeTruthy();
+    expect(screen.getByText("None")).toBeTruthy();
+  });
+
+  it("shows the opening valuation in the quote when the quote has no USD price (Review Focus 2), and no links for a hidden launch", () => {
+    info({ ...launched, stale: true, priceUsd: 0, launch: { ...launch, hidden: true, website: "", x: "", telegram: "" } });
+    expect(screen.getByText(`${fmtAmt(4995.43)} USDG`)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "https://chalk.test" })).toBeNull();
+    expect(screen.queryByText("Website")).toBeNull();
   });
 });

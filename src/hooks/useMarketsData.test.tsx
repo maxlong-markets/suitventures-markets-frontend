@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StoreUnavailableError } from "@/lib/data/envio";
-import type { Address, Candle, HoldersView, Interval, TraderRow } from "@/lib/types";
-import { queryHarness, renderHook, waitFor } from "@/test/dom";
+import type { Address, Candle, HoldersView, Interval, LaunchInfo, TokenPair, TraderRow } from "@/lib/types";
+import { act, queryHarness, renderHook, waitFor } from "@/test/dom";
 import {
   HOLDERS_FAST_POLL_MS,
   HOLDERS_POLL_MS,
   HOLDERS_SLOW_POLL_MS,
+  LAUNCH_WAIT_MAX_MS,
+  LAUNCH_WAIT_POLL_MS,
   keys,
   useChartCandles,
   useHolders,
+  usePair,
   useTraders,
   useVotes,
   useWatchlist,
@@ -31,6 +34,8 @@ const h = vi.hoisted(() => ({
     votes: vi.fn<() => Promise<Record<string, never>>>(),
     candles: vi.fn<(id: string, interval: Interval) => Promise<Candle[]>>(),
     holders: vi.fn<(id: string) => Promise<HoldersView>>(),
+    pairs: vi.fn<() => Promise<TokenPair[]>>(),
+    pair: vi.fn<(id: string) => Promise<TokenPair | null>>(),
   },
 }));
 
@@ -200,5 +205,64 @@ describe("useHolders", () => {
   it("stops polling once the list is ready, and never polls a token that will not get one", async () => {
     expect(await pollInterval("ready")).toBe(false);
     expect(await pollInterval("skipped")).toBe(false);
+  });
+});
+
+describe("usePair and the instant launchpad (spec 5.5 and 7.3)", () => {
+  const SV = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+  const row = (origin: TokenPair["origin"]) => ({ id: SV, ticker: "CHALK", origin }) as TokenPair;
+  const LAUNCH = { creator: "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" } as unknown as LaunchInfo;
+
+  beforeEach(() => {
+    h.ds.pairs.mockReset();
+    h.ds.pair.mockReset();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("re-reads a listed SV token by id, since only the single-token answer carries its launch block", async () => {
+    h.ds.pairs.mockResolvedValue([row("SV")]);
+    h.ds.pair.mockResolvedValue({ ...row("SV"), launch: LAUNCH });
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => usePair(SV), { wrapper });
+    await waitFor(() => expect(result.current.pair?.launch).toEqual(LAUNCH));
+    expect(h.ds.pair).toHaveBeenCalledWith(SV);
+  });
+
+  it("never re-reads a listed token of another origin", async () => {
+    h.ds.pairs.mockResolvedValue([row("LONG")]);
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => usePair(SV), { wrapper });
+    await waitFor(() => expect(result.current.pair?.origin).toBe("LONG"));
+    expect(h.ds.pair).not.toHaveBeenCalled();
+  });
+
+  it("asks every 5 s while a just-launched token is not indexed, stops once it arrives, and gives up after five minutes", async () => {
+    expect([LAUNCH_WAIT_POLL_MS, LAUNCH_WAIT_MAX_MS]).toEqual([5_000, 300_000]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    h.ds.pairs.mockResolvedValue([]);
+    h.ds.pair.mockResolvedValueOnce(null).mockResolvedValueOnce({ ...row("SV"), launch: LAUNCH });
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => usePair(SV, { launched: true }), { wrapper });
+    await waitFor(() => expect(h.ds.pair).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LAUNCH_WAIT_POLL_MS);
+    });
+    await waitFor(() => expect(result.current.pair?.launch).toEqual(LAUNCH));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * LAUNCH_WAIT_POLL_MS);
+    });
+    expect(h.ds.pair).toHaveBeenCalledTimes(2);
+
+    h.ds.pair.mockReset().mockResolvedValue(null);
+    const late = renderHook(() => usePair("0x" + "5b".repeat(20), { launched: true }), { wrapper: queryHarness().wrapper });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LAUNCH_WAIT_MAX_MS + LAUNCH_WAIT_POLL_MS);
+    });
+    const asked = h.ds.pair.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * LAUNCH_WAIT_POLL_MS);
+    });
+    expect(h.ds.pair.mock.calls.length).toBe(asked);
+    expect(late.result.current.pair).toBeUndefined();
   });
 });

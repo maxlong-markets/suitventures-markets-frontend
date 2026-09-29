@@ -5,11 +5,15 @@ import TokenView from "@/components/TokenView";
 import { ttlCache } from "@/lib/envio/cache";
 import { getBackend } from "@/lib/market/backend";
 import { fmtPct, fmtPrice, fmtUsd, fmtUsdOrDash, fmtInt, MINUS } from "@/lib/format";
-import type { TokenPair } from "@/lib/types";
+import type { Hex, TokenPair } from "@/lib/types";
 
 interface Props {
   params: Promise<{ address: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }
+
+/** `?launched=<tx>` from /launch's redirect (spec 7.3): a transaction hash, or ignored. */
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
 const SITE_URL = "https://www.maxlong.markets";
 // Same key and TTL as src/app/api/tokens/[address]/route.ts's GET handler, so this page's own
@@ -85,10 +89,12 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   };
 }
 
-export default async function TokenPage({ params }: Props) {
+export default async function TokenPage({ params, searchParams }: Props) {
   const { address } = await params;
   const id = decodeURIComponent(address).toLowerCase();
   const pair = await getPair(id);
+  const { launched } = await searchParams;
+  const launchedTx = typeof launched === "string" && TX_HASH.test(launched) ? (launched.toLowerCase() as Hex) : undefined;
 
   return (
     <>
@@ -98,7 +104,7 @@ export default async function TokenPage({ params }: Props) {
       {/* The interactive app stays behind the gate; GatedSection renders a compact lock card in
           its place when the gate is on and the viewer holds no Suit. */}
       <GatedSection>
-        <TokenView address={id} />
+        <TokenView address={id} launchedTx={launchedTx} />
       </GatedSection>
     </>
   );

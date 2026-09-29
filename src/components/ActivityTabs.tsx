@@ -10,9 +10,11 @@ import {
   fmtClock,
   fmtISODate,
   fmtPrice,
+  fmtUsd,
   fmtUsdOrDash,
   short,
 } from "@/lib/format";
+import { toHuman } from "@/lib/quote/math";
 import { Badge } from "./ui";
 
 export type ActivityTab = "trades" | "holders" | "info";
@@ -179,6 +181,33 @@ interface InfoRow {
   href?: string;
 }
 
+/**
+ * The instant launchpad's facts (spec 7.3), appended to the Info tab for a token launched here. The fee share is the
+ * launch's own `creatorShareBps`, never a fixed 70 / 30; a hidden launch arrives with its links blanked, so none show.
+ */
+function launchRows(pair: TokenPair, now: number, quoteUsd: number | null): InfoRow[] {
+  const launch = pair.launch;
+  if (!launch) return [];
+  const quote = (raw: string) => Number(toHuman(BigInt(raw), launch.quoteDecimals));
+  const valuation = quote(launch.openingValuation);
+  const gross = quote((BigInt(launch.firstBuyIn) + BigInt(launch.routerFee)).toString());
+  const tokens = Number(toHuman(BigInt(launch.firstBuyTokens), 18));
+  const at = launch.launchedAt * 1000;
+  const payoutPct = launch.creatorShareBps / 100;
+  const rows: InfoRow[] = [
+    { label: "Creator", value: short(launch.creator), href: addressUrl(launch.creator) },
+    { label: "Payout", value: short(launch.payout), href: addressUrl(launch.payout) },
+    { label: "Opening valuation", value: quoteUsd !== null ? fmtUsd(valuation * quoteUsd) : `${fmtAmt(valuation)} ${pair.quote}` },
+    { label: "First buy", value: launch.firstBuyIn === "0" ? "None" : `${fmtAmt(gross)} ${pair.quote} · ${fmtAmt(tokens)} ${pair.ticker}` },
+    { label: "Launched", value: `${fmtISODate(at)} · ${fmtAge(ageHours(at, now))} ago`, href: txUrl(launch.launchTx) },
+    { label: "Fee share", value: `${payoutPct} % payout · ${100 - payoutPct} % MaxLong` },
+  ];
+  if (launch.website) rows.push({ label: "Website", value: launch.website, href: launch.website });
+  if (launch.x) rows.push({ label: "X", value: launch.x, href: launch.x });
+  if (launch.telegram) rows.push({ label: "Telegram", value: launch.telegram, href: launch.telegram });
+  return rows;
+}
+
 function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
   const quoteUsd = pair.priceUsd / pair.priceQuote;
   const liquidity = fmtUsdOrDash(pair.liquidity);
@@ -206,6 +235,7 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
     // holds useQuotes()'s result to resolve it from — pulling that query into this tab just
     // for a link isn't worth the new fetch, so this row stays unlinked (Task 3 spec note).
     { label: "Quote", value: `${pair.quote} · ${fmtUsdOrDash(pair.stale ? null : quoteUsd)}` },
+    ...launchRows(pair, now, pair.stale || !Number.isFinite(quoteUsd) || !(quoteUsd > 0) ? null : quoteUsd),
   ];
   return (
     <>

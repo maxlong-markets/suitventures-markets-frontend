@@ -27,22 +27,41 @@ export function usePairs() {
   return useQuery({ queryKey: keys.pairs, queryFn: () => ds.pairs() });
 }
 
-export function usePair(id: string) {
+/** Spec 7.3: how often, and for how long, a page opened by /launch's redirect asks again while the reader catches up. */
+export const LAUNCH_WAIT_POLL_MS = 5_000;
+export const LAUNCH_WAIT_MAX_MS = 300_000;
+
+export function usePair(id: string, opts: { launched?: boolean } = {}) {
   const ds = useDataSource();
   const query = usePairs();
   const key = id.toLowerCase();
   const listed: TokenPair | undefined = query.data?.find((p) => p.id === key);
+  // Spec 5.5: the `launch` block rides only on the single-token answer, never the 500-row list, so a listed SV token is
+  // read by id as well. Every other listed token needs nothing more than its row.
+  const needsSingle = listed === undefined || listed.origin === "SV";
+  // Stamped in an effect, like useHolders' window: reading the clock while rendering is impure.
+  const waitingSince = useRef(0);
+  useEffect(() => {
+    waitingSince.current = Date.now();
+  }, [key]);
+  const launched = opts.launched === true;
   // Only once the list has settled without the id: a token outside the 500-row window still has a page.
   const fallback = useQuery({
     queryKey: keys.pair(key),
     queryFn: () => ds.pair(key),
     staleTime: 30_000,
-    enabled: !query.isPending && listed === undefined,
+    enabled: !query.isPending && needsSingle,
+    refetchInterval: (q) => {
+      if (!launched || q.state.data) return false;
+      const since = waitingSince.current;
+      return since > 0 && Date.now() - since >= LAUNCH_WAIT_MAX_MS ? false : LAUNCH_WAIT_POLL_MS;
+    },
   });
-  const pair: TokenPair | undefined = listed ?? fallback.data ?? undefined;
-  // TokenView reads isPending for its skeleton; both flags cover both queries, so a deep link
-  // never flashes "No token" while the fallback is still in flight.
-  return { ...query, pair, isPending: query.isPending || fallback.isLoading, isLoading: query.isLoading || fallback.isLoading };
+  const pair: TokenPair | undefined = listed?.origin === "SV" ? (fallback.data ?? listed) : (listed ?? fallback.data ?? undefined);
+  // TokenView reads isPending for its skeleton; both flags cover both queries, so a deep link never flashes "No token"
+  // while the fallback is still in flight, and a listed row already in hand never flashes the skeleton.
+  const waiting = pair === undefined && fallback.isLoading;
+  return { ...query, pair, isPending: query.isPending || waiting, isLoading: query.isLoading || waiting };
 }
 
 export function useQuotes() {

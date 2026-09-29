@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_FILTERS, selectPairs } from "./markets";
+import { DEFAULT_FILTERS, ORIGIN_OPTIONS, selectPairs } from "./markets";
 import type { TokenPair } from "./types";
 
 function pair(over: Partial<TokenPair>): TokenPair {
@@ -23,5 +23,11 @@ describe("selectPairs with null fields", () => {
   it("filters by origin", () => {
     const list = [pair({ id: "0xa", origin: "Pons" }), pair({ id: "0xb", origin: "Uniswap" })];
     expect(selectPairs(list, { ...DEFAULT_FILTERS, origin: "Uniswap" }, 1_000).map((r) => r.id)).toEqual(["0xb"]);
+  });
+  it("offers SV in the origin filter and keeps only launches when it is picked (instant launchpad design, 7.4)", () => {
+    expect(ORIGIN_OPTIONS.map((o) => o.key)).toContain("SV");
+    expect(ORIGIN_OPTIONS.find((o) => o.key === "SV")?.label).toBe("SV");
+    const list = [pair({ id: "0xa", origin: "SV" }), pair({ id: "0xb", origin: "LONG" })];
+    expect(selectPairs(list, { ...DEFAULT_FILTERS, origin: "SV" }, 1_000).map((r) => r.id)).toEqual(["0xa"]);
   });
 });

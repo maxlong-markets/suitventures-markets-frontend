@@ -25,6 +25,7 @@ npm run dev                  # http://localhost:3000
 | `/` | Markets — quote chips, presets, launchpad filter, pairs table |
 | `/watchlist` | Starred pairs (needs a connected wallet) |
 | `/t/[address]` | Token page — chart, trades / holders / info, trade panel |
+| `/launch` | Launch a token: image, name, symbol, currency, opening valuation, optional first buy; one transaction, for Suits holders |
 
 ## Data layer
 
@@ -96,6 +97,9 @@ Live mode needs these variables; all but the first are server-only:
 | `CHAIN_RPC_URL` | optional; primary RPC for the reader's chain reads (metadata, Chainlink prices, holder-count balances, health), defaults to the chain's public node; always paced at 40 calls a second |
 | `CHAIN_RPC_FALLBACK_URL` | optional; backup RPC (a paid endpoint, server-only) tried once when the primary refuses, times out or errors |
 | `SYNC_INTERVAL_SEC` | optional; seconds between sync cycles inside one invocation, default 30 |
+| `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` | the launchpad contract, set only after it is deployed; empty keeps `/launch` on "not live yet", the reader off its logs and the upload route at 503 |
+| `FILEBASE_ACCESS_KEY`, `FILEBASE_SECRET_KEY`, `FILEBASE_BUCKET` | required; the Filebase IPFS bucket launch images are pinned to; all three for uploads and the nightly clean-up |
+| `FILEBASE_GATEWAY_URL` | optional; a dedicated gateway's https origin for launch logos, https origin only, default `https://ipfs.filebase.io` |
 
 Preview deployments get no database variable and stay on the mock source. The live source
 prices a trade through `GET /api/tokens/[address]/quote`, which simulates the V4 Quoter and
@@ -107,6 +111,42 @@ not answer.
 from the contract's `logo()` (Pons), its `tokenURI()` JSON (LONG) or
 DexScreener, and cached; the optional server-only `ROBINHOOD_RPC_URL` picks the
 RPC those reads use, defaulting to the public one.
+
+### The instant launchpad
+
+The design is `docs/superpowers/specs/2026-09-28-instant-launchpad-design.md`. The reader adds the launchpad as a
+second log selection in its per-minute HyperSync request and folds `Launched`, `FeesCollected` and `PayoutChanged`
+into `market.launches` and `market.launch_fee_events`. A launched token lists with the `SV` badge from its launch
+block. One nobody has bought leaves the table after the listing window below and returns with its first trade; its
+page stays up. `POST /api/launch/upload` re-encodes a creator's image to a WebP and pins it and a metadata JSON on
+Filebase before the launch. Only Suits holders may upload, within the per-wallet limits below. The nightly job's
+`uploads` phase unpins what no launch used.
+
+| Launchpad number | Value |
+|---|---|
+| Uploads per wallet per hour | 5 |
+| Uploads per wallet per day | 20 |
+| Launch image | 512 x 512 WebP |
+| Listing window for a token nobody has bought | 24 hours |
+| Token page re-reads after a launch | every 5 seconds, for up to 5 minutes |
+| A hidden launch's logo answers "no logo" | within 1 hour |
+
+To hide a launch's image and links, run this in the Supabase SQL editor:
+
+    update market.launches set hidden = true where token_id = '<lowercase address>'
+
+Rollout, in this order:
+
+1. Apply the migration with `npm run db:migrate` before pushing. Without the launch tables `/api/health` answers
+   503, the chain job stalls on its first cycle, and logos across the whole site fail, because every logo lookup
+   reads `market.launches`.
+2. Before rollout, run `EXPLAIN (ANALYZE, BUFFERS)` in production on the pairs query for both scopes, `all` and
+   `launchpad`, and confirm the new order uses the `pools_activity` index. The query is `ORDER` in
+   `src/lib/market/dbBackend.ts`.
+3. Set `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` only after the contract is deployed, and before anyone launches: a launch the
+   reader has already passed over needs a catch-up rewind to appear.
+4. Set the Filebase names on Vercel. `FILEBASE_ACCESS_KEY`, `FILEBASE_SECRET_KEY` and `FILEBASE_BUCKET` are
+   required. `FILEBASE_GATEWAY_URL` is optional and takes an https origin only.
 
 Watchlist and votes are browser-local in live mode
 (`src/lib/data/localStore.ts`, `localStorage` keyed by wallet address): they do
@@ -145,6 +185,7 @@ src/lib/chain      the reader: HyperSync log source, decode, fold, onchain metad
 src/lib/data       seed data, mock source, Envio source, local watch store
 src/lib/db         Db interface (postgres driver, PGlite in tests), migrations
 src/lib/holders    the top-holder builder: coverage, due list, transfer fold, balance store
+src/lib/launch     the instant launchpad: ABI and address, stores, upload rules, Filebase, form arithmetic; wallet writes in src/lib/launch.ts
 src/lib/sync       writers, cursor/lease state, the job runner, retention, nightly
 src/lib/market     MarketBackend: the store implementation (the only one now)
 src/lib/seed       the resumable one-off loader

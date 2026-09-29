@@ -12,6 +12,17 @@ lives in `.env.local` only.
 | `npm run db:smoke` | Round-trips COPY, a query, a rolled-back transaction, and one `upsertTokens` with a hostile token name (quotes, braces, a backslash, a comma) inside a transaction that rolls back; prints `ok` only when every round trip matched. Needs the migration applied, so run it after `db:migrate`, and again after changing `.env.local`. |
 | `npm run seed` | The one-off load from Envio: quotes, tokens, pools, then swaps, candles and balances by id ranges with three workers at 200 queries a minute, then the finish phase (top 100 holders per token, listed pools, every pool's `synced_to` watermark and the sync cursors at the seed's start minus 3600 s, an hour of slack for the indexer's own lag; none of them is ever lowered). About eight hours. |
 | `npm run db:parity` | Loads `pairs("all")` and `pairs("launchpad")` through both backends and prints every token missing on either side, every field differing by more than 0.1 % (numbers) or at all (strings), then the counts. |
+| `npm run launch:currencies -- --out <path>` | Writes the launchpad's deploy config for the contracts repo's `script/config/launch-currencies.json`, in the schema its deploy script reads: `minUsd` 5,000, `maxUsd` 10,000,000, `creationFee` `"0"`, then 54 currencies from `quotes.json`, each `address, symbol, decimals, priceSource, chainlinkProxy, chainlinkDecimals, referenceUsdPrice`, with only USDG `pinned` and every `referenceUsdPrice` `"0"` until filled in. Refuses to overwrite an existing file without `--force`, so the 29 reference prices filled in by hand are never lost. Reads no environment. |
+
+Instant launchpad rollout, in this order:
+
+1. Run `npm run db:migrate` against production before pushing. Without the launch tables `/api/health` answers 503
+   and logos across the whole site fail, because every logo lookup reads `market.launches`.
+2. Before rollout, run `EXPLAIN (ANALYZE, BUFFERS)` in production on the pairs query for both scopes, `all` and
+   `launchpad`, and confirm the new order uses the `pools_activity` index.
+3. Set `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` only after the contract is deployed.
+4. Set `FILEBASE_ACCESS_KEY`, `FILEBASE_SECRET_KEY` and `FILEBASE_BUCKET`, all required, and optionally
+   `FILEBASE_GATEWAY_URL`, which takes an https origin only.
 
 Seed, on a laptop that must not sleep:
 
