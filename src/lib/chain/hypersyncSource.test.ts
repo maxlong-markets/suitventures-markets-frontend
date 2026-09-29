@@ -327,13 +327,40 @@ describe("head", () => {
       expect(events[0]).toMatchObject({ kind: "launchFees", token: LAUNCHED_TOKEN, payout: FEE_PAYOUT, tokenFees: 1000n, txFrom: TX_FROM.toLowerCase() });
     });
 
-    it("drops a log that arrives without an address, and a launchpad log while no launchpad is configured", async () => {
+    // A missing address fails the cycle, like a missing timestamp: dropping the log would move the cursor past it and
+    // lose it for good, while a throw keeps the cursor where it was so the next cycle retries the range.
+    it("fails the fetch, returning no events, when a log arrives without an address", async () => {
       const fetchImpl = vi.fn(async () =>
         jsonResponse(
           page(
             [
               {
-                logs: [swapLog({ logIndex: 0, address: null }), feesLog({ logIndex: 1 }), swapLog({ logIndex: 2 })],
+                logs: [swapLog({ logIndex: 0 }), swapLog({ logIndex: 3, address: null }), swapLog({ logIndex: 4 })],
+                blocks: [{ number: 100, timestamp: "0x1" }],
+                transactions: [{ hash: TX_HASH, from: TX_FROM }],
+              },
+            ],
+            200,
+          ),
+        ),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, launchpad: null });
+      let events: unknown = undefined;
+      await expect(
+        source.fetch(100, 199).then((r) => {
+          events = r.events;
+        }),
+      ).rejects.toThrow("HyperSync log at block 100 index 3 has no address");
+      expect(events).toBeUndefined();
+    });
+
+    it("drops a launchpad log while no launchpad is configured", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page(
+            [
+              {
+                logs: [feesLog({ logIndex: 1 }), swapLog({ logIndex: 2 })],
                 blocks: [{ number: 100, timestamp: "0x1" }],
                 transactions: [{ hash: TX_HASH, from: TX_FROM }],
               },

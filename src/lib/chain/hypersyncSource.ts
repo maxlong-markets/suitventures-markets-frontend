@@ -57,7 +57,7 @@ function parseBlockTimestamp(value: string | number, blockNumber: number): numbe
 type HyperSyncBlock = { number: number; timestamp: string | number };
 type HyperSyncTransaction = { hash: string; from: string | null };
 type HyperSyncLog = {
-  /** Selected since the launchpad joined the query; a log without one is dropped. */
+  /** Selected since the launchpad joined the query; a log without one fails the fetch. */
   address?: string | null;
   block_number: number;
   log_index: number;
@@ -280,8 +280,11 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
       const events: ChainEvent[] = [];
       for (const chunk of response.data) {
         for (const log of chunk.logs ?? []) {
-          // Routing is by emitter now, so a log that names none cannot be placed: dropped, never guessed.
-          if (!log.address) continue;
+          // Routing is by emitter now, so a log that names none cannot be placed. Throw, like a missing timestamp:
+          // dropping it would advance the cursor past the log and lose it; a throw fails the cycle and it retries.
+          if (!log.address) {
+            throw new Error(`HyperSync log at block ${Number(log.block_number)} index ${Number(log.log_index)} has no address`);
+          }
           const blockNumber = Number(log.block_number);
           const timestamp = timestamps.get(blockNumber);
           if (timestamp === undefined) {
