@@ -70,14 +70,16 @@ export function rawToNumber(raw: bigint, decimals: number): number {
 
 /**
  * A typed USD amount in raw quote units at `usdPrice` (per whole quote unit), rounded to the currency's last decimal
- * (`toFixed` rounds; beyond 18 decimals `toBase` then truncates); null for anything unusable. A requested valuation
- * only: the contract snaps it and bounds-checks it itself.
+ * (`toFixed` rounds; beyond 18 decimals `toBase` then truncates); null for anything unusable, including a positive
+ * amount too small to be one raw unit. A requested valuation only: the contract snaps it and bounds-checks it itself,
+ * and the form clamps it to the currency's bounds, since this function does not know them.
  */
 export function usdToRaw(usd: string, usdPrice: number, decimals: number): bigint | null {
   const value = Number(usd);
   if (usd.trim() === "" || !Number.isFinite(value) || value <= 0 || !(usdPrice > 0)) return null;
   try {
-    return toBase((value / usdPrice).toFixed(Math.min(decimals, 18)), decimals);
+    const raw = toBase((value / usdPrice).toFixed(Math.min(decimals, 18)), decimals);
+    return raw > 0n ? raw : null;
   } catch {
     return null;
   }

@@ -69,6 +69,7 @@ export const LAUNCH_MESSAGES = {
   rejected: "Cancelled in wallet. Nothing was spent.",
   unconfirmed: "Sent, but we could not confirm it. Check the transaction before trying again.",
   notLive: "Launching is not live yet.",
+  wrongChain: "Switch your wallet to Robinhood Chain and try again. Nothing was sent.",
   approveFailed: "Could not approve the currency. Nothing was spent except gas.",
   launchFallback: "Launch failed. Nothing was spent except gas.",
   writeFallback: "That did not go through. Nothing was spent except gas.",
@@ -131,6 +132,11 @@ function requireLaunchpad(): Address {
   return LAUNCHPAD_ADDRESS;
 }
 
+/** Every write starts here: a wallet on another network would sign or send against the wrong chain. */
+async function requireRobinhood(deps: LaunchDeps): Promise<void> {
+  if ((await deps.wallet.getChainId()) !== robinhoodChain.id) throw new LaunchFailedError(LAUNCH_MESSAGES.wrongChain);
+}
+
 /** Replays a mined transaction at its own block, same sender, data and value, and names the revert (spec 7.2 step 6). */
 async function replayRevert(deps: LaunchDeps, hash: Hex, blockNumber: bigint): Promise<string | null> {
   try {
@@ -185,6 +191,7 @@ export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep
   let permit = { permitted: { token: zeroAddress as Address, amount: 0n }, nonce: 0n, deadline: 0n };
   let signature: Hex = "0x";
   try {
+    await requireRobinhood(deps);
     if (total > 0n) {
       const allowance = await deps.publicClient.readContract({
         address: input.quote, abi: erc20Abi, functionName: "allowance", args: [deps.account, PERMIT2_ADDRESS],
@@ -231,6 +238,7 @@ async function confirmWrite(deps: LaunchDeps, hash: Hex): Promise<void> {
 export async function collectLaunchFees(token: Address, deps: LaunchDeps): Promise<WriteHandle> {
   const launchpad = requireLaunchpad();
   try {
+    await requireRobinhood(deps);
     const request = { address: launchpad, abi: svLaunchpadAbi, functionName: "collectFees", args: [token], account: deps.account } as const;
     await deps.publicClient.simulateContract(request);
     const hash = await deps.wallet.writeContract({ ...request, chain: robinhoodChain });
@@ -244,6 +252,7 @@ export async function collectLaunchFees(token: Address, deps: LaunchDeps): Promi
 export async function claimOwed(currency: Address, to: Address, deps: LaunchDeps): Promise<WriteHandle> {
   const launchpad = requireLaunchpad();
   try {
+    await requireRobinhood(deps);
     const request = { address: launchpad, abi: svLaunchpadAbi, functionName: "claim", args: [currency, to], account: deps.account } as const;
     await deps.publicClient.simulateContract(request);
     const hash = await deps.wallet.writeContract({ ...request, chain: robinhoodChain });
@@ -257,6 +266,7 @@ export async function claimOwed(currency: Address, to: Address, deps: LaunchDeps
 export async function changePayout(token: Address, payout: Address, deps: LaunchDeps): Promise<WriteHandle> {
   const launchpad = requireLaunchpad();
   try {
+    await requireRobinhood(deps);
     const request = { address: launchpad, abi: svLaunchpadAbi, functionName: "setPayout", args: [token, payout], account: deps.account } as const;
     await deps.publicClient.simulateContract(request);
     const hash = await deps.wallet.writeContract({ ...request, chain: robinhoodChain });

@@ -65,6 +65,7 @@ describe("display conversions", () => {
     expect(usdToRaw("0", 1, 6)).toBeNull();
     expect(usdToRaw("12", 0, 6)).toBeNull();
     expect(usdToRaw("abc", 1, 6)).toBeNull();
+    expect(usdToRaw("0.0000001", 1, 6)).toBeNull(); // positive, but rounds to no raw units at all
   });
 
   it("prices one whole token at V' over one billion", () => {

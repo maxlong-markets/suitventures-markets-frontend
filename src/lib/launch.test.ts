@@ -4,7 +4,7 @@ import {
   encodeErrorResult, encodeEventTopics, maxUint256, zeroAddress, type Hex, type Log, type PublicClient, type WalletClient,
 } from "viem";
 import { LAUNCHPAD_EVENTS_ABI } from "@/lib/chain/abi";
-import { PERMIT2_ADDRESS } from "@/lib/chain";
+import { PERMIT2_ADDRESS, robinhoodChain } from "@/lib/chain";
 import type { Address } from "@/lib/types";
 import { svLaunchpadAbi } from "./launch/abi";
 import {
@@ -58,7 +58,7 @@ function reverted(errorName: string, args?: readonly unknown[]): Error {
   });
 }
 
-function harness(o: { allowance?: bigint; logs?: Log[]; status?: "success" | "reverted" } = {}) {
+function harness(o: { allowance?: bigint; logs?: Log[]; status?: "success" | "reverted"; chainId?: number } = {}) {
   const readContract = vi.fn().mockResolvedValue(o.allowance ?? 0n);
   const simulateContract = vi.fn().mockResolvedValue({ request: {} });
   const writeContract = vi.fn(async ({ functionName }: { functionName: string; args: readonly unknown[] }) => (functionName === "approve" ? APPROVE_HASH : TX_HASH));
@@ -68,8 +68,9 @@ function harness(o: { allowance?: bigint; logs?: Log[]; status?: "success" | "re
   );
   const getTransaction = vi.fn().mockResolvedValue({ from: ACCOUNT, to: LAUNCHPAD, input: "0xabcdef", value: 0n });
   const call = vi.fn().mockResolvedValue({ data: "0x" });
+  const getChainId = vi.fn().mockResolvedValue(o.chainId ?? robinhoodChain.id);
   const deps: LaunchDeps = {
-    wallet: { writeContract, signTypedData } as unknown as WalletClient,
+    wallet: { writeContract, signTypedData, getChainId } as unknown as WalletClient,
     publicClient: { readContract, simulateContract, waitForTransactionReceipt, getTransaction, call } as unknown as PublicClient,
     account: ACCOUNT,
   };
@@ -187,6 +188,18 @@ describe("executeLaunch (spec 7.2, submit steps 3 to 6)", () => {
     await expect(handle.confirmation).rejects.toThrow(LAUNCH_MESSAGES.launchFallback);
   });
 
+  it("names the wrong network before any approval, signature or simulation", async () => {
+    const t = harness({ allowance: 0n, chainId: 1 });
+    const err = await executeLaunch({ ...INPUT, firstBuy: 1n }, t.deps).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchFailedError);
+    expect((err as Error).message).toBe(LAUNCH_MESSAGES.wrongChain);
+    expect(LAUNCH_MESSAGES.wrongChain).toBe("Switch your wallet to Robinhood Chain and try again. Nothing was sent.");
+    expect(t.readContract).not.toHaveBeenCalled();
+    expect(t.signTypedData).not.toHaveBeenCalled();
+    expect(t.simulateContract).not.toHaveBeenCalled();
+    expect(t.writeContract).not.toHaveBeenCalled();
+  });
+
   it("refuses to run before the launchpad is live", async () => {
     h.launchpad = undefined;
     await expect(executeLaunch(INPUT, harness().deps)).rejects.toThrow(LAUNCH_MESSAGES.notLive);
@@ -205,6 +218,15 @@ describe("the fee panel's writes (spec 7.3)", () => {
       ["setPayout", [TOKEN, OTHER]],
     ]);
     expect(t.simulateContract).toHaveBeenCalledTimes(3);
+  });
+
+  it("names the wrong network before simulating any of them", async () => {
+    const t = harness({ chainId: 1 });
+    await expect(collectLaunchFees(TOKEN, t.deps)).rejects.toThrow(LAUNCH_MESSAGES.wrongChain);
+    await expect(claimOwed(QUOTE, OTHER, t.deps)).rejects.toThrow(LAUNCH_MESSAGES.wrongChain);
+    await expect(changePayout(TOKEN, OTHER, t.deps)).rejects.toThrow(LAUNCH_MESSAGES.wrongChain);
+    expect(t.simulateContract).not.toHaveBeenCalled();
+    expect(t.writeContract).not.toHaveBeenCalled();
   });
 
   it("maps the panel's own reverts to plain words", async () => {

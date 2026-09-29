@@ -56,15 +56,20 @@ export function useLaunchSettings(account?: Address): LaunchSettings {
 }
 
 export type CurrencyBounds = { min: bigint; max: bigint; creationFee: bigint };
+/** The bounds plus `refetch`, so a PermitMismatch retry can re-read a creation fee the owner just changed. */
+export type CurrencyConfig = CurrencyBounds & { refetch(): void };
 
-export function useCurrencyConfig(quote?: Address): CurrencyBounds | undefined {
-  const { data } = useReadContract({
+/** Re-read every 30 s like the settings: the creation fee can change under an open form (spec 7.2, PermitMismatch). */
+export function useCurrencyConfig(quote?: Address): CurrencyConfig | undefined {
+  const { data, refetch } = useReadContract({
     ...LAUNCHPAD,
     functionName: "currency",
     args: [quote ?? ZERO],
-    query: { enabled: LIVE && quote !== undefined },
+    query: { enabled: LIVE && quote !== undefined, refetchInterval: 30_000 },
   });
-  return data ? { min: data.minValuation, max: data.maxValuation, creationFee: data.creationFee } : undefined;
+  return data
+    ? { min: data.minValuation, max: data.maxValuation, creationFee: data.creationFee, refetch: () => void refetch() }
+    : undefined;
 }
 
 function useDebounced(value: string, ms: number): string {

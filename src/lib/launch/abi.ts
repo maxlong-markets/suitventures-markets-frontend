@@ -5,8 +5,10 @@ import { LAUNCHPAD_EVENTS_ABI } from "@/lib/chain/abi";
  * the owner setters, the views, the activity events (shared with the reader through `LAUNCHPAD_EVENTS_ABI`), the setting
  * events and every custom error. Three foreign errors ride along so a revert that bubbles up from another contract
  * during a launch reads by name (spec 7.2): v4's `PoolAlreadyInitialized()`, Permit2's `InvalidNonce()` and
- * `SignatureExpired(uint256)`. `abi.test.ts` pins every selector and topic0 against the spec's canonical signatures, so a
- * fragment that drifts from the contract fails the suite here instead of a transaction.
+ * `SignatureExpired(uint256)`. Two OpenZeppelin errors the compiled contract inherits ride along too:
+ * `SafeERC20FailedOperation(address)` and `ReentrancyGuardReentrantCall()`. `abi.test.ts` pins every selector and
+ * topic0 against the spec's canonical signatures, so a fragment that drifts from the contract fails the suite here
+ * instead of a transaction.
  */
 
 const LAUNCH_PARAMS = [
