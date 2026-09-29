@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { isAddress, type Hex } from "viem";
-import { usePublicClient, useWalletClient } from "wagmi";
+import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
 import { useCurrencyConfig, useLaunchSettings, useOpening, useTokenBalanceOf } from "@/hooks/useLaunchpad";
 import { useQuotes } from "@/hooks/useMarketsData";
@@ -81,6 +81,8 @@ export default function LaunchForm() {
   const { address, isConnected, signed, withSignIn, addToast, updateToast } = useAppState();
   const publicClient = usePublicClient({ chainId: robinhoodChain.id });
   const { data: walletClient } = useWalletClient({ chainId: robinhoodChain.id });
+  // On another network wagmi gives no wallet client for Robinhood Chain; the button names the network instead of doing nothing.
+  const { chainId } = useAccount();
   const quotesQuery = useQuotes();
   const currencies = useMemo(() => orderCurrencies(quotesQuery.data ?? []), [quotesQuery.data]);
 
@@ -104,6 +106,8 @@ export default function LaunchForm() {
   const [plan, setPlan] = useState<SubmitStep[]>([]);
   const [current, setCurrent] = useState<SubmitStep | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Set once the launch is confirmed: the form stays locked until the token page opens, so no enabled Launch flashes.
+  const [done, setDone] = useState(false);
   const inFlight = useRef(false);
   const resumeAfterSignIn = useRef(false);
   const uploadCache = useRef<{ key: string; answer: UploadAnswer; at: number } | null>(null);
@@ -116,7 +120,9 @@ export default function LaunchForm() {
 
   const settings = useLaunchSettings(address);
   const bounds = useCurrencyConfig(quote);
-  const presets = bounds ? presetValuations(bounds.min, bounds.max) : [];
+  // A max of 0 means the owner has not set this currency up on the launchpad: no presets, and the button says so.
+  const closedCurrency = bounds !== undefined && bounds.max === 0n;
+  const presets = bounds && !closedCurrency ? presetValuations(bounds.min, bounds.max) : [];
   const requested: bigint | null =
     preset === "custom"
       ? usd !== null
@@ -132,7 +138,12 @@ export default function LaunchForm() {
   const routerFeeBps = settings.routerFeeBps;
   const capBps = settings.firstBuyCapBps;
   const settingsRead =
-    routerFeeBps !== undefined && capBps !== undefined && settings.creatorShareBps !== undefined && settings.hook !== undefined;
+    routerFeeBps !== undefined &&
+    capBps !== undefined &&
+    settings.creatorShareBps !== undefined &&
+    settings.hook !== undefined &&
+    settings.launchesToday !== undefined &&
+    settings.dailyLimit !== undefined;
   const hookSet = settings.hook !== undefined && settings.hook.toLowerCase() !== ZERO_ADDRESS;
   const creationFee = bounds?.creationFee ?? 0n;
   const firstBuyRaw = parseAmount(firstBuy, decimals);
@@ -175,10 +186,13 @@ export default function LaunchForm() {
         : "Check the description and the links.";
     }
     if (!bounds) return "Reading this currency's limits.";
+    if (closedCurrency) return "This currency is not open for launches.";
     if (!inRange) return `Pick a valuation between ${money(bounds.min)} and ${money(bounds.max)}.`;
     if (balance !== undefined && total > balance) return "The first buy is more than your balance.";
     if (firstBuyRaw > 0n && capBps !== undefined && estimate > capTokens(capBps)) return "The first buy is above the cap.";
     if (payoutOpen && payout !== "" && !isAddress(payout)) return "Enter a valid payout address.";
+    if (chainId !== undefined && chainId !== robinhoodChain.id) return "Switch your wallet to Robinhood Chain.";
+    if (!walletClient || !publicClient) return "Connecting to your wallet.";
     if (!snapped) return "Working out the opening price.";
     return null;
   }
@@ -211,8 +225,26 @@ export default function LaunchForm() {
   }
 
   const submit = async (now: number) => {
-    if (inFlight.current || reason !== null || !address || !walletClient || !publicClient || !quote || !image || !snapped || requested === null || !payoutAddress) return;
-    const walletSteps: SubmitStep[] = ["upload", ...(total > 0n ? (["approve", "sign"] as const) : []), "confirm", "launching"];
+    // A launch in flight, a confirmed one, or one already waiting for its signature: nothing more to queue.
+    if (inFlight.current || done || resumeAfterSignIn.current) return;
+    if (reason !== null || !address || !walletClient || !publicClient || !quote || !image || !snapped || requested === null || !payoutAddress) {
+      // A resumed submit that can no longer go ahead leaves no step spinning.
+      setPlan([]);
+      setCurrent(null);
+      return;
+    }
+    // "Approve" joins the list only when the wallet code reports it (the allowance was short), so no step is ticked that never ran.
+    const walletSteps: SubmitStep[] = ["upload", ...(total > 0n ? (["sign"] as const) : []), "confirm", "launching"];
+    const onStep = (step: LaunchStep) => {
+      if (step === "approve") {
+        setPlan((p) => {
+          if (p.includes("approve")) return p;
+          const at = p.indexOf("sign");
+          return at < 0 ? p : [...p.slice(0, at), "approve", ...p.slice(at)];
+        });
+      }
+      setCurrent(step);
+    };
     setError(null);
     if (!signed) {
       // Step 1: the existing SignModal through AppState's gate. The effect below resumes once `signed` flips.
@@ -221,6 +253,8 @@ export default function LaunchForm() {
       resumeAfterSignIn.current = true;
       // Closed without signing: drop the queued launch and the step list, so nothing resumes on a later, unrelated sign-in.
       withSignIn("launch", () => {}, () => {
+        // Too late to drop: the launch already started once the signature landed.
+        if (inFlight.current) return;
         resumeAfterSignIn.current = false;
         setCurrent(null);
         setPlan([]);
@@ -240,11 +274,12 @@ export default function LaunchForm() {
           minFirstBuyTokens: firstBuyRaw > 0n ? minFirstBuyTokens(estimate) : 0n, payout: payoutAddress, salt, creationFee,
         },
         { wallet: walletClient, publicClient, account: address },
-        setCurrent,
+        onStep,
       );
       toastId = addToast({ kind: "pending", message: `Launching ${symbol}`, hash: handle.hash });
       const { token } = await handle.confirmation;
       updateToast(toastId, { kind: "confirmed", message: `Launched ${symbol}` });
+      setDone(true);
       router.push(`/t/${token}?launched=${handle.hash}`);
     } catch (err) {
       const known = err instanceof UploadError || err instanceof LaunchFailedError || err instanceof LaunchRejectedError || err instanceof LaunchUnconfirmedError;
@@ -274,6 +309,7 @@ export default function LaunchForm() {
     }
   }, [signed]);
 
+  const busy = pending || done;
   const nameBytes = utf8Bytes(name);
   const symbolBytes = utf8Bytes(symbol);
   const shareBps = settings.creatorShareBps;
@@ -288,7 +324,7 @@ export default function LaunchForm() {
           <span>Image</span>
           <span className="normal-case tracking-[0.04em]">PNG, JPEG, WebP or GIF, 2 MB at most</span>
         </label>
-        <div className="mt-2 flex items-center gap-4">
+        <div className="mt-2 flex min-w-0 items-center gap-4">
           <div className="flex h-24 w-24 flex-none items-center justify-center border border-hairline-strong">
             {preview ? (
               // eslint-disable-next-line @next/next/no-img-element -- a local object URL of the picked file, nothing to optimise
@@ -297,7 +333,7 @@ export default function LaunchForm() {
               <span className="font-mono text-[10px] text-ink-40">96 × 96</span>
             )}
           </div>
-          <input id="launch-image" type="file" accept={IMAGE_TYPES.join(",")} aria-label="Image" onChange={(e) => onImage(e.target.files?.[0] ?? null)} className="text-[12px]" />
+          <input id="launch-image" type="file" accept={IMAGE_TYPES.join(",")} aria-label="Image" onChange={(e) => onImage(e.target.files?.[0] ?? null)} className="min-w-0 flex-1 text-[12px]" />
         </div>
         {imageNote ? <div className="mt-2 font-mono text-[10.5px] text-down">{imageNote}</div> : null}
 
@@ -358,16 +394,22 @@ export default function LaunchForm() {
 
         <div className={`${LABEL} mt-5`}>
           <span>Opening valuation</span>
-          {bounds ? <span className="normal-case tracking-[0.04em]">{money(bounds.min)} to {money(bounds.max)}</span> : null}
+          {bounds && !closedCurrency ? <span className="normal-case tracking-[0.04em]">{money(bounds.min)} to {money(bounds.max)}</span> : null}
         </div>
-        <div role="group" aria-label="Opening valuation" className="no-scrollbar mt-2 flex overflow-x-auto border border-hairline-strong">
+        {/* One equal column per cell, each allowed to shrink: five cells fit a 360 px phone even with a currency's own units. */}
+        <div
+          role="group"
+          aria-label="Opening valuation"
+          className="mt-2 grid border border-hairline-strong"
+          style={{ gridTemplateColumns: `repeat(${presets.length + 1}, minmax(0, 1fr))` }}
+        >
           {presets.map((v, i) => (
             <button
               key={i}
               type="button"
               aria-pressed={preset === i}
               onClick={() => setPreset(i)}
-              className={`h-7 flex-1 whitespace-nowrap border-r border-hairline-mid px-3 font-mono text-[10.5px] ${preset === i ? "bg-chalk-10 text-chalk" : "bg-transparent text-ink-60"}`}
+              className={`h-7 min-w-0 truncate whitespace-nowrap border-r border-hairline-mid px-1 font-mono text-[10.5px] ${preset === i ? "bg-chalk-10 text-chalk" : "bg-transparent text-ink-60"}`}
             >
               {money(v)}
             </button>
@@ -376,7 +418,7 @@ export default function LaunchForm() {
             type="button"
             aria-pressed={preset === "custom"}
             onClick={() => setPreset("custom")}
-            className={`h-7 flex-1 px-3 font-mono text-[10.5px] ${preset === "custom" ? "bg-chalk-10 text-chalk" : "bg-transparent text-ink-60"}`}
+            className={`h-7 min-w-0 truncate px-1 font-mono text-[10.5px] ${preset === "custom" ? "bg-chalk-10 text-chalk" : "bg-transparent text-ink-60"}`}
           >
             Custom
           </button>
@@ -458,36 +500,44 @@ export default function LaunchForm() {
             <div className="mt-1">{RULE_OF_THUMB}</div>
           </div>
 
-          {pending ? (
-            <button type="button" disabled className={PENDING}>
-              <Spinner dark />
-              {current ? STEP_LABELS[current] : "Launch"}
-            </button>
-          ) : (
-            <button type="button" disabled={reason !== null} onClick={() => void submit(Date.now())} className={reason === null ? PRIMARY : DISABLED}>
-              Launch
-            </button>
-          )}
-          {reason !== null && !pending ? <div className="mt-2 text-center text-[10.5px] text-ink-50">{reason}</div> : null}
+          {/*
+            One button for every state, so keyboard focus stays on it: while a launch runs or has landed it is only
+            aria-disabled (a disabled button drops focus) and names the current step; the click guard does the rest.
+          */}
+          <button
+            type="button"
+            disabled={reason !== null && !busy}
+            aria-disabled={busy || reason !== null}
+            onClick={() => void submit(Date.now())}
+            className={busy ? PENDING : reason === null ? PRIMARY : DISABLED}
+          >
+            {busy ? <Spinner dark /> : null}
+            {done ? "Launched" : pending && current ? STEP_LABELS[current] : "Launch"}
+          </button>
+          <div role="status" aria-live="polite" className="mt-2 text-center text-[10.5px] text-ink-50 empty:hidden">
+            {reason !== null && !busy ? reason : ""}
+          </div>
           {error ? (
             <div role="alert" className="mt-2 text-center text-[10.5px] text-down">
               {error}
             </div>
           ) : null}
-          {current !== null && plan.length > 0 ? (
-            <ol className="mt-3 space-y-1 text-[10.5px]">
-              {plan.map((step, i) => {
-                const at = plan.indexOf(current);
-                const state = i < at ? "done" : i === at ? "now" : "next";
-                return (
-                  <li key={step} className={`flex items-center gap-2 ${state === "next" ? "text-ink-40" : "text-ink"}`}>
-                    <span className="w-3">{state === "done" ? "✓" : state === "now" ? <Spinner /> : `${i + 1}`}</span>
-                    {STEP_LABELS[step]}
-                  </li>
-                );
-              })}
-            </ol>
-          ) : null}
+          <div role="status" aria-live="polite" aria-label="Launch steps">
+            {current !== null && plan.length > 0 ? (
+              <ol className="mt-3 space-y-1 text-[10.5px]">
+                {plan.map((step, i) => {
+                  const at = plan.indexOf(current);
+                  const state = i < at ? "done" : i === at ? "now" : "next";
+                  return (
+                    <li key={step} className={`flex items-center gap-2 ${state === "next" ? "text-ink-40" : "text-ink"}`}>
+                      <span className="w-3">{state === "done" ? "✓" : state === "now" ? <Spinner /> : `${i + 1}`}</span>
+                      {STEP_LABELS[step]}
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>

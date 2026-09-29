@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { robinhoodChain } from "@/lib/chain";
 import { LAUNCH_MESSAGES, LaunchFailedError, messageForRevert } from "@/lib/launch";
 import { estimateFirstBuyTokens, minFirstBuyTokens } from "@/lib/launch/math";
 import type { Address, QuoteAsset } from "@/lib/types";
-import { act, fireEvent, render, screen, waitFor } from "@/test/dom";
+import { act, fireEvent, render, screen, waitFor, within } from "@/test/dom";
 import LaunchForm from "./LaunchForm";
 
 const WALLET = "0x1111111111111111111111111111111111111111" as Address;
@@ -38,6 +39,8 @@ const h = vi.hoisted(() => ({
   execute: vi.fn(),
   push: vi.fn(),
   refetch: vi.fn(),
+  chainId: 46630 as number | undefined,
+  wallet: { id: "wallet" } as unknown,
 }));
 
 vi.mock("@/context/AppState", () => ({ useAppState: () => h.state }));
@@ -51,7 +54,11 @@ vi.mock("@/hooks/useLaunchpad", () => ({
   useOpening: () => h.opening,
   useTokenBalanceOf: () => h.balance,
 }));
-vi.mock("wagmi", () => ({ usePublicClient: () => ({ id: "public" }), useWalletClient: () => ({ data: { id: "wallet" } }) }));
+vi.mock("wagmi", () => ({
+  useAccount: () => ({ chainId: h.chainId }),
+  usePublicClient: () => ({ id: "public" }),
+  useWalletClient: () => ({ data: h.wallet }),
+}));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: h.push }) }));
 vi.mock("@/lib/launch/client", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/launch/client")>()), uploadLaunchAssets: h.upload }));
 vi.mock("@/lib/launch", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/launch")>()), executeLaunch: h.execute }));
@@ -81,6 +88,8 @@ beforeEach(() => {
   h.execute.mockReset().mockResolvedValue({ hash: TX, confirmation: Promise.resolve({ token: TOKEN }) });
   h.push.mockReset();
   h.refetch.mockReset();
+  h.chainId = robinhoodChain.id;
+  h.wallet = { id: "wallet" };
 });
 
 function fill(o: { name?: string; symbol?: string } = {}) {
@@ -117,7 +126,7 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
   });
 
   it("waits for every setting the contract answers, never assuming 0 (fee, cap, share or hook unread)", () => {
-    for (const key of ["routerFeeBps", "firstBuyCapBps", "creatorShareBps", "hook"]) {
+    for (const key of ["routerFeeBps", "firstBuyCapBps", "creatorShareBps", "hook", "launchesToday", "dailyLimit"]) {
       h.settings = { allowed: true, launchesToday: 0, dailyLimit: 5, routerFeeBps: 50, creatorShareBps: 7000, firstBuyCapBps: 2000, hook: "0x0000000000000000000000000000000000000000", [key]: undefined };
       const { unmount } = render(<LaunchForm />);
       fill();
@@ -183,6 +192,51 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     fireEvent.click(screen.getByRole("button", { name: "Custom" }));
     fireEvent.change(screen.getByLabelText("Custom valuation"), { target: { value: "10" } });
     expect(screen.getByText("Pick a valuation between 50 AMC and 100,000 AMC.")).toBeTruthy();
+  });
+
+  it("names the wrong network instead of an enabled button that does nothing", () => {
+    h.chainId = 1;
+    h.wallet = undefined;
+    render(<LaunchForm />);
+    fill();
+    expect(screen.getByText("Switch your wallet to Robinhood Chain.")).toBeTruthy();
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("waits for the wallet client on the right network", () => {
+    h.wallet = undefined;
+    render(<LaunchForm />);
+    fill();
+    expect(screen.getByText("Connecting to your wallet.")).toBeTruthy();
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("says a currency the launchpad has not set up is not open, with no presets", () => {
+    h.bounds[NVDA] = { min: 0n, max: 0n, creationFee: 0n };
+    render(<LaunchForm />);
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: /Currency/ }));
+    fireEvent.click(screen.getByRole("option", { name: /NVDA/ }));
+    expect(screen.getByText("This currency is not open for launches.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "$0" })).toBeNull();
+    expect(within(screen.getByRole("group", { name: "Opening valuation" })).getAllByRole("button")).toHaveLength(1);
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("lays the valuation cells out as equal shrinkable columns, so five fit a phone", () => {
+    render(<LaunchForm />);
+    const group = screen.getByRole("group", { name: "Opening valuation" });
+    expect(group.className).toContain("grid");
+    expect(group.style.gridTemplateColumns).toBe("repeat(5, minmax(0, 1fr))");
+    for (const cell of within(group).getAllByRole("button")) expect(cell.className).toContain("min-w-0");
+    expect(screen.getByLabelText("Image").className).toContain("min-w-0");
+  });
+
+  it("puts the reason in a polite live region", () => {
+    render(<LaunchForm />);
+    const line = screen.getByText("Add an image, a name and a symbol.");
+    expect(line.getAttribute("role")).toBe("status");
+    expect(line.getAttribute("aria-live")).toBe("polite");
   });
 
   it("clamps a converted USD valuation one raw unit above the maximum down to it, and refuses one further out", async () => {
@@ -342,5 +396,92 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     });
     expect(h.upload).not.toHaveBeenCalled();
     expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it("queues one sign-in however often Launch is pressed while it waits", async () => {
+    h.state.signed = false;
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await press();
+    expect(h.state.withSignIn).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Sign in")).toBeTruthy();
+  });
+
+  it("leaves no step spinning when the resumed launch can no longer go ahead", async () => {
+    h.state.signed = false;
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    expect(screen.getByText("Sign in")).toBeTruthy();
+    h.wallet = undefined; // the wallet client went away while the signature was pending
+    h.state.signed = true;
+    await act(async () => {
+      rerender(<LaunchForm />);
+    });
+    expect(screen.queryByText("Sign in")).toBeNull();
+    expect(h.upload).not.toHaveBeenCalled();
+  });
+
+  it("ignores a late cancel once the launch has started", async () => {
+    h.state.signed = false;
+    h.execute.mockReturnValue(new Promise(() => {}));
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    const onCancel = h.state.withSignIn.mock.calls[0]![2] as () => void;
+    h.state.signed = true;
+    await act(async () => {
+      rerender(<LaunchForm />);
+    });
+    await waitFor(() => expect(h.execute).toHaveBeenCalled());
+    act(() => onCancel());
+    const steps = screen.getByRole("status", { name: "Launch steps" });
+    expect(within(steps).getByText("Sign in")).toBeTruthy();
+  });
+
+  it("stays locked after a confirmed launch until the token page opens", async () => {
+    render(<LaunchForm />);
+    fill();
+    const button = launch();
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "Launch" })).toBeNull();
+    const locked = screen.getByRole("button", { name: "Launched" });
+    expect(locked).toBe(button); // the same element throughout, so keyboard focus is never lost
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists Approve only when the wallet code reports it", async () => {
+    h.execute.mockImplementation(async (_input: unknown, _deps: unknown, onStep: (s: string) => void) => {
+      onStep("sign");
+      return new Promise(() => {});
+    });
+    const { unmount } = render(<LaunchForm />);
+    fill();
+    fireEvent.change(screen.getByLabelText("First buy"), { target: { value: "100" } });
+    await press();
+    let steps = screen.getByRole("status", { name: "Launch steps" });
+    await waitFor(() => expect(within(steps).getByText("Sign the payment")).toBeTruthy());
+    expect(within(steps).queryByText("Approve")).toBeNull();
+    unmount();
+
+    h.execute.mockImplementation(async (_input: unknown, _deps: unknown, onStep: (s: string) => void) => {
+      onStep("approve");
+      return new Promise(() => {});
+    });
+    render(<LaunchForm />);
+    fill();
+    fireEvent.change(screen.getByLabelText("First buy"), { target: { value: "100" } });
+    await press();
+    steps = screen.getByRole("status", { name: "Launch steps" });
+    await waitFor(() => expect(within(steps).getByText("Approve")).toBeTruthy());
+    expect([...steps.querySelectorAll("li")].map((li) => li.textContent?.replace(/^[✓\d]*/, ""))).toEqual([
+      "Upload", "Approve", "Sign the payment", "Confirm in wallet", "Launching",
+    ]);
   });
 });

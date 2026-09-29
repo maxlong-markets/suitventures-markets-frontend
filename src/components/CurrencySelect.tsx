@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { USDG } from "@/lib/chain/math/constants";
 import type { Address, QuoteAsset } from "@/lib/types";
 import { MagnifierIcon } from "./ui";
@@ -35,14 +35,45 @@ export default function CurrencySelect({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  /** Closes the popover; `refocus` hands keyboard focus back to the trigger (Escape, a pick), not after a click elsewhere. */
+  const close = (refocus: boolean) => {
+    setOpen(false);
+    setQuery("");
+    if (refocus) triggerRef.current?.focus();
+  };
+
+  // A press anywhere outside the picker closes it.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent | MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setQuery("");
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
   const ordered = useMemo(() => orderCurrencies(quotes), [quotes]);
   const needle = query.trim().toLowerCase();
   const rows = ordered.filter((q) => !needle || q.symbol.toLowerCase().includes(needle) || q.name.toLowerCase().includes(needle));
   const selected = quotes.find((q) => q.address.toLowerCase() === value?.toLowerCase());
 
   return (
-    <div className="relative">
+    <div
+      ref={rootRef}
+      className="relative"
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && open) {
+          e.stopPropagation();
+          close(true);
+        }
+      }}
+    >
       <button
+        ref={triggerRef}
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -77,8 +108,7 @@ export default function CurrencySelect({
                   aria-selected={on}
                   onClick={() => {
                     onChange(q.address);
-                    setOpen(false);
-                    setQuery("");
+                    close(true);
                   }}
                   className={`flex w-full items-center justify-between px-2 py-[7px] text-left hover:bg-hover-item ${on ? "text-chalk" : "text-ink"}`}
                 >
