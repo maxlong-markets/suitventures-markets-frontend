@@ -2,9 +2,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   CLIENT_LIMIT,
   MAX_KEYS,
+  UPLOAD_CLIENT_LIMIT,
   WINDOW_SEC,
   WRITE_LIMIT,
   allowClient,
+  allowUploadClient,
   allowWrite,
   clientLimitSize,
   pruneRateLimit,
@@ -127,5 +129,17 @@ describe("the ten-thousand-key cap", () => {
     succeeded = 0;
     while (succeeded < WRITE_LIMIT && allowWrite(key(1), NOW)) succeeded++;
     expect(succeeded).toBe(WRITE_LIMIT);
+  });
+});
+
+describe("allowUploadClient (instant launchpad design, section 6 step 2)", () => {
+  it("allows ten uploads a minute per client IP, in a key space of its own that never spends the sign-in budget", () => {
+    expect(UPLOAD_CLIENT_LIMIT).toBe(10);
+    for (let i = 0; i < UPLOAD_CLIENT_LIMIT; i += 1) expect(allowUploadClient("203.0.113.9", NOW)).toBe(true);
+    expect(allowUploadClient("203.0.113.9", NOW)).toBe(false);
+    expect(allowUploadClient("203.0.113.10", NOW)).toBe(true);
+    expect(allowClient("203.0.113.9", NOW)).toBe(true);
+    expect(clientLimitSize()).toBe(1); // only the sign-in call above landed in the sign-in map
+    expect(allowUploadClient("203.0.113.9", NOW + WINDOW_SEC + 1)).toBe(true);
   });
 });

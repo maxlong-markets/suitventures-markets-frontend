@@ -17,6 +17,13 @@ export const WINDOW_SEC = 60;
 export const CLIENT_LIMIT = 20;
 
 /**
+ * The upload route's per-IP budget (instant launchpad design, section 6 step 2): its own map and cap, keyed `upload:<ip>`,
+ * so an upload never spends the sign-in routes' `allowClient` budget. In process only, like the others; the persistent
+ * per-wallet limits live in market.launch_uploads.
+ */
+export const UPLOAD_CLIENT_LIMIT = 10;
+
+/**
  * Hard cap on distinct keys tracked by either map — wallets or client IPs. Both maps are reachable
  * before authentication now (the client one always was unauthenticated by design; the wallet one
  * is reachable through `allowWrite` only after a session exists, but the cap still bounds it against
@@ -28,6 +35,7 @@ export const MAX_KEYS = 10_000;
 type Store = { hits: Map<string, number[]>; sweptAt: number };
 const wallets: Store = { hits: new Map(), sweptAt: -Infinity };
 const clients: Store = { hits: new Map(), sweptAt: -Infinity };
+const uploads: Store = { hits: new Map(), sweptAt: -Infinity };
 
 /**
  * A full pass over every key in `store`, dropping any whose window has emptied. At most once per
@@ -79,6 +87,11 @@ export function allowClient(ip: string, now: number): boolean {
   return allow(clients, ip, now, CLIENT_LIMIT);
 }
 
+/** true when this upload fits the client IP's last rolling minute, and counts it. */
+export function allowUploadClient(ip: string, now: number): boolean {
+  return allow(uploads, `upload:${ip}`, now, UPLOAD_CLIENT_LIMIT);
+}
+
 /** Drops every wallet with nothing left inside the window. Exported so a caller can sweep on demand; throttled the same as the automatic sweep. */
 export function pruneRateLimit(now: number): void {
   sweep(wallets, now);
@@ -90,6 +103,8 @@ export function resetRateLimit(): void {
   wallets.sweptAt = -Infinity;
   clients.hits.clear();
   clients.sweptAt = -Infinity;
+  uploads.hits.clear();
+  uploads.sweptAt = -Infinity;
 }
 
 /** Tests only: how many wallets are currently tracked. */
