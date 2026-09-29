@@ -64,8 +64,9 @@ export interface MarketBackend {
    * A v4 PoolKey to trade against, the direction flag and both assets' decimals. Two different
    * meanings of "the token's pool" meet here, and this method answers the trading one:
    * - **Listed, for market data** — the table, the chart, the trade list. Decided by
-   *   `listed_pool_id` / `recomputeListedPools`'s `LISTED_POOL` (spec section 6), which requires
-   *   `swap_count > 0`. A product decision this method does not own or change.
+   *   `listed_pool_id` / `recomputeListedPools`'s `listedPool` (spec section 6, widened by launchpad
+   *   spec 5.4), which requires a pool that has traded, or an SV launch inside its 24 h window. A
+   *   product decision this method does not own or change.
    * - **Routable, for trading** — a looser bar: any pool with a sane price, swapped or not,
    *   because a freshly launched token can have liquidity and zero trades and still be perfectly
    *   tradeable. This method prefers the primary pool when it is sane, and falls back to the

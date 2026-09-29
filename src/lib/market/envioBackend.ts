@@ -160,8 +160,9 @@ export function createEnvioBackend(opts: { quoter?: Quoter } = {}): MarketBacken
     // and zero trades and still be perfectly tradeable — else the sane pool with the most swaps
     // (POOL_KEY_QUERY's own fallbackPool, wider than TOKEN_QUERY's, which requires a trade). Two
     // different meanings of "the token's pool" meet here: the market table lists through
-    // LISTED_POOL (writers.ts, spec section 6, untouched, a product decision); this rule decides
-    // trading instead, and the two coincide whenever the primary pool has traded.
+    // listedPool (writers.ts, spec section 6: traded, or an SV launch inside its 24 h window; a
+    // product decision); this rule decides trading instead, and the two coincide whenever the
+    // primary pool has traded.
     //
     // fallbackPool is already restricted to quote_id: quoteId in the document (POOL_KEY_QUERY), so
     // a higher-swap-count pool in a different quote asset can never crowd out the one actually

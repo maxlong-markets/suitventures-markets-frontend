@@ -3,7 +3,7 @@ import type { Db } from "@/lib/db/client";
 import { testDb } from "@/test/db";
 import { POOL_A, QUOTE, T0, TOKEN_A, TOKEN_B, addr, candleRec, poolId, poolRec, priceRec, quoteRec, swapRec, tokenRec, txHash } from "./testRows";
 import {
-  SV_LISTING_WINDOW_SEC, dedupe, insertSwaps, markSynced, recomputeListedPools, svWindowClosedTokens, upsertCandles, upsertPools, upsertQuotes,
+  SV_LISTING_WINDOW_SEC, SV_SWEEP_LOOKBACK_SEC, dedupe, insertSwaps, markSynced, recomputeListedPools, svWindowClosedTokens, upsertCandles, upsertPools, upsertQuotes,
   upsertTokens,
 } from "./writers";
 
@@ -185,5 +185,18 @@ describe("recomputeListedPools", () => {
     await recomputeListedPools(db, "all", T0 + 60_000);
     expect(await svWindowClosedTokens(db, T0 + 86_399)).toEqual([]);
     expect(await svWindowClosedTokens(db, T0 + 86_400)).toEqual([TOKEN_A]);
+  });
+
+  it("the sweep looks back three days past the window only; the nightly full recompute delists an older abandoned launch", async () => {
+    expect(SV_SWEEP_LOOKBACK_SEC).toBe(259_200);
+    const now = T0 + 5 * 86_400;
+    await upsertTokens(db, [tokenRec({ origin: "SV" })], T0);
+    await upsertPools(db, [poolRec({ origin: "SV", swapCount: 0, lastSwapAt: null, createdAt: T0 })], T0);
+    await recomputeListedPools(db, "all", T0 + 10); // listed inside its window, then no cycle ran for five days
+    expect((await listed())[TOKEN_A]).toBe(POOL_A);
+    expect(await svWindowClosedTokens(db, now)).toEqual([]);
+    expect(await svWindowClosedTokens(db, T0 + 86_400 + 259_199)).toEqual([TOKEN_A]); // the last second the sweep still sees it
+    await recomputeListedPools(db, "all", now);
+    expect((await listed())[TOKEN_A]).toBeNull();
   });
 });

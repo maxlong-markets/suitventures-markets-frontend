@@ -121,7 +121,8 @@ describe("createEnvioBackend", () => {
 
   it("pins POOL_KEY_QUERY's fallback clause text — no swap-count floor, restricted to the requested quote, ordered by swap count then id — but does not prove the indexer applies that order: Hasura decides that server-side, not this mock", () => {
     // TOKEN_QUERY's fallbackPool (what pairs/candles/trades list) filters on swapCount > 0 — the
-    // store's listed_pool_id has the same rule (LISTED_POOL, spec section 6). Trading is a looser
+    // store's listed_pool_id has the same rule (listedPool, spec section 6, which also lists an SV
+    // launch inside its 24 h window). Trading is a looser
     // bar: a fresh launch with liquidity and zero trades is still perfectly routable, so
     // POOL_KEY_QUERY's own fallback must never filter on swaps (Fix D; MarketBackend.poolKey).
     // quote_id: { _eq: $quoteId } (C2) keeps a wrong-quote pool with a higher swap count from

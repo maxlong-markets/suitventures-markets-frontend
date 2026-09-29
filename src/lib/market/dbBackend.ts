@@ -86,8 +86,9 @@ const POOL_KEY_SQL = `select p.id as pool_id, p.hooks, p.fee, p.tick_spacing, p.
   where t.id = $1 and p.quote_id = $2 and p.price_quote > 1e-24 and p.price_quote < 1e18`;
 /**
  * Step two of the same rule: the sane pool with the most swaps, ties broken by the lowest id —
- * deterministic, and independent of `listed_pool_id` / `LISTED_POOL` (`writers.ts`, spec section 6,
- * untouched), which lists the *market table's* pool and requires `swap_count > 0`. The two rules
+ * deterministic, and independent of `listed_pool_id` / `listedPool` (`writers.ts`, spec section 6,
+ * widened by launchpad spec 5.4), which lists the *market table's* pool and requires a pool that has
+ * traded, or an SV launch inside its 24 h window. The two rules
  * agree whenever the primary pool has traded; they can differ only for a sane, untraded primary,
  * which this rule finds already in step one above while the market table does not list the token
  * at all. `p.quote_id = $2` restricts the candidate set the same way as step one (C2): without it,

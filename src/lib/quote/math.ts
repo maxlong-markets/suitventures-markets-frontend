@@ -70,7 +70,7 @@ export function priceImpactPct(
 ): number {
   checkDecimals(inDecimals);
   checkDecimals(outDecimals);
-  // The same window the rest of the app calls a sane pool price (isSanePool, LISTED_POOL). It rules
+  // The same window the rest of the app calls a sane pool price (isSanePool, writers.ts listedPool). It rules
   // out 0, NaN, Infinity and denormals in one test: outside it there is no price to compare against,
   // so the honest impact is 0 rather than a number computed from nonsense.
   if (netIn <= 0n || amountOut <= 0n || !(poolPriceQuote > 1e-24 && poolPriceQuote < 1e18)) return 0;

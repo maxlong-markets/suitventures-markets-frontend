@@ -201,14 +201,23 @@ export async function recomputeListedPools(db: Db, tokenIds: readonly string[] |
 }
 
 /**
- * The tokens still listed through an SV pool that never traded and whose window has closed (spec 5.4). Almost always
- * empty; `applyFold` recomputes whatever it names, which is how an unswapped launch leaves the table. Backed by the
- * partial index pools_sv_unswapped.
+ * How far past the close of its window `svWindowClosedTokens` still looks for an unswapped SV launch (spec 5.4, as
+ * amended 29 Sep 2026). Bounding the range keeps every cycle's sweep off the growing pile of abandoned launches; the
+ * nightly `recomputeListedPools(db, "all", now)` delists anything the sweep missed for longer than this.
+ */
+export const SV_SWEEP_LOOKBACK_SEC = 259_200;
+
+/**
+ * The tokens still listed through an SV pool that never traded and whose window closed within the last
+ * SV_SWEEP_LOOKBACK_SEC (spec 5.4). Almost always empty; `applyFold` recomputes whatever it names, which is how an
+ * unswapped launch leaves the table. Backed by the partial index pools_sv_unswapped, as a bounded range scan.
  */
 export async function svWindowClosedTokens(db: Db, now: number): Promise<string[]> {
   const rows = await db.query<{ token_id: string }>(
     `select p.token_id from market.pools p join market.tokens t on t.id = p.token_id and t.listed_pool_id = p.id
-     where p.origin = 'SV' and p.swap_count = 0 and p.created_at <= $1::int - ${SV_LISTING_WINDOW_SEC}`,
+     where p.origin = 'SV' and p.swap_count = 0
+       and p.created_at <= $1::int - ${SV_LISTING_WINDOW_SEC}
+       and p.created_at > $1::int - ${SV_LISTING_WINDOW_SEC} - ${SV_SWEEP_LOOKBACK_SEC}`,
     [now],
   );
   return rows.map((r) => r.token_id);

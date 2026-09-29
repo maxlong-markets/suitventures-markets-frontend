@@ -363,7 +363,7 @@ async function applyHolderDeltas(db: Db, deltas: ReadonlyMap<string, number>): P
  *
  * recomputeListedPools runs over the union of result.tokens' ids and every result.pools' tokenId, not
  * result.tokens alone: listing depends on a pool's swap_count/price_quote/last_swap_at (src/lib/sync/writers.ts's
- * LISTED_POOL), and the fold only returns a token when *it* changed (a new pool, a primary-pool re-pick) —
+ * listedPool: traded, or an SV launch inside its 24 h window), and the fold only returns a token when *it* changed (a new pool, a primary-pool re-pick) —
  * not on every swap of a single-pool token, or a swap that leaves the primary choice alone. Without the
  * union, a token's first trade would never flip its listed_pool_id off null and it would stay invisible.
  *

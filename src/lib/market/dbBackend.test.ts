@@ -169,7 +169,7 @@ describe("createDbBackend reads", () => {
     expect(out[3]).toMatchObject({ stale: true, feeTier: "Dynamic", createdAt: (NOW - 5_000_000) * 1000 });
   });
 
-  it("pairs('launchpad') keeps LONG and Pons tokens only", async () => {
+  it("pairs('launchpad') keeps LONG and Pons tokens, dropping the rest (this fixture has no SV row; dbBackend.launch.test.ts covers SV in the scope)", async () => {
     expect((await backend().pairs("launchpad")).map((p) => p.id)).toEqual([A, B, E]);
   });
 
@@ -643,7 +643,7 @@ describe("createDbBackend poolKey", () => {
   });
 
   it("falls back to the token's best sane pool when nothing is listed for market data: a fresh launch with liquidity but no trades yet is still routable", async () => {
-    // D's only pool never swapped (poolRec above: swapCount: 0), so LISTED_POOL leaves
+    // D's only pool never swapped (poolRec above: swapCount: 0) and is not an SV launch, so listedPool leaves
     // listed_pool_id null and D is absent from pairs('all') — but trading does not depend on a
     // pool having already traded (Fix D).
     expect(await backend().poolKey(D, NVDA)).toEqual({
