@@ -3,6 +3,7 @@ import { bucketStart, INTERVALS } from "@/lib/sync/ids";
 import { readState, saveCursors } from "@/lib/sync/state";
 import type { PoolRec } from "@/lib/sync/source";
 import { dedupe, recomputeListedPools, upsertPools } from "@/lib/sync/writers";
+import { applyPayouts, attachUploads, insertLaunchFees, insertLaunches } from "@/lib/launch/store";
 import type { TokenMetadataReading } from "./onchain";
 import type { CandleInterval, CandleState, ChainEvent, FoldResult, FoldState, PoolState, QuoteState, TokenState, TradeRow } from "./types";
 
@@ -126,7 +127,15 @@ async function loadCandles(db: Db, events: readonly ChainEvent[]): Promise<Map<s
  * gap its handlers would otherwise have to guard against.
  */
 export async function loadFoldState(db: Db, events: readonly ChainEvent[]): Promise<FoldState> {
-  const poolIds = [...new Set(events.map((e) => e.poolId))];
+  // Only the events that name a pool (spec 5.2 step 6): the PoolManager's three and `launched`, whose pool may have been
+  // initialised in an earlier batch and must load so the fold can relabel it SV. Fee and payout events carry none.
+  const poolIds = [
+    ...new Set(
+      events.flatMap((e) =>
+        e.kind === "initialize" || e.kind === "swap" || e.kind === "modifyLiquidity" || e.kind === "launched" ? [e.poolId] : [],
+      ),
+    ),
+  ];
   const initCurrencies = events.flatMap((e) => (e.kind === "initialize" ? [e.currency0, e.currency1] : []));
 
   const [tokenIdRows, quoteRows, candles] = await Promise.all([
@@ -378,7 +387,13 @@ export async function applyFold(
     await insertTrades(t, result.trades);
     await upsertCandlesFromFold(t, result.candles);
     if (opts?.holderDeltas) await applyHolderDeltas(t, opts.holderDeltas);
-    const tokenIds = [...new Set([...result.tokens.map((tok) => tok.id), ...result.pools.map((p) => p.tokenId)])];
+    // The launchpad's rows (instant launchpad design, section 5.2): after the tokens, before the listing and the cursor.
+    const launchTokenIds = result.launches.map((l) => l.tokenId);
+    await insertLaunches(t, result.launches, now);
+    await attachUploads(t, launchTokenIds, now);
+    await insertLaunchFees(t, result.launchFees);
+    await applyPayouts(t, result.payouts, now);
+    const tokenIds = [...new Set([...result.tokens.map((tok) => tok.id), ...result.pools.map((p) => p.tokenId), ...launchTokenIds])];
     await recomputeListedPools(t, tokenIds);
     await saveCursors(t, CHAIN_JOB, { cursor: cursorBlock });
   });

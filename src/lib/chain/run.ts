@@ -118,6 +118,8 @@ export type ChainRunReport = {
   ignoredPools: number;
   orphanedTokens: number;
   skippedLiquidity: number;
+  /** Launchpad events folded this invocation (instant launchpad design, section 13). */
+  launchEvents: number;
   holderDeltaApplied: number;
   holderReadsUnknown: number;
   requests: number;
@@ -196,7 +198,7 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 function emptyReport(): ChainRunReport {
   return {
     skipped: null, cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
-    skippedLiquidity: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
+    skippedLiquidity: 0, launchEvents: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
     metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
   };
 }
@@ -450,6 +452,7 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
         report.ignoredPools += result.ignoredPools;
         report.orphanedTokens += result.orphanedTokens;
         report.skippedLiquidity += result.skippedLiquidity;
+        report.launchEvents += result.launchEvents;
         report.holderDeltaApplied += holderOutcome.applied;
         report.holderReadsUnknown += holderOutcome.unknown;
 
@@ -470,6 +473,7 @@ export async function runChainSync(db: Db, deps: ChainRunDeps, opts: ChainRunOpt
             at: sec(opts.now()), cursor, blocks, trades: result.trades.length,
             holderPairs: holderOutcome.applied + holderOutcome.unknown,
             holderDeltaApplied: holderOutcome.applied, holderReadsUnknown: holderOutcome.unknown,
+            launchEvents: result.launchEvents,
           },
         });
 

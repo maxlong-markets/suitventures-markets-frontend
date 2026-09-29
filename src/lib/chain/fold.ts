@@ -85,6 +85,12 @@ import type {
   InitializeEvent,
   SwapEvent,
   ModifyLiquidityEvent,
+  LaunchedEvent,
+  LaunchFeesEvent,
+  PayoutChangedEvent,
+  LaunchRow,
+  LaunchFeesRow,
+  PayoutRow,
   FoldState,
   FoldResult,
   PoolState,
@@ -131,6 +137,13 @@ type FoldContext = {
   tokenMetadata: ReadonlyMap<string, TokenMetadata> | undefined;
   /** Pool ids `warnOrphanedToken` has already warned about, this call only — caps log spam. */
   warnedOrphanPools: Set<string>;
+  /** Pool ids a `launched` event in this batch names: collected before the dispatch loop (spec 5.2 step 1). */
+  svPools: Set<string>;
+  launches: LaunchRow[];
+  launchFees: LaunchFeesRow[];
+  /** Keyed by token id: the last `payoutChanged` per token in the batch wins. */
+  payouts: Map<string, PayoutRow>;
+  launchEvents: number;
 };
 
 /**
@@ -160,6 +173,11 @@ function warnOrphanedToken(ctx: FoldContext, poolId: string, tokenId: string): v
  * its current metadata, exactly as if `opts` were omitted.
  */
 export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts?: FoldOptions): FoldResult {
+  // Spec 5.2 step 1: a launch transaction emits Initialize, ModifyLiquidity, maybe Swap, then Launched, all in one block,
+  // so always in one batch. The pre-scan lets handleInitialize, which runs first, already label the pool SV.
+  const svPools = new Set<string>();
+  for (const event of events) if (event.kind === "launched") svPools.add(event.poolId);
+
   const ctx: FoldContext = {
     touchedPools: new Set(),
     touchedTokens: new Set(),
@@ -171,6 +189,11 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts
     skippedLiquidity: 0,
     tokenMetadata: opts?.tokenMetadata,
     warnedOrphanPools: new Set(),
+    svPools,
+    launches: [],
+    launchFees: [],
+    payouts: new Map(),
+    launchEvents: 0,
   };
 
   for (const event of events) {
@@ -184,6 +207,15 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts
       case "modifyLiquidity":
         handleModifyLiquidity(event, state, ctx);
         break;
+      case "launched":
+        handleLaunched(event, state, ctx);
+        break;
+      case "launchFees":
+        handleLaunchFees(event, ctx);
+        break;
+      case "payoutChanged":
+        handlePayoutChanged(event, ctx);
+        break;
     }
   }
 
@@ -196,6 +228,10 @@ export function foldEvents(events: readonly ChainEvent[], state: FoldState, opts
     ignoredPools: ctx.ignoredPools,
     orphanedTokens: ctx.orphanedTokens,
     skippedLiquidity: ctx.skippedLiquidity,
+    launches: ctx.launches,
+    launchFees: ctx.launchFees,
+    payouts: [...ctx.payouts.values()],
+    launchEvents: ctx.launchEvents,
   };
 }
 
@@ -230,6 +266,8 @@ export function newTokenCandidates(events: readonly ChainEvent[], state: FoldSta
       if (!existing || !existing.metadataLoaded) add(c.token);
       continue;
     }
+    // The launchpad's events are not all pool events (spec 5.2 step 6): only Swap and ModifyLiquidity reach the repair case.
+    if (event.kind !== "swap" && event.kind !== "modifyLiquidity") continue;
     // Swap and ModifyLiquidity: a pool this batch touches whose token is known but still
     // unloaded is the MAJOR-1 repair case, not a creation — same rule either way: worth
     // reading again.
@@ -340,8 +378,12 @@ function recomputePrimaryPool(state: FoldState, tokenId: string, ctx: FoldContex
   if (best === undefined) return; // only possible when pools is empty, already guarded above
 
   const bestPool = pools.find((p) => p.id === best);
-  if (bestPool && (token.primaryPoolId !== best || token.origin !== bestPool.origin)) {
-    const updatedToken: TokenState = { ...token, primaryPoolId: best, origin: bestPool.origin };
+  if (!bestPool) return;
+  // Spec 5.2 step 3: D43's ranking still picks the primary pool, but a token launched here stays SV even when another
+  // pool with more money in it becomes primary and prices the token.
+  const origin = pools.some((p) => p.origin === "SV") ? "SV" : bestPool.origin;
+  if (token.primaryPoolId !== best || token.origin !== origin) {
+    const updatedToken: TokenState = { ...token, primaryPoolId: best, origin };
     state.tokens.set(tokenId, updatedToken);
     ctx.touchedTokens.add(tokenId);
   }
@@ -381,7 +423,8 @@ function handleInitialize(event: InitializeEvent, state: FoldState, ctx: FoldCon
   const quoteDecimals = resolveQuoteDecimals(state, c.quote);
   const dec0 = c.tokenIsCurrency0 ? token.decimals : quoteDecimals;
   const dec1 = c.tokenIsCurrency0 ? quoteDecimals : token.decimals;
-  const origin = originFor(event.poolId, event.hooks);
+  // Spec 5.2 step 2: a pool a Launched in this batch names is the launchpad's, whatever its hook.
+  const origin = ctx.svPools.has(event.poolId) ? "SV" : originFor(event.poolId, event.hooks);
 
   const pool: PoolState = {
     id: event.poolId,
@@ -662,4 +705,77 @@ function handleModifyLiquidity(event: ModifyLiquidityEvent, state: FoldState, ct
   ctx.touchedPools.add(pool.id);
 
   if (token.poolCount > 1) recomputePrimaryPool(state, token.id, ctx);
+}
+
+/** `ipfs://<CID>` and nothing else (spec 5.2); any other URI has no CID to match an upload by. */
+const IPFS_CID_URI = /^ipfs:\/\/([A-Za-z0-9]{46,128})$/;
+
+function metadataCidOf(uri: string): string {
+  return IPFS_CID_URI.exec(uri)?.[1] ?? "";
+}
+
+/**
+ * Spec 5.2 step 4. The row is appended whatever the state holds; the relabel is for the one case where a launch's
+ * Initialize fell into an earlier batch, so the pre-scan could not label the pool when it was created.
+ */
+function handleLaunched(event: LaunchedEvent, state: FoldState, ctx: FoldContext): void {
+  ctx.launchEvents += 1;
+  ctx.launches.push({
+    tokenId: event.token,
+    poolId: event.poolId,
+    quoteId: event.quote,
+    creator: event.creator,
+    payout: event.payout,
+    hook: event.hook,
+    tokenIsCurrency0: event.tokenIsCurrency0,
+    creatorShareBps: event.creatorShareBps,
+    openTick: event.openTick,
+    openingValuation: event.openingValuation,
+    liquidity: event.liquidity,
+    tokensInPool: event.tokensInPool,
+    firstBuyIn: event.firstBuyIn,
+    firstBuyTokens: event.firstBuyTokens,
+    routerFee: event.routerFee,
+    creationFee: event.creationFee,
+    name: event.name,
+    symbol: event.symbol,
+    metadataUri: event.metadataUri,
+    metadataCid: metadataCidOf(event.metadataUri),
+    block: event.block,
+    logIndex: event.logIndex,
+    txHash: event.txHash,
+    timestamp: event.timestamp,
+  });
+  const pool = state.pools.get(event.poolId);
+  if (!pool || pool.origin === "SV") return;
+  state.pools.set(pool.id, { ...pool, origin: "SV" });
+  ctx.touchedPools.add(pool.id);
+  const token = state.tokens.get(pool.tokenId);
+  if (token && token.origin !== "SV") {
+    state.tokens.set(token.id, { ...token, origin: "SV" });
+    ctx.touchedTokens.add(token.id);
+  }
+}
+
+/** Spec 5.2 step 5: one row per log, keyed by (tx, log index), never summed here. */
+function handleLaunchFees(event: LaunchFeesEvent, ctx: FoldContext): void {
+  ctx.launchEvents += 1;
+  ctx.launchFees.push({
+    txHash: event.txHash,
+    logIndex: event.logIndex,
+    tokenId: event.token,
+    payout: event.payout,
+    tokenPayout: event.tokenToPayout,
+    tokenPlatform: event.tokenFees - event.tokenToPayout,
+    quotePayout: event.quoteToPayout,
+    quotePlatform: event.quoteFees - event.quoteToPayout,
+    timestamp: event.timestamp,
+    block: event.block,
+  });
+}
+
+/** Spec 5.2 step 5: the last change per token in the batch; the store applies it only over an older position. */
+function handlePayoutChanged(event: PayoutChangedEvent, ctx: FoldContext): void {
+  ctx.launchEvents += 1;
+  ctx.payouts.set(event.token, { tokenId: event.token, payout: event.payout, block: event.block, logIndex: event.logIndex });
 }

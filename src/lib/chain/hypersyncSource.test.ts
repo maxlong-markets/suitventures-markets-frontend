@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, toEventSelector } from "viem";
-import { POOL_MANAGER, POOL_MANAGER_EVENTS_ABI, TOPIC0 } from "./abi";
+import { LAUNCH_TOPIC0, LAUNCHPAD_EVENTS_ABI, POOL_MANAGER, POOL_MANAGER_EVENTS_ABI, TOPIC0 } from "./abi";
 import { createHyperSyncSource } from "./hypersyncSource";
 
 const URL = "https://hypersync.test";
@@ -24,14 +24,15 @@ function page(chunks: Array<{ logs?: unknown[]; blocks?: unknown[]; transactions
   return { data: chunks, next_block: nextBlock, archive_height: 999_999_999 };
 }
 
-/** Topics + data for one Swap log, HyperSync-shaped (a raw JSON object, not yet decoded). */
-function swapLog(opts: { blockNumber?: number; logIndex?: number; txHash?: string; amount0?: bigint; amount1?: bigint } = {}) {
+/** Topics + data for one Swap log, HyperSync-shaped (a raw JSON object, not yet decoded). `address` is the emitter; null omits it. */
+function swapLog(opts: { blockNumber?: number; logIndex?: number; txHash?: string; amount0?: bigint; amount1?: bigint; address?: string | null } = {}) {
   const topics = encodeEventTopics({ abi: POOL_MANAGER_EVENTS_ABI, eventName: "Swap", args: { id: POOL_ID, sender: SENDER } });
   const data = encodeAbiParameters(
     [{ type: "int128" }, { type: "int128" }, { type: "uint160" }, { type: "uint128" }, { type: "int24" }, { type: "uint24" }],
     [opts.amount0 ?? -1000n, opts.amount1 ?? 2000n, 79_228_162_514_264_337_593_543_950_336n, 123_456n, 100, 3000],
   );
   return {
+    ...(opts.address === null ? {} : { address: opts.address ?? POOL_MANAGER }),
     block_number: opts.blockNumber ?? 100,
     log_index: opts.logIndex ?? 0,
     transaction_hash: opts.txHash ?? TX_HASH,
@@ -40,6 +41,25 @@ function swapLog(opts: { blockNumber?: number; logIndex?: number; txHash?: strin
     topic2: topics[2],
     // topic3 intentionally absent: Swap has only two indexed params (id, sender).
     data,
+  };
+}
+
+const LAUNCHPAD = "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+const LAUNCHED_TOKEN = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+const FEE_PAYOUT = "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+
+/** One FeesCollected log from the launchpad, HyperSync-shaped. */
+function feesLog(opts: { logIndex?: number; address?: string } = {}) {
+  const topics = encodeEventTopics({ abi: LAUNCHPAD_EVENTS_ABI, eventName: "FeesCollected", args: { token: LAUNCHED_TOKEN, payout: FEE_PAYOUT } });
+  return {
+    address: opts.address ?? LAUNCHPAD,
+    block_number: 100,
+    log_index: opts.logIndex ?? 0,
+    transaction_hash: TX_HASH,
+    topic0: topics[0],
+    topic1: topics[1],
+    topic2: topics[2],
+    data: encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }], [1000n, 10n, 700n, 7n]),
   };
 }
 
@@ -142,9 +162,9 @@ describe("head", () => {
   });
 
   describe("fetch: request shape", () => {
-    it("POSTs {url}/query with the documented body and field selection", async () => {
+    it("POSTs {url}/query with the documented body and field selection, one selection without a launchpad", async () => {
       const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse(page([], 200)));
-      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl });
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, launchpad: null });
       await source.fetch(100, 199);
       expect(fetchImpl).toHaveBeenCalledTimes(1);
       const [calledUrl, init] = fetchImpl.mock.calls[0]!;
@@ -158,10 +178,23 @@ describe("head", () => {
         logs: [{ address: [POOL_MANAGER], topics: [[TOPIC0.initialize, TOPIC0.swap, TOPIC0.modifyLiquidity]] }],
         field_selection: {
           block: ["number", "timestamp"],
-          log: ["block_number", "log_index", "transaction_hash", "topic0", "topic1", "topic2", "topic3", "data"],
+          log: ["block_number", "log_index", "transaction_hash", "address", "topic0", "topic1", "topic2", "topic3", "data"],
           transaction: ["hash", "from"],
         },
       });
+    });
+
+    // Spec 5.2: the launchpad rides the same request as a second selection filtered to its three activity events.
+    it("adds the launchpad as a second selection of its three activity topics, lowercased, still one request", async () => {
+      const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse(page([], 200)));
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, launchpad: LAUNCHPAD.toUpperCase().replace("0X", "0x") });
+      await source.fetch(100, 199);
+      const body = JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body)) as Record<string, unknown>;
+      expect(body.logs).toEqual([
+        { address: [POOL_MANAGER], topics: [[TOPIC0.initialize, TOPIC0.swap, TOPIC0.modifyLiquidity]] },
+        { address: [LAUNCHPAD], topics: [[LAUNCH_TOPIC0.launched, LAUNCH_TOPIC0.feesCollected, LAUNCH_TOPIC0.payoutChanged]] },
+      ]);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -268,6 +301,75 @@ describe("head", () => {
       const { events } = await source.fetch(100, 199);
       expect(events).toHaveLength(1);
       expect(events[0]?.logIndex).toBe(1);
+    });
+
+    it("decodes a launchpad log by its address, and drops a PoolManager-shaped log from any other address", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page(
+            [
+              {
+                logs: [feesLog({ logIndex: 0 }), swapLog({ logIndex: 1, address: "0x9999999999999999999999999999999999999999" }), swapLog({ logIndex: 2 })],
+                blocks: [{ number: 100, timestamp: "0x1" }],
+                transactions: [{ hash: TX_HASH, from: TX_FROM }],
+              },
+            ],
+            200,
+          ),
+        ),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, launchpad: LAUNCHPAD });
+      const { events } = await source.fetch(100, 199);
+      expect(events.map((e) => [e.kind, e.logIndex])).toEqual([
+        ["launchFees", 0],
+        ["swap", 2],
+      ]);
+      expect(events[0]).toMatchObject({ kind: "launchFees", token: LAUNCHED_TOKEN, payout: FEE_PAYOUT, tokenFees: 1000n, txFrom: TX_FROM.toLowerCase() });
+    });
+
+    it("drops a log that arrives without an address, and a launchpad log while no launchpad is configured", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page(
+            [
+              {
+                logs: [swapLog({ logIndex: 0, address: null }), feesLog({ logIndex: 1 }), swapLog({ logIndex: 2 })],
+                blocks: [{ number: 100, timestamp: "0x1" }],
+                transactions: [{ hash: TX_HASH, from: TX_FROM }],
+              },
+            ],
+            200,
+          ),
+        ),
+      );
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, launchpad: null });
+      const { events } = await source.fetch(100, 199);
+      expect(events.map((e) => [e.kind, e.logIndex])).toEqual([["swap", 2]]);
+    });
+
+    // NEXT_PUBLIC_LAUNCHPAD_ADDRESS is not normalised (it may be EIP-55 mixed case), while HyperSync's log addresses are
+    // lowercase: the source lowercases the configured address once, so the comparison still matches.
+    it("decodes launchpad logs when the configured launchpad address is mixed case", async () => {
+      const fetchImpl = vi.fn(async () =>
+        jsonResponse(
+          page(
+            [
+              {
+                logs: [feesLog({ logIndex: 0 })],
+                blocks: [{ number: 100, timestamp: "0x1" }],
+                transactions: [{ hash: TX_HASH, from: TX_FROM }],
+              },
+            ],
+            200,
+          ),
+        ),
+      );
+      const mixedCase = LAUNCHPAD.toUpperCase().replace("0X", "0x");
+      expect(mixedCase).not.toBe(LAUNCHPAD);
+      const source = createHyperSyncSource({ url: URL, token: TOKEN, fetchImpl, launchpad: mixedCase });
+      const { events } = await source.fetch(100, 199);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ kind: "launchFees", token: LAUNCHED_TOKEN, payout: FEE_PAYOUT });
     });
   });
 

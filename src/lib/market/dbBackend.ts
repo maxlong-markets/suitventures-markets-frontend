@@ -4,6 +4,7 @@ import { PAIRS_LIMIT, PAIRS_TTL, type PairsScope } from "@/lib/envio/pairs";
 import type { BalanceRow, CandleRow, QuotePriceRow, QuoteRow, SwapRow, WindowRow } from "@/lib/envio/queries";
 import { isStale, shapeCandles, shapeHolders, shapeQuotes, shapeTrades, usdMap, windowStats } from "@/lib/envio/shape";
 import { refreshRow, requestBuild, STALE_SEC } from "@/lib/holders/store";
+import { launchHealth } from "@/lib/launch/store";
 import { nowSec } from "@/lib/time";
 import type { HoldersStatus } from "@/lib/types";
 import type { HealthReport, MarketBackend } from "./backend";
@@ -162,7 +163,9 @@ function lastCycleFrom(stored: Record<string, unknown> | string | null, at: numb
   const n = reportNumbers(stored, ["at", "blocks", "trades", "holderPairs", "holderDeltaApplied", "holderReadsUnknown"] as const);
   if (!n) return null;
   const { at: reportedAt, ...rest } = n;
-  return { ageSec: at - reportedAt, ...rest };
+  // Optional (spec 5.2, amended 29 Sep 2026): a last_report written before the launchpad lacks it and must still parse.
+  const launchEvents = reportNumbers(stored, ["launchEvents"] as const)?.launchEvents ?? 0;
+  return { ageSec: at - reportedAt, ...rest, launchEvents };
 }
 
 /**
@@ -318,8 +321,21 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
         lastCycle: holdersCycleFrom(holdersState?.last_report ?? null, at),
         table: { rows: Number(size?.rows ?? 0), bytes: Number(size?.bytes ?? 0) },
       };
-      const ok = sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && !quotesFailed && quotes.every((q) => !q.stale);
-      return { ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night, holders, ...(opts.rpc ? { rpc: opts.rpc } : {}) };
+      // Its own try/catch (I4), but not silent: a missing market.launches means the migration was not applied, which
+      // also blanks every launch logo (the logo resolver's launchImage read fails) and stops the reader's applyFold.
+      let launches: NonNullable<HealthReport["launches"]>;
+      try {
+        launches = await launchHealth(db);
+      } catch (err) {
+        console.warn(`health: launch tables unavailable: ${message(err)}`);
+        launches = { error: "launch tables unavailable" };
+      }
+      const ok =
+        sync.lastOkAgeSec !== null && sync.lastOkAgeSec <= SYNC_OK_WITHIN_SEC && !quotesFailed && quotes.every((q) => !q.stale) && !("error" in launches);
+      return {
+        ok, backend: "db", lag, quotes, db: { latencyMs }, sync, nightly: night, holders, launches,
+        ...(opts.rpc ? { rpc: opts.rpc } : {}),
+      };
     },
   };
   return backend;

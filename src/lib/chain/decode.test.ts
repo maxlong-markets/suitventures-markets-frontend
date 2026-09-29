@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { encodeAbiParameters, encodeEventTopics } from "viem";
-import { POOL_MANAGER_EVENTS_ABI } from "./abi";
+import { LAUNCHPAD_EVENTS_ABI, POOL_MANAGER, POOL_MANAGER_EVENTS_ABI } from "./abi";
 import { decodeLog, type RawLog } from "./decode";
 
 // Mixed-case fixtures throughout: every test doubles as a lowercasing check, since decodeLog
@@ -26,6 +26,7 @@ function topicsOf(encoded: readonly (`0x${string}` | readonly `0x${string}`[] | 
 }
 
 const BASE: Omit<RawLog, "topics" | "data"> = {
+  address: POOL_MANAGER.toUpperCase().replace("0X", "0x"), // mixed case: routing by address must lowercase too
   blockNumber: 68_500_000,
   logIndex: 7,
   txHash: TX_HASH,
@@ -132,5 +133,84 @@ describe("decodeLog", () => {
     );
     const event = decodeLog({ ...BASE, txFrom: null, topics: topicsOf(topics), data });
     expect(event?.txFrom).toBeNull();
+  });
+});
+
+describe("decodeLog routes by address, then topic0 (instant launchpad design, section 5.2)", () => {
+  const LAUNCHPAD = "0x" + "5a".repeat(20);
+  const TOKEN = "0x" + "7a".repeat(20);
+  const CREATOR = "0x" + "c1".repeat(20);
+  const PAYOUT = "0x" + "c2".repeat(20);
+  const QUOTE = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+  const ZERO = "0x" + "0".repeat(40);
+  const LAUNCH_POOL = ("0x" + "CD".repeat(32)) as `0x${string}`;
+  const DATA = {
+    poolId: LAUNCH_POOL, payout: CREATOR as `0x${string}`, hook: ZERO as `0x${string}`, tokenIsCurrency0: false, openTick: 398_400,
+    openingValuation: 4_995_430_000n, liquidity: 2_240_000_000_000_000_000n, tokensInPool: 10n ** 27n - 300n, firstBuyIn: 99_500_000n,
+    firstBuyTokens: 19_000_000n * 10n ** 18n, routerFee: 500_000n, creationFee: 0n, creatorShareBps: 7000,
+    name: "Tailor's Chalk", symbol: "CHALK", metadataUri: "ipfs://bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy",
+  };
+  const launchedLog = () => ({
+    topics: topicsOf(
+      encodeEventTopics({
+        abi: LAUNCHPAD_EVENTS_ABI, eventName: "Launched",
+        args: { token: TOKEN as `0x${string}`, creator: CREATOR as `0x${string}`, quote: QUOTE as `0x${string}` },
+      }),
+    ),
+    data: encodeAbiParameters([LAUNCHPAD_EVENTS_ABI[0].inputs[3]], [DATA]),
+  });
+
+  it("decodes Launched from the launchpad's address, the struct flattened, addresses lowercase, amounts bigint", () => {
+    const event = decodeLog({ ...BASE, address: LAUNCHPAD.toUpperCase().replace("0X", "0x"), ...launchedLog() }, { launchpad: LAUNCHPAD });
+    expect(event).toEqual({
+      kind: "launched", block: BASE.blockNumber, logIndex: BASE.logIndex, timestamp: BASE.timestamp,
+      txHash: TX_HASH.toLowerCase(), txFrom: TX_FROM.toLowerCase(),
+      token: TOKEN, creator: CREATOR, quote: QUOTE, poolId: LAUNCH_POOL.toLowerCase(), payout: CREATOR, hook: ZERO,
+      tokenIsCurrency0: false, openTick: 398_400, openingValuation: 4_995_430_000n, liquidity: 2_240_000_000_000_000_000n,
+      tokensInPool: 10n ** 27n - 300n, firstBuyIn: 99_500_000n, firstBuyTokens: 19_000_000n * 10n ** 18n, routerFee: 500_000n,
+      creationFee: 0n, creatorShareBps: 7000, name: "Tailor's Chalk", symbol: "CHALK", metadataUri: DATA.metadataUri,
+    });
+  });
+
+  it("decodes FeesCollected and PayoutChanged", () => {
+    const fees = decodeLog(
+      {
+        ...BASE, address: LAUNCHPAD,
+        topics: topicsOf(encodeEventTopics({ abi: LAUNCHPAD_EVENTS_ABI, eventName: "FeesCollected", args: { token: TOKEN as `0x${string}`, payout: PAYOUT as `0x${string}` } })),
+        data: encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }, { type: "uint256" }], [1000n, 10_000_000n, 700n, 7_000_000n]),
+      },
+      { launchpad: LAUNCHPAD },
+    );
+    expect(fees).toMatchObject({ kind: "launchFees", token: TOKEN, payout: PAYOUT, tokenFees: 1000n, quoteFees: 10_000_000n, tokenToPayout: 700n, quoteToPayout: 7_000_000n });
+    const moved = decodeLog(
+      {
+        ...BASE, address: LAUNCHPAD,
+        topics: topicsOf(
+          encodeEventTopics({
+            abi: LAUNCHPAD_EVENTS_ABI, eventName: "PayoutChanged",
+            args: { token: TOKEN as `0x${string}`, previous: CREATOR as `0x${string}`, payout: PAYOUT as `0x${string}` },
+          }),
+        ),
+        data: "0x",
+      },
+      { launchpad: LAUNCHPAD },
+    );
+    expect(moved).toMatchObject({ kind: "payoutChanged", token: TOKEN, previous: CREATOR, payout: PAYOUT });
+  });
+
+  it("drops a PoolManager topic0 from the launchpad address, and a launchpad topic0 from any other address", () => {
+    const swapTopics = topicsOf(encodeEventTopics({ abi: POOL_MANAGER_EVENTS_ABI, eventName: "Swap", args: { id: POOL_ID, sender: SENDER } }));
+    const swapData = encodeAbiParameters(
+      [{ type: "int128" }, { type: "int128" }, { type: "uint160" }, { type: "uint128" }, { type: "int24" }, { type: "uint24" }],
+      [1n, -1n, 1n, 1n, 0, 0],
+    );
+    expect(decodeLog({ ...BASE, address: LAUNCHPAD, topics: swapTopics, data: swapData }, { launchpad: LAUNCHPAD })).toBeNull();
+    expect(decodeLog({ ...BASE, address: "0x" + "99".repeat(20), ...launchedLog() }, { launchpad: LAUNCHPAD })).toBeNull();
+    expect(decodeLog({ ...BASE, ...launchedLog() }, { launchpad: LAUNCHPAD })).toBeNull(); // a launchpad topic0 from the PoolManager
+  });
+
+  it("decodes nothing from the launchpad while no launchpad is configured", () => {
+    expect(decodeLog({ ...BASE, address: LAUNCHPAD, ...launchedLog() })).toBeNull();
+    expect(decodeLog({ ...BASE, address: LAUNCHPAD, ...launchedLog() }, { launchpad: null })).toBeNull();
   });
 });

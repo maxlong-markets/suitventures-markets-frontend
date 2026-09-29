@@ -1,11 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { bucketStart } from "@/lib/sync/ids";
 import { testDb } from "@/test/db";
 import { foldEvents, newTokenCandidates } from "./fold";
 import type { TokenMetadataReading } from "./onchain";
 import { applyFold, dueForMetadata, loadFoldState, readChainCursor, refreshTokenMetadata } from "./store";
-import type { CandleInterval, CandleState, FoldResult, InitializeEvent, PoolState, SwapEvent, TokenState, TradeRow } from "./types";
+import type {
+  CandleInterval, CandleState, FoldResult, InitializeEvent, LaunchFeesEvent, LaunchFeesRow, LaunchRow, LaunchedEvent, PayoutChangedEvent,
+  PoolState, SwapEvent, TokenState, TradeRow,
+} from "./types";
 
 let db: Db;
 beforeAll(async () => {
@@ -16,7 +19,7 @@ afterAll(async () => {
 });
 beforeEach(() =>
   db.exec(
-    "delete from market.quotes; delete from market.tokens; delete from market.pools; delete from market.swaps; delete from market.candles; delete from market.sync_state",
+    "delete from market.quotes; delete from market.tokens; delete from market.pools; delete from market.swaps; delete from market.candles; delete from market.sync_state; delete from market.launches; delete from market.launch_fee_events; delete from market.launch_uploads",
   ),
 );
 
@@ -81,7 +84,7 @@ function initEvent(o: Partial<InitializeEvent> = {}): InitializeEvent {
 function result(o: Partial<FoldResult> = {}): FoldResult {
   return {
     pools: [pool()], tokens: [token()], candles: [candle()], trades: [trade()], newTokens: [],
-    ignoredPools: 0, orphanedTokens: 0, skippedLiquidity: 0, ...o,
+    ignoredPools: 0, orphanedTokens: 0, skippedLiquidity: 0, launches: [], launchFees: [], payouts: [], launchEvents: 0, ...o,
   };
 }
 async function insertQuote(o: { id?: string; usdPrice?: number | null } = {}) {
@@ -713,5 +716,72 @@ describe("refreshTokenMetadata: repairing a zero-supply loaded token", () => {
     await refreshTokenMetadata(db, new Map([[TOKEN_A, reading]]), T0 + 1000);
     const row = (await db.query<{ total_supply: string }>("select total_supply from market.tokens where id = $1", [TOKEN_A]))[0]!;
     expect(row.total_supply).toBe("0");
+  });
+});
+
+describe("applyFold and loadFoldState: the launchpad (instant launchpad design, section 5.2)", () => {
+  const LAUNCH_TOKEN = addr(0xd1);
+  const NEW_PAYOUT = addr(0xe2);
+  const META_CID = "bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy";
+  const IMAGE_CID = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq";
+  const launchRow = (o: Partial<LaunchRow> = {}): LaunchRow => ({
+    tokenId: LAUNCH_TOKEN, poolId: POOL_B, quoteId: QUOTE, creator: WALLET, payout: WALLET, hook: addr(0), tokenIsCurrency0: true,
+    creatorShareBps: 7000, openTick: -168_200, openingValuation: 49_605_800_000_000_000_000n, liquidity: 10n ** 23n,
+    tokensInPool: 10n ** 27n, firstBuyIn: 0n, firstBuyTokens: 0n, routerFee: 0n, creationFee: 0n, name: "Tailor's Chalk",
+    symbol: "CHALK", metadataUri: `ipfs://${META_CID}`, metadataCid: META_CID, block: 140, logIndex: 5, txHash: txHash(40), timestamp: T0, ...o,
+  });
+  const feeRow = (o: Partial<LaunchFeesRow> = {}): LaunchFeesRow => ({
+    txHash: txHash(41), logIndex: 2, tokenId: LAUNCH_TOKEN, payout: WALLET, tokenPayout: 7n, tokenPlatform: 3n, quotePayout: 70n,
+    quotePlatform: 30n, timestamp: T0 + 60, block: 145, ...o,
+  });
+  const base = (block: number) => ({ block, logIndex: 0, timestamp: T0 + block, txHash: txHash(block), txFrom: WALLET });
+
+  it("writes the launch, attaches its upload, inserts the fee row and applies the payout in the fold's transaction; a re-applied result changes nothing", async () => {
+    await db.query(
+      `insert into market.launch_uploads (wallet, image_cid, metadata_cid, image_key, metadata_key, name, symbol, website, status, created_at)
+       values ($1, $2, $3, 'launch/img/k.webp', 'launch/meta/k.json', 'Tailor''s Chalk', 'CHALK', 'https://chalk.test', 'pending', $4)`,
+      [WALLET, IMAGE_CID, META_CID, T0 - 30],
+    );
+    const r = result({
+      launches: [launchRow()], launchFees: [feeRow()], launchEvents: 3,
+      payouts: [{ tokenId: LAUNCH_TOKEN, payout: NEW_PAYOUT, block: 150, logIndex: 1 }],
+    });
+    await applyFold(db, r, 150, T0 + 100);
+    await applyFold(db, r, 150, T0 + 200);
+    expect(await db.query("select payout, payout_block, image_cid, website from market.launches")).toEqual([
+      { payout: NEW_PAYOUT, payout_block: 150, image_cid: IMAGE_CID, website: "https://chalk.test" },
+    ]);
+    expect(await count("launch_fee_events")).toBe(1);
+    expect(await db.query("select status, token_id from market.launch_uploads")).toEqual([{ status: "used", token_id: LAUNCH_TOKEN }]);
+    expect(await readChainCursor(db)).toBe(150);
+  });
+
+  it("rolls the launch rows back with the cursor when any statement of the batch throws", async () => {
+    const bad = result({ launches: [launchRow()], launchFees: [feeRow({ tokenPlatform: -1n })] }); // violates token_platform >= 0
+    await expect(applyFold(db, bad, 160, T0)).rejects.toThrow();
+    expect(await count("launches")).toBe(0);
+    expect(await readChainCursor(db)).toBe(0);
+  });
+
+  it("reads no pool for a batch of only fee and payout events", async () => {
+    const feeEvent: LaunchFeesEvent = { kind: "launchFees", ...base(170), token: LAUNCH_TOKEN, payout: WALLET, tokenFees: 1n, quoteFees: 1n, tokenToPayout: 0n, quoteToPayout: 0n };
+    const payoutEvent: PayoutChangedEvent = { kind: "payoutChanged", ...base(171), token: LAUNCH_TOKEN, previous: WALLET, payout: NEW_PAYOUT };
+    const spy = vi.spyOn(db, "query");
+    const state = await loadFoldState(db, [feeEvent, payoutEvent]);
+    expect(state.pools.size).toBe(0);
+    expect(spy.mock.calls.some(([sql]) => String(sql).includes("from market.pools where id = any"))).toBe(false);
+    spy.mockRestore();
+  });
+
+  it("loads the pool a Launched names, so a pool initialised in an earlier batch can be relabelled SV", async () => {
+    await applyFold(db, result({ pools: [pool({ id: POOL_B, origin: "Uniswap" })], tokens: [token({ primaryPoolId: POOL_B, origin: "Uniswap" })] }), 1, T0);
+    const launchedEvent: LaunchedEvent = {
+      kind: "launched", ...base(180), token: TOKEN_A, creator: WALLET, quote: QUOTE, poolId: POOL_B, payout: WALLET, hook: addr(0),
+      tokenIsCurrency0: true, openTick: 0, openingValuation: 1n, liquidity: 1n, tokensInPool: 1n, firstBuyIn: 0n, firstBuyTokens: 0n,
+      routerFee: 0n, creationFee: 0n, creatorShareBps: 7000, name: "AI", symbol: "AI", metadataUri: "",
+    };
+    const state = await loadFoldState(db, [launchedEvent]);
+    expect(state.pools.get(POOL_B)?.origin).toBe("Uniswap");
+    expect(state.tokens.get(TOKEN_A)?.primaryPoolId).toBe(POOL_B);
   });
 });

@@ -52,7 +52,25 @@ export type ModifyLiquidityEvent = ChainEventBase & {
   liquidityDelta: bigint;
 };
 
-export type ChainEvent = InitializeEvent | SwapEvent | ModifyLiquidityEvent;
+/**
+ * The instant launchpad's three activity events (instant launchpad design, section 5.2), decoded from the launchpad's
+ * own address. Addresses lowercase; on-chain integers bigint except ticks and bps. `launched` carries its pool id, the
+ * other two do not: code that reads `poolId` must first narrow to a pool event.
+ */
+export type LaunchedEvent = ChainEventBase & {
+  kind: "launched";
+  token: string; creator: string; quote: string; poolId: string; payout: string; hook: string;
+  tokenIsCurrency0: boolean; openTick: number; openingValuation: bigint; liquidity: bigint; tokensInPool: bigint;
+  firstBuyIn: bigint; firstBuyTokens: bigint; routerFee: bigint; creationFee: bigint; creatorShareBps: number;
+  name: string; symbol: string; metadataUri: string;
+};
+export type LaunchFeesEvent = ChainEventBase & {
+  kind: "launchFees";
+  token: string; payout: string; tokenFees: bigint; quoteFees: bigint; tokenToPayout: bigint; quoteToPayout: bigint;
+};
+export type PayoutChangedEvent = ChainEventBase & { kind: "payoutChanged"; token: string; previous: string; payout: string };
+
+export type ChainEvent = InitializeEvent | SwapEvent | ModifyLiquidityEvent | LaunchedEvent | LaunchFeesEvent | PayoutChangedEvent;
 
 /** One ERC-20 Transfer of one token, from HyperSync (LogSource.transfers): addresses lowercase, value as emitted. */
 export type TransferEvent = { block: number; logIndex: number; from: string; to: string; value: bigint };
@@ -211,6 +229,14 @@ export type FoldResult = {
    * the price is stale, and it propagates instead of being counted here.
    */
   skippedLiquidity: number;
+  /** One row per `Launched` in the batch (instant launchpad design, section 5.2). */
+  launches: LaunchRow[];
+  /** One row per `FeesCollected` log, never summed in the fold: totals are summed on read (spec 5.5). */
+  launchFees: LaunchFeesRow[];
+  /** The last `PayoutChanged` per token in the batch. */
+  payouts: PayoutRow[];
+  /** launched + launchFees + payoutChanged events folded, for health (spec section 13). */
+  launchEvents: number;
 };
 
 /**

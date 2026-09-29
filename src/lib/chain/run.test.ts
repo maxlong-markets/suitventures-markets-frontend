@@ -5,7 +5,7 @@ import { testDb } from "@/test/db";
 import type { QuoteFeedConfig } from "./onchain";
 import { runChainSync, type ChainClient, type ChainRunDeps, type ChainRunOpts } from "./run";
 import { applyFold, readChainCursor } from "./store";
-import type { ChainEvent, InitializeEvent, SwapEvent, TransferEvent } from "./types";
+import type { ChainEvent, InitializeEvent, PayoutChangedEvent, SwapEvent, TransferEvent } from "./types";
 
 // Real addresses (config/quotes.json), the same ones src/lib/chain/fold.test.ts uses, so the one test below
 // that runs an Initialize+Swap through the real fold (not a fake) classifies and prices exactly as production
@@ -44,6 +44,7 @@ async function seedToken(db: Db, id: string, now: number): Promise<void> {
     db,
     {
       pools: [], candles: [], trades: [], newTokens: [id], ignoredPools: 0, orphanedTokens: 0, skippedLiquidity: 0,
+      launches: [], launchFees: [], payouts: [], launchEvents: 0,
       tokens: [{ id, address: id, symbol: id.slice(0, 6), name: id, decimals: 18, poolCount: 0, origin: "Other", primaryPoolId: null, createdAt: now, metadataLoaded: false }],
     },
     1,
@@ -192,7 +193,7 @@ describe("runChainSync: lease and cursor guards", () => {
     const report = await runChainSync(db, chainDeps({ source }), baseOpts());
     expect(report).toEqual({
       skipped: "lease", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
-      skippedLiquidity: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
+      skippedLiquidity: 0, launchEvents: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
       metadataRetried: 0, metadataFailed: 0, cursor: 0, error: null,
     });
     expect(source.requests).toBe(0);
@@ -228,7 +229,7 @@ describe("runChainSync: yields to the nightly (final review MAJOR)", () => {
     const report = await runChainSync(db, chainDeps({ source }), baseOpts());
     expect(report).toEqual({
       skipped: "nightly", cycles: 0, blocks: 0, events: 0, trades: 0, newTokens: 0, ignoredPools: 0, orphanedTokens: 0,
-      skippedLiquidity: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
+      skippedLiquidity: 0, launchEvents: 0, holderDeltaApplied: 0, holderReadsUnknown: 0, requests: 0, quotesRefreshed: 0,
       metadataRetried: 0, metadataFailed: 0, cursor: 1000, error: null,
     });
     expect(source.requests).toBe(0); // never asked the source for anything, not even head()
@@ -754,5 +755,22 @@ describe("runChainSync: holder-count upkeep (fix round 1 — observe both balanc
     await runChainSync(db, chainDeps({ source, client }), opts);
 
     expect(cycles).toEqual([{ holderDeltaApplied: 1, holderReadsUnknown: 0, orphanedTokens: 0 }]);
+  });
+});
+
+describe("runChainSync: launchpad events in the report (instant launchpad design, section 5.2)", () => {
+  it("counts the launchpad events a cycle folded, in the report and in the stored last_report", async () => {
+    await seedCursor(db, 99);
+    const payout: PayoutChangedEvent = {
+      kind: "payoutChanged", block: 100, logIndex: 0, timestamp: 1_700_000_100, txHash: txHash(9), txFrom: WALLET,
+      token: AI, previous: WALLET, payout: addr(0xd1),
+    };
+    const source = new FakeLogSource({ head: 200, batches: { 100: { events: [payout], nextBlock: 102 } } });
+    const report = await runChainSync(db, chainDeps({ source }), baseOpts({ maxSpan: 150, maxRequests: 2 }));
+    expect(report.error).toBeNull();
+    expect(report.launchEvents).toBe(1);
+    const [row] = await db.query<{ last_report: unknown }>("select last_report from market.sync_state where job = 'chain'");
+    const stored = typeof row!.last_report === "string" ? JSON.parse(row!.last_report) : row!.last_report;
+    expect(stored).toMatchObject({ launchEvents: 1 });
   });
 });

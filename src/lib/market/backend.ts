@@ -15,7 +15,11 @@ export type HealthReport = {
   sync?: {
     lastOkAgeSec: number | null; lastError: string | null;
     /** The chain job's last cycle (23 Sep 2026): its holder-count upkeep, and how many of its pairs' balance reads got through. Absent until the reader has written one. */
-    lastCycle?: { ageSec: number; blocks: number; trades: number; holderPairs: number; holderDeltaApplied: number; holderReadsUnknown: number };
+    lastCycle?: {
+      ageSec: number; blocks: number; trades: number; holderPairs: number; holderDeltaApplied: number; holderReadsUnknown: number;
+      /** Launchpad events folded in the last cycle; 0 when the stored report predates the launchpad (spec section 13). */
+      launchEvents: number;
+    };
   };
   /** Hostnames only, never URLs (a paid endpoint's key is in its path): where the server's chain reads go. */
   rpc?: { primary: string; backup: string | null };
@@ -37,6 +41,12 @@ export type HealthReport = {
     /** `rows` is pg_class.reltuples (an estimate, clamped at 0 before the first analyze); `bytes` is pg_total_relation_size, indexes and toast included. */
     table: { rows: number; bytes: number };
   };
+  /**
+   * Launches whose upload was not found, and uploads the nightly clean-up removed (spec section 13). When the launch
+   * tables cannot be read (the migration not applied yet, above all) it says so and `ok` turns false: every launch
+   * logo then answers "no logo" and the reader's applyFold throws, so this must be loud, not silently absent.
+   */
+  launches?: { missingUploads: number; deletedUploads: number } | { error: string };
   error?: string;
 };
 

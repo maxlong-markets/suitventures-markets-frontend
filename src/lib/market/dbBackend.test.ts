@@ -368,6 +368,42 @@ describe("createDbBackend health", () => {
     });
   });
 
+  it("reads launchEvents from the last cycle, as 0 from a report written before it existed, and counts missing and deleted uploads (spec 5.2, 13)", async () => {
+    const report = { at: NOW - 20, cursor: 990, blocks: 30, trades: 280, holderPairs: 190, holderDeltaApplied: 150, holderReadsUnknown: 40 };
+    await finishRun(db, "chain", { now: NOW - 20, ok: true, rows: 1, queries: 1, report });
+    expect((await backend().health()).sync?.lastCycle).toEqual({
+      ageSec: 20, blocks: 30, trades: 280, holderPairs: 190, holderDeltaApplied: 150, holderReadsUnknown: 40, launchEvents: 0,
+    });
+    await finishRun(db, "chain", { now: NOW - 20, ok: true, rows: 1, queries: 1, report: { ...report, launchEvents: 4 } });
+    expect((await backend().health()).sync?.lastCycle?.launchEvents).toBe(4);
+    expect((await backend().health()).launches).toEqual({ missingUploads: 0, deletedUploads: 0 });
+    await db.query(
+      `insert into market.launches (token_id, pool_id, quote_id, creator, payout, token_is_currency0, creator_share_bps, open_tick,
+         opening_valuation, liquidity, tokens_in_pool, first_buy_in, first_buy_tokens, router_fee, creation_fee, hook, name, symbol,
+         metadata_uri, metadata_cid, launch_block, launch_log_index, launch_tx, launched_at, payout_block, payout_log_index, updated_at)
+       values ('0xt', '0xp', '0xq', '0xc', '0xc', true, 7000, 0, 1, 1, 1, 0, 0, 0, 0, '0x0', 'N', 'S', 'ipfs://bafy', 'bafy', 1, 0, '0xtx', 1, 1, 0, 1)`,
+    );
+    await db.query(
+      `insert into market.launch_uploads (wallet, image_cid, metadata_cid, image_key, metadata_key, name, symbol, status, created_at)
+       values ('0xc', 'i', 'bafy', 'ik', 'mk', 'N', 'S', 'deleted', 1)`,
+    );
+    expect((await backend().health()).launches).toEqual({ missingUploads: 1, deletedUploads: 1 });
+    await db.exec("delete from market.launches; delete from market.launch_uploads");
+  });
+
+  it("says the launch tables are unavailable, and is not ok, when market.launches is missing (the migration not applied)", async () => {
+    const bare = await testDb(); // its own in-memory PGlite, so the suite's shared database keeps its tables
+    try {
+      await bare.exec("alter table market.launches rename to launches_gone");
+      await finishRun(bare, "chain", { now: NOW - 20, ok: true, rows: 1, queries: 1 });
+      const h = await createDbBackend(bare, { now: () => NOW }).health();
+      expect(h.launches).toEqual({ error: "launch tables unavailable" });
+      expect(h.ok).toBe(false);
+    } finally {
+      await bare.end();
+    }
+  });
+
   it("surfaces the holder builder's last cycle and the balances table's footprint, null until a full report exists (design section 8)", async () => {
     // Nothing has written a `holders` sync_state row at all yet: the block is still there (the table's size is
     // worth knowing before the first build), but the cycle reads null rather than a row of zeros.

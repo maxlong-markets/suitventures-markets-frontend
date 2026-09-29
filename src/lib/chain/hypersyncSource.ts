@@ -1,4 +1,5 @@
-import { POOL_MANAGER, TOPIC0 } from "./abi";
+import { LAUNCHPAD_ADDRESS } from "@/lib/launch/address";
+import { LAUNCH_TOPIC0, POOL_MANAGER, TOPIC0 } from "./abi";
 import { decodeLog, type RawLog } from "./decode";
 import type { ChainEvent, LogSource, TransferEvent } from "./types";
 
@@ -8,6 +9,11 @@ export type HyperSyncSourceOptions = {
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   maxAttempts?: number;
+  /**
+   * The launchpad's address (instant launchpad design, section 5.2). Undefined reads NEXT_PUBLIC_LAUNCHPAD_ADDRESS through
+   * `LAUNCHPAD_ADDRESS`; null means no launchpad, so the query is exactly what it was before the launchpad.
+   */
+  launchpad?: string | null;
 };
 
 const DEFAULT_URL = "https://4663.hypersync.xyz";
@@ -51,6 +57,8 @@ function parseBlockTimestamp(value: string | number, blockNumber: number): numbe
 type HyperSyncBlock = { number: number; timestamp: string | number };
 type HyperSyncTransaction = { hash: string; from: string | null };
 type HyperSyncLog = {
+  /** Selected since the launchpad joined the query; a log without one is dropped. */
+  address?: string | null;
   block_number: number;
   log_index: number;
   transaction_hash: string;
@@ -149,6 +157,8 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
   const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   let requests = 0;
   let rateLimitPerMinute: number | null = null;
+  // Lowercased once: the filter and decode.ts's routing both compare lowercase.
+  const launchpad = (opts.launchpad === undefined ? LAUNCHPAD_ADDRESS : opts.launchpad)?.toLowerCase() ?? null;
 
   function getToken(): string {
     const token = opts.token || process.env.HYPERSYNC_API_TOKEN || process.env.ENVIO_API_TOKEN;
@@ -220,13 +230,21 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
     },
 
     async fetch(fromBlock: number, toBlock: number) {
+      // The PoolManager's three events, plus the launchpad's three activity events when one is configured: a second
+      // selection in the same request, never a second request (spec 5.2). The launchpad's setting events stay out.
+      const logs: { address: string[]; topics: string[][] }[] = [
+        { address: [POOL_MANAGER], topics: [[TOPIC0.initialize, TOPIC0.swap, TOPIC0.modifyLiquidity]] },
+      ];
+      if (launchpad) {
+        logs.push({ address: [launchpad], topics: [[LAUNCH_TOPIC0.launched, LAUNCH_TOPIC0.feesCollected, LAUNCH_TOPIC0.payoutChanged]] });
+      }
       const queryBody = {
         from_block: fromBlock,
         to_block: toBlock + 1, // HyperSync's to_block is exclusive
-        logs: [{ address: [POOL_MANAGER], topics: [[TOPIC0.initialize, TOPIC0.swap, TOPIC0.modifyLiquidity]] }],
+        logs,
         field_selection: {
           block: ["number", "timestamp"],
-          log: ["block_number", "log_index", "transaction_hash", "topic0", "topic1", "topic2", "topic3", "data"],
+          log: ["block_number", "log_index", "transaction_hash", "address", "topic0", "topic1", "topic2", "topic3", "data"],
           transaction: ["hash", "from"],
         },
       };
@@ -262,12 +280,15 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
       const events: ChainEvent[] = [];
       for (const chunk of response.data) {
         for (const log of chunk.logs ?? []) {
+          // Routing is by emitter now, so a log that names none cannot be placed: dropped, never guessed.
+          if (!log.address) continue;
           const blockNumber = Number(log.block_number);
           const timestamp = timestamps.get(blockNumber);
           if (timestamp === undefined) {
             throw new Error(`HyperSync log at block ${blockNumber} has no matching block timestamp`);
           }
           const rawLog: RawLog = {
+            address: log.address.toLowerCase(),
             blockNumber,
             logIndex: Number(log.log_index),
             txHash: log.transaction_hash,
@@ -276,7 +297,7 @@ export function createHyperSyncSource(opts: HyperSyncSourceOptions = {}): LogSou
             timestamp,
             txFrom: senders.get(log.transaction_hash.toLowerCase()) ?? null,
           };
-          const decoded = decodeLog(rawLog);
+          const decoded = decodeLog(rawLog, { launchpad });
           if (decoded) events.push(decoded);
         }
       }
