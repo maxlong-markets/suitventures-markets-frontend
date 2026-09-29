@@ -171,7 +171,11 @@ describe("the launchpad's functions (spec 4.2, in the interface's order)", () =>
       "FirstBuyTooLarge", "FirstBuyTooSmall", "HookNotAllowed", "InvalidNonce", "NotAllowedToLaunch", "NotPayout", "NotPoolManager",
       "NothingOwed", "NothingToCollect", "PermitMismatch", "PoolAlreadyInitialized", "RenounceDisabled", "SignatureExpired",
       "UnexpectedCallback", "UnknownLaunch", "UriTooLong", "ValuationOutOfRange", "ZeroAddress", "BpsTooHigh",
+      "SafeERC20FailedOperation", "ReentrancyGuardReentrantCall",
     ].sort());
+    // Inherited from OpenZeppelin on the compiled contract (`forge inspect SVLaunchpad errors`).
+    expect(encodeErrorResult({ abi: svLaunchpadAbi, errorName: "SafeERC20FailedOperation", args: ["0x5fc5360d0400a0fd4f2af552add042d716f1d168"] }).slice(0, 10)).toBe("0x5274afe7");
+    expect(encodeErrorResult({ abi: svLaunchpadAbi, errorName: "ReentrancyGuardReentrantCall" })).toBe("0x3ee5aeb5");
     const data = encodeErrorResult({ abi: svLaunchpadAbi, errorName: "ValuationOutOfRange", args: [1n, 2n, 3n] });
     expect(data.slice(0, 10)).toBe(toFunctionSelector("ValuationOutOfRange(uint256,uint256,uint256)"));
     expect(decodeErrorResult({ abi: svLaunchpadAbi, data })).toMatchObject({ errorName: "ValuationOutOfRange", args: [1n, 2n, 3n] });

@@ -275,6 +275,9 @@ export const svLaunchpadAbi = [
   { type: "error", name: "NothingOwed", inputs: [] },
   { type: "error", name: "NotPoolManager", inputs: [] },
   { type: "error", name: "UnexpectedCallback", inputs: [] },
+  // Inherited from OpenZeppelin (SafeERC20, ReentrancyGuard): on the compiled contract, so a revert reads by name.
+  { type: "error", name: "SafeERC20FailedOperation", inputs: [{ name: "token", type: "address" }] },
+  { type: "error", name: "ReentrancyGuardReentrantCall", inputs: [] },
   // Foreign errors a launch can bubble up (spec 7.2): v4's PoolManager, then Permit2.
   { type: "error", name: "PoolAlreadyInitialized", inputs: [] },
   { type: "error", name: "InvalidNonce", inputs: [] },
