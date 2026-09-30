@@ -1,19 +1,28 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { isAddress, type Hex } from "viem";
-import { useAccount, usePublicClient, useWalletClient } from "wagmi";
+import { useAccount, usePublicClient, useSwitchChain, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
-import { useCurrencyConfig, useLaunchSettings, useOpening, useTokenBalanceOf } from "@/hooks/useLaunchpad";
+import { useCurrencyConfig, useLaunchSettings, useOpening, useTokenBalanceOf, useTokenDeployed } from "@/hooks/useLaunchpad";
 import { useQuotes } from "@/hooks/useMarketsData";
-import { robinhoodChain } from "@/lib/chain";
+import { robinhoodChain, txUrl } from "@/lib/chain";
 import { USDG, ZERO_ADDRESS } from "@/lib/chain/math/constants";
-import { fmtAmt, fmtInt, fmtPrice } from "@/lib/format";
-import { LAUNCH_MESSAGES, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, executeLaunch, type LaunchStep } from "@/lib/launch";
-import { UPLOAD_REUSE_MS, UploadError, uploadKey, uploadLaunchAssets, type UploadAnswer } from "@/lib/launch/client";
+import { fmtAmt, fmtInt, fmtPrice, short } from "@/lib/format";
 import {
-  DESCRIPTION_MAX_CHARS, IMAGE_MAX_BYTES, NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8Bytes, validateFields, type LaunchFields,
+  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, POOL_FEE_PCT, executeLaunch,
+  type LaunchStep,
+} from "@/lib/launch";
+import {
+  UPLOAD_REUSE_MS, UploadError, forgetUnsettled, parseUnsettled, readUnsettled, rememberUnsettled, subscribeUnsettled, uploadKey,
+  uploadLaunchAssets, type UploadAnswer,
+} from "@/lib/launch/client";
+import {
+  DESCRIPTION_MAX_CHARS, FIELD_LABELS, IMAGE_MAX_BYTES, NAME_MAX_BYTES, SYMBOL_MAX_BYTES, fieldIssues, fieldMessage, onChainText,
+  utf8Bytes, validateFields, type LaunchFieldName, type LaunchFields,
 } from "@/lib/launch/fields";
 import {
   RULE_OF_THUMB, capTokens, estimateFirstBuyTokens, firstBuyCapGross, maxFirstBuy, minFirstBuyTokens, presetValuations, pricePerToken,
@@ -47,6 +56,43 @@ const DISABLED =
   "mt-[14px] h-11 w-full cursor-not-allowed border border-hairline-mid bg-[rgba(244,238,218,0.06)] font-mono text-[11px] uppercase tracking-[0.22em] text-ink-34";
 const PENDING =
   "mt-[14px] flex h-11 w-full cursor-wait items-center justify-center gap-[10px] bg-[rgba(244,238,218,0.55)] font-mono text-[11px] uppercase tracking-[0.22em] text-onlight";
+/** TokenView's transaction link recipe, with room to tap. */
+const LINK = "inline-block py-[6px] font-mono text-[10px] uppercase tracking-[0.2em] text-ink-60 hover:text-ink";
+/** A text control that reads as a link (UX review 3), in the label row's type. */
+const TEXT_LINK = "py-1 font-mono text-[11px] normal-case tracking-[0.04em] text-ink-70 underline underline-offset-2 hover:text-ink";
+
+/**
+ * A percentage with up to four decimals and no trailing zeros (70, 70.5, 0.7, 0.705), joined to its sign by a no-break
+ * space, so a number never ends one line with its "%" starting the next (fix round 1, ruling 10).
+ */
+const pct = (n: number) => `${Number(n.toFixed(4))}\u{A0}%`;
+/** The same join for a percentage the code already formats. */
+const PCT = "\u{A0}%";
+/** The rule of thumb lives in math.ts with plain spaces; shown here, each number keeps its percent sign. */
+const RULE_OF_THUMB_SHOWN = RULE_OF_THUMB.replace(/(\d) %/g, `$1${PCT}`);
+/** Shown under the preview when the contract opened below the pick (UX review 5). */
+const ROUNDED_NOTE = `Rounded down to the pool's nearest price step, at most about 2${PCT} below your pick.`;
+/** The locked card once the token turns up at its predicted address. */
+const WENT_THROUGH = "It went through: your token is live.";
+
+/**
+ * Why the form stays locked with no redirect (UX review B3, fix round 1):
+ * - "unsettled": the launch was sent, or may have been, and its outcome is not known. Pressing Launch again would reuse the
+ *   salt, and an edited name would predict an empty address, so a second coin could launch. Only "Start a new launch" or
+ *   the token turning up ends it, and it is remembered for this tab, so a reload shows the same card.
+ * - "live": the token was already live at the predicted address before anything was sent.
+ */
+type Lock = { why: "unsettled"; token: Address; hash?: Hex } | { why: "live"; token: Address };
+/** The first reason the launch cannot go ahead; `answered` marks the two the button itself answers (UX review 8). */
+type Blocker = { text: string; answered?: true };
+/**
+ * The one submit button's look and what a press does, in each state; one element throughout, so keyboard focus never drops.
+ * Plain data: the press is dispatched from the JSX handler, so nothing here runs during render.
+ */
+type ButtonState = {
+  label: string; className: string; spinner: boolean; ariaDisabled: boolean; disabled: boolean;
+  action: "launch" | "connect" | "switch" | "none";
+};
 
 /** A typed amount in raw units, 0 for a half-typed or empty field. Display and gating only. */
 function parseAmount(text: string, decimals: number): bigint {
@@ -76,13 +122,31 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/**
+ * A field's own message, in the image note's recipe, right under the field (UX review 6). The region is always there and
+ * polite, and only its text changes (fix round 1, ruling 8): a message that appears while typing is announced, and a
+ * keystroke that leaves the same message leaves the same text, so nothing is announced again. Empty, it takes no room.
+ */
+function FieldNote({ id, text }: { id: string; text: string | null }) {
+  return (
+    <div id={id} aria-live="polite" className={text ? "mt-2 font-mono text-[10.5px] leading-[1.5] text-down" : undefined}>
+      {text}
+    </div>
+  );
+}
+
+/** A counter in the label row, in the down colour while over its limit. */
+const counterClass = (over: boolean) => `normal-case tracking-[0.04em]${over ? " text-down" : ""}`;
+
 export default function LaunchForm() {
   const router = useRouter();
-  const { address, isConnected, signed, withSignIn, addToast, updateToast } = useAppState();
+  const { address, isConnected, signed, withSignIn, dropSession, addToast, updateToast } = useAppState();
   const publicClient = usePublicClient({ chainId: robinhoodChain.id });
   const { data: walletClient } = useWalletClient({ chainId: robinhoodChain.id });
-  // On another network wagmi gives no wallet client for Robinhood Chain; the button names the network instead of doing nothing.
+  // On another network wagmi gives no wallet client for Robinhood Chain; the button asks the wallet to switch instead.
   const { chainId } = useAccount();
+  const { openConnectModal } = useConnectModal();
+  const { mutate: switchChain, isPending: switching } = useSwitchChain();
   const quotesQuery = useQuotes();
   const currencies = useMemo(() => orderCurrencies(quotesQuery.data ?? []), [quotesQuery.data]);
 
@@ -108,9 +172,22 @@ export default function LaunchForm() {
   const [error, setError] = useState<string | null>(null);
   // Set once the launch is confirmed: the form stays locked until the token page opens, so no enabled Launch flashes.
   const [done, setDone] = useState(false);
+  const [lock, setLock] = useState<Lock | null>(null);
+  // A switch the wallet refused or could not make, tied to the network it was asked from.
+  const [switchNote, setSwitchNote] = useState<{ from: number; text: string } | null>(null);
   const inFlight = useRef(false);
   const resumeAfterSignIn = useRef(false);
   const uploadCache = useRef<{ key: string; answer: UploadAnswer; at: number } | null>(null);
+
+  // A launch whose outcome is not known, remembered for this tab (fix round 1, ruling 6). The server snapshot is "none", so
+  // hydration matches, and the client then reads the tab's storage; a storage that refuses reads as none.
+  const storedRaw = useSyncExternalStore(subscribeUnsettled, readUnsettled, () => null);
+  const stored = useMemo(() => parseUnsettled(storedRaw), [storedRaw]);
+  const held: Lock | null =
+    lock ?? (stored && address && stored.wallet === address.toLowerCase() ? { why: "unsettled", token: stored.token, hash: stored.hash } : null);
+  // The other way out besides "Start a new launch": the token turning up at its predicted address.
+  const found = useTokenDeployed(held?.why === "unsettled" ? held.token : undefined, held?.why === "unsettled");
+  const disconnected = !isConnected || !address;
 
   // The currency: USDG until the creator picks another.
   const asset = currencies.find((q) => q.address.toLowerCase() === (picked ?? USDG).toLowerCase()) ?? currencies[0];
@@ -130,7 +207,10 @@ export default function LaunchForm() {
         : custom === "" ? null : parseAmount(custom, decimals) || null
       : (presets[preset] ?? null);
   const inRange = requested !== null && bounds !== undefined && requested >= bounds.min && requested <= bounds.max;
-  const opening = useOpening({ account: address, salt, name, symbol, quote, valuation: inRange ? requested : null });
+  // What goes on chain (UX review 7): the preview predicts the token for exactly these, and the launch sends the same.
+  const nameOnChain = onChainText(name);
+  const symbolOnChain = onChainText(symbol);
+  const opening = useOpening({ account: address, salt, name: nameOnChain, symbol: symbolOnChain, quote, valuation: inRange ? requested : null });
   const snapped = inRange ? opening.snapped : undefined;
   const balance = useTokenBalanceOf(quote, address);
 
@@ -152,8 +232,26 @@ export default function LaunchForm() {
   const capGross = snapped && routerFeeBps !== undefined && capBps !== undefined ? firstBuyCapGross(snapped, capBps, routerFeeBps) : null;
   const maxBuy = maxFirstBuy(balance, creationFee, capGross);
   const rawFields: LaunchFields = { name, symbol, description, website, x, telegram };
+  // One set of rules with the upload route (fields.ts): the stored fields when all pass, and each field's own issue.
   const checked = validateFields(rawFields);
+  const issues = fieldIssues(rawFields);
+  /**
+   * A field's message shows while its value breaks a rule, not on leaving the field: a message that appeared on blur
+   * pushed what sits below it down between pointerdown and click, so the click missed. An empty field says nothing: the
+   * button's reason asks for the name and symbol, and the links are optional.
+   */
+  const noteFor = (field: LaunchFieldName): string | null => {
+    const issue = issues[field];
+    return issue !== undefined && rawFields[field] !== "" ? fieldMessage(field, issue) : null;
+  };
   const payoutAddress = (payoutOpen && payout !== "" ? payout : address) as Address | undefined;
+  // Fix round 1, ruling 12: the contract pays a zero payout's fees to the creator instead, so it is refused, not shown.
+  let payoutProblem: string | null = null;
+  if (payoutOpen && payout !== "") {
+    if (!isAddress(payout)) payoutProblem = "That is not a valid address. Check it for typos.";
+    else if (payout.toLowerCase() === ZERO_ADDRESS) payoutProblem = "The zero address cannot be the payout. Leave the field empty to use this wallet.";
+  }
+  const wrongNetwork = chainId !== undefined && chainId !== robinhoodChain.id;
 
   /** Whole dollars when the currency has a USD price, else the currency's own units. */
   const money = (raw: bigint) => {
@@ -169,35 +267,34 @@ export default function LaunchForm() {
     return usd !== null ? `$${text}` : `${text} ${asset?.symbol ?? ""}`;
   };
 
-  function reasonText(): string | null {
-    if (!isConnected || !address) return "Connect a wallet to launch.";
-    if (settings.allowed === undefined) return "Checking your wallet.";
-    if (!settings.allowed) return "Launching is open to Suits holders.";
-    if (!settingsRead) return "Reading the launchpad's settings.";
+  /** The first reason the launch cannot go ahead, first match wins; the button answers the two marked `answered` itself. */
+  function blockerOf(): Blocker | null {
+    if (disconnected) return { text: "Connect a wallet to launch.", answered: true };
+    if (settings.allowed === undefined) return { text: "Checking your wallet." };
+    if (!settings.allowed) return { text: "Launching is open to Suits holders." };
+    if (!settingsRead) return { text: "Reading the launchpad's settings." };
     // The contracts README promises it: no launch through the app while a hook is set on the launchpad.
-    if (hookSet) return "Launches are paused while a hook is set.";
+    if (hookSet) return { text: "Launches are paused while a hook is set." };
     if (settings.launchesToday !== undefined && settings.dailyLimit !== undefined && settings.launchesToday >= settings.dailyLimit) {
-      return "You have used today's launches.";
+      return { text: "You have used today's launches." };
     }
-    if (!image || name === "" || symbol === "") return "Add an image, a name and a symbol.";
-    if (!checked.ok) {
-      return checked.field === "name" || checked.field === "symbol"
-        ? `The name fits ${NAME_MAX_BYTES} bytes and the symbol ${SYMBOL_MAX_BYTES}.`
-        : "Check the description and the links.";
-    }
-    if (!bounds) return "Reading this currency's limits.";
-    if (closedCurrency) return "This currency is not open for launches.";
-    if (!inRange) return `Pick a valuation between ${money(bounds.min)} and ${money(bounds.max)}.`;
-    if (balance !== undefined && total > balance) return "The first buy is more than your balance.";
-    if (firstBuyRaw > 0n && capBps !== undefined && estimate > capTokens(capBps)) return "The first buy is above the cap.";
-    if (payoutOpen && payout !== "" && !isAddress(payout)) return "Enter a valid payout address.";
-    if (chainId !== undefined && chainId !== robinhoodChain.id) return "Switch your wallet to Robinhood Chain.";
-    if (!walletClient || !publicClient) return "Connecting to your wallet.";
+    if (!image || nameOnChain === "" || symbolOnChain === "") return { text: "Add an image, a name and a symbol." };
+    // The field says what to change under itself; this points at the first one in form order.
+    if (!checked.ok) return { text: `Check the ${FIELD_LABELS[checked.field]}.` };
+    if (!bounds) return { text: "Reading this currency's limits." };
+    if (closedCurrency) return { text: "This currency is not open for launches." };
+    if (!inRange) return { text: `Pick a valuation between ${money(bounds.min)} and ${money(bounds.max)}.` };
+    if (balance !== undefined && total > balance) return { text: "The first buy is more than your balance." };
+    if (firstBuyRaw > 0n && capBps !== undefined && estimate > capTokens(capBps)) return { text: "The first buy is above the cap." };
+    if (payoutProblem !== null) return { text: "Check the payout address." };
+    if (wrongNetwork) return { text: "Switch your wallet to Robinhood Chain.", answered: true };
+    if (!walletClient || !publicClient) return { text: "Connecting to your wallet." };
     // The opening read lags the valuation by a 300 ms debounce; a click in that window would use the old snapped value.
-    if (!snapped || opening.pending) return "Working out the opening price.";
+    if (!snapped || opening.pending) return { text: "Working out the opening price." };
     return null;
   }
-  const reason = reasonText();
+  const blocker = blockerOf();
+  const reason = blocker?.text ?? null;
 
   const onImage = (file: File | null) => {
     setImageNote(null);
@@ -213,11 +310,11 @@ export default function LaunchForm() {
   };
 
   /**
-   * Step 2: the answer is kept for this image and these fields, refreshed after 12 hours (spec 7.2). `now` comes from the
-   * click (or the resume effect), never read here: the component body stays free of clock reads.
+   * Step 2: the answer is kept for this image, these fields and this wallet, refreshed after 12 hours (spec 7.2). `now`
+   * comes from the click (or the resume effect), never read here: the component body stays free of clock reads.
    */
-  async function uploadOnce(fields: LaunchFields, file: File, now: number): Promise<UploadAnswer> {
-    const key = uploadKey(fields, file);
+  async function uploadOnce(fields: LaunchFields, file: File, wallet: Address, now: number): Promise<UploadAnswer> {
+    const key = uploadKey(fields, file, wallet);
     const cached = uploadCache.current;
     if (cached && cached.key === key && now - cached.at < UPLOAD_REUSE_MS) return cached.answer;
     const answer = await uploadLaunchAssets(fields, file);
@@ -226,9 +323,14 @@ export default function LaunchForm() {
   }
 
   const submit = async (now: number) => {
-    // A launch in flight, a confirmed one, or one already waiting for its signature: nothing more to queue.
-    if (inFlight.current || done || resumeAfterSignIn.current) return;
-    if (reason !== null || !address || !walletClient || !publicClient || !quote || !image || !snapped || requested === null || !payoutAddress) {
+    // A launch in flight, a confirmed or locked one, or one already waiting for its signature: nothing more to queue.
+    if (inFlight.current || done || held !== null || resumeAfterSignIn.current) return;
+    // The predicted token is taken here, from the settled preview: the wallet code checks it for code before sending.
+    const token = opening.token;
+    if (
+      reason !== null || !checked.ok || !address || !walletClient || !publicClient || !quote || !image || !snapped ||
+      requested === null || !payoutAddress || !token
+    ) {
       // A resumed submit that can no longer go ahead leaves no step spinning.
       setPlan([]);
       setCurrent(null);
@@ -266,30 +368,46 @@ export default function LaunchForm() {
     setPending(true);
     setPlan((p) => (p[0] === "sign-in" ? ["sign-in", ...walletSteps] : walletSteps));
     let toastId: number | null = null;
+    let hash: Hex | undefined;
+    // The fields as the route stores them: the name and symbol trimmed, as the preview predicted them, and links normalised.
+    const fields = checked.fields;
     try {
       setCurrent("upload");
-      const answer = await uploadOnce(rawFields, image, now);
+      const answer = await uploadOnce(fields, image, address, now);
       const handle = await executeLaunch(
         {
-          name, symbol, metadataUri: answer.metadataUri, quote, valuation: requested, firstBuy: firstBuyRaw,
-          minFirstBuyTokens: firstBuyRaw > 0n ? minFirstBuyTokens(estimate) : 0n, payout: payoutAddress, salt, creationFee,
+          name: fields.name, symbol: fields.symbol, metadataUri: answer.metadataUri, quote, valuation: requested, firstBuy: firstBuyRaw,
+          minFirstBuyTokens: firstBuyRaw > 0n ? minFirstBuyTokens(estimate) : 0n, payout: payoutAddress, salt, creationFee, token,
         },
         { wallet: walletClient, publicClient, account: address },
         onStep,
       );
-      toastId = addToast({ kind: "pending", message: `Launching ${symbol}`, hash: handle.hash });
-      const { token } = await handle.confirmation;
-      updateToast(toastId, { kind: "confirmed", message: `Launched ${symbol}` });
+      hash = handle.hash;
+      toastId = addToast({ kind: "pending", message: `Launching ${fields.symbol}`, hash: handle.hash });
+      const confirmed = await handle.confirmation;
+      updateToast(toastId, { kind: "confirmed", message: `Launched ${fields.symbol}` });
       setDone(true);
-      router.push(`/t/${token}?launched=${handle.hash}`);
+      router.push(`/t/${confirmed.token}?launched=${handle.hash}`);
     } catch (err) {
-      const known = err instanceof UploadError || err instanceof LaunchFailedError || err instanceof LaunchRejectedError || err instanceof LaunchUnconfirmedError;
+      const known =
+        err instanceof UploadError || err instanceof LaunchFailedError || err instanceof LaunchRejectedError ||
+        err instanceof LaunchUnconfirmedError || err instanceof LaunchExistsError;
       const message = known ? (err as Error).message : LAUNCH_MESSAGES.launchFallback;
+      // The cookie is gone while memory still says signed (UX review B2): forget the session, so the next press of Launch
+      // takes the sign-in step and resumes by itself, instead of uploading into the same 401 again. Only this wallet's
+      // session: another wallet may have signed in meanwhile (fix round 1, ruling 7).
+      if (err instanceof UploadError && err.code === "not-signed-in") dropSession(address);
       // Someone initialised this token's pool key first (spec 4.10): a new salt is a new address and a new key.
       if (err instanceof LaunchFailedError && err.revert === "PoolAlreadyInitialized") setSalt(randomSalt());
       // The owner changed this currency's creation fee under the open form: re-read it before the creator reviews.
       if (err instanceof LaunchFailedError && err.revert === "PermitMismatch") bounds?.refetch();
-      setError(message);
+      // It may have landed, or it did: the form stays locked and links the transaction and the token page (UX review B3),
+      // and this tab remembers it, so a reload shows the same card (fix round 1, ruling 6).
+      if (err instanceof LaunchUnconfirmedError) {
+        setLock({ why: "unsettled", token, hash });
+        rememberUnsettled({ wallet: address, token, hash, at: now });
+      } else if (err instanceof LaunchExistsError) setLock({ why: "live", token: err.token });
+      else setError(message);
       if (toastId !== null) updateToast(toastId, { kind: err instanceof LaunchUnconfirmedError ? "unconfirmed" : "failed", message });
     } finally {
       inFlight.current = false;
@@ -311,12 +429,102 @@ export default function LaunchForm() {
   }, [signed]);
 
   const busy = pending || done;
-  const nameBytes = utf8Bytes(name);
-  const symbolBytes = utf8Bytes(symbol);
+  // Counted as they go on chain: trimmed.
+  const nameBytes = utf8Bytes(nameOnChain);
+  const symbolBytes = utf8Bytes(symbolOnChain);
+  const descriptionChars = [...description].length;
   const shareBps = settings.creatorShareBps;
+  /** A field's accessible wiring to its own message: invalid while the message shows, described by it. */
+  const described = (field: LaunchFieldName) => {
+    const note = noteFor(field);
+    return { "aria-invalid": note !== null, "aria-describedby": note !== null ? `launch-${field}-note` : undefined };
+  };
   const onAmount = (setter: (v: string) => void) => (raw: string) => {
     if (AMOUNT_RE.test(raw)) setter(raw);
   };
+
+  // UX review 8: with no wallet the button opens the connect modal; on another network it asks the wallet to switch.
+  const onSwitch = () => {
+    const from = chainId;
+    setSwitchNote(null);
+    switchChain(
+      { chainId: robinhoodChain.id },
+      {
+        onError: () => {
+          if (from !== undefined) setSwitchNote({ from, text: "The wallet did not switch. Pick Robinhood Chain in your wallet." });
+        },
+      },
+    );
+  };
+  /**
+   * The locked card's way out (fix round 1, ruling 6): forgets the remembered launch and draws a new salt, so the next
+   * launch predicts, and deploys to, a new address. The other way out is the token turning up.
+   */
+  const startOver = () => {
+    forgetUnsettled();
+    setLock(null);
+    setError(null);
+    setSalt(randomSalt());
+  };
+  // While busy or locked a press still goes to submit, whose guard ignores it (the button is only aria-disabled then).
+  // The action comes from state flags, never from the wording of a reason (fix round 1, ruling 13).
+  let button: ButtonState;
+  if (busy) {
+    const label = done ? "Launched" : current ? STEP_LABELS[current] : "Launch";
+    button = { label, className: PENDING, spinner: true, ariaDisabled: true, disabled: false, action: "launch" };
+  } else if (held) {
+    const label = held.why === "live" ? "Already live" : found ? "Launched" : "Sent";
+    button = { label, className: DISABLED, spinner: false, ariaDisabled: true, disabled: false, action: "launch" };
+  } else if (disconnected) {
+    button = { label: "Connect wallet", className: PRIMARY, spinner: false, ariaDisabled: false, disabled: false, action: "connect" };
+  } else if (wrongNetwork) {
+    button = switching
+      ? { label: "Confirm in wallet", className: PENDING, spinner: true, ariaDisabled: true, disabled: false, action: "none" }
+      : { label: "Switch to Robinhood Chain", className: PRIMARY, spinner: false, ariaDisabled: false, disabled: false, action: "switch" };
+  } else {
+    const blocked = reason !== null;
+    button = { label: "Launch", className: blocked ? DISABLED : PRIMARY, spinner: false, ariaDisabled: blocked, disabled: blocked, action: "launch" };
+  }
+  // The button itself answers "connect" and "switch"; any other reason shows under it.
+  const statusLine = busy || held || blocker?.answered ? "" : (reason ?? "");
+  // The locked card's line: what is known about the launch.
+  let heldText = "";
+  if (held?.why === "live") heldText = LAUNCH_MESSAGES.alreadyLive;
+  else if (held && found) heldText = WENT_THROUGH;
+  else if (held) heldText = held.hash ? LAUNCH_MESSAGES.unconfirmed : LAUNCH_MESSAGES.maybeSent;
+  const heldHash = held?.why === "unsettled" ? held.hash : undefined;
+
+  // The preview and the reason it is blank (UX review 18) share one slot of one height (see the markup), so nothing below
+  // the valuation moves while the price is read (fix round 1, ruling 3).
+  const previewText = snapped ? `Opens at ${money(snapped)} · ${perToken(snapped)} per token` : "";
+  let hintText = "";
+  if (!snapped && inRange) {
+    if (nameOnChain === "" || symbolOnChain === "") hintText = "Enter a name and symbol to see the opening price.";
+    else if (!address) hintText = "Connect a wallet to see the opening price.";
+    else if (opening.pending) hintText = "Working out the opening price…";
+  }
+  // UX review 5: the contract opens at or below the pick, within one 1.0001^200 step of it (about 2 %).
+  const roundedDown = snapped !== undefined && requested !== null && !opening.pending && snapped !== requested;
+
+  // UX review 4: the cap is on tokens received; the cost is the gross first buy that reaches it at this opening.
+  let capLine: string | null = null;
+  if (capBps === 0) capLine = "First buys are closed for now.";
+  else if (capBps !== undefined && capBps < 10_000) {
+    const cost = capGross !== null && snapped ? `, about ${money(capGross)} at this valuation` : "";
+    capLine = `Up to ${pct(capBps / 100)} of the supply${cost}.`;
+  }
+
+  // UX review 2, worded in fix round 1 (ruling 2) to claim no more than the contract does: the pool takes 1 % of every
+  // trade, but other people can add liquidity to the same pool, and the launch's locked liquidity earns only its share of
+  // that fee, so the payout's cut is "up to" the share of 1 %. Both numbers come from the live share and the pool fee.
+  const feeLine =
+    shareBps !== undefined
+      ? `Your payout address gets ${pct(shareBps / 100)} of the pool fee that the launch's locked liquidity earns, up to ${pct((shareBps * POOL_FEE_PCT) / 10_000)} of every trade. It is paid in ${symbolOnChain || "your token"} and ${asset?.symbol ?? "the currency"} when anyone presses Collect on the token's page.`
+      : null;
+
+  // UX review 3: where the fees go, always echoed back; the payout can only be changed later by the payout address itself.
+  const payoutIsWallet = payoutAddress !== undefined && address !== undefined && payoutAddress.toLowerCase() === address.toLowerCase();
+  const payoutText = payoutAddress ? `${short(payoutAddress)}${payoutIsWallet ? " (this wallet)" : ""}` : "Your wallet";
 
   return (
     <div className="mt-5 flex flex-col gap-6 twocol:flex-row twocol:items-start twocol:gap-8">
@@ -340,42 +548,61 @@ export default function LaunchForm() {
 
         <label className={`${LABEL} mt-5`} htmlFor="launch-name">
           <span>Name</span>
-          <span className="normal-case tracking-[0.04em]">{nameBytes}/{NAME_MAX_BYTES} bytes</span>
+          <span className={counterClass(nameBytes > NAME_MAX_BYTES)}>{nameBytes}/{NAME_MAX_BYTES} bytes</span>
         </label>
-        <input id="launch-name" aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className={INPUT} autoComplete="off" />
+        <input id="launch-name" aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} {...described("name")} className={INPUT} autoComplete="off" />
+        <FieldNote id="launch-name-note" text={noteFor("name")} />
 
         <label className={`${LABEL} mt-4`} htmlFor="launch-symbol">
           <span>Symbol</span>
-          <span className="normal-case tracking-[0.04em]">{symbolBytes}/{SYMBOL_MAX_BYTES} bytes</span>
+          <span className={counterClass(symbolBytes > SYMBOL_MAX_BYTES)}>{symbolBytes}/{SYMBOL_MAX_BYTES} bytes</span>
         </label>
-        <input id="launch-symbol" aria-label="Symbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} className={INPUT} autoComplete="off" />
+        <input id="launch-symbol" aria-label="Symbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} {...described("symbol")} className={INPUT} autoComplete="off" />
+        <FieldNote id="launch-symbol-note" text={noteFor("symbol")} />
 
         <label className={`${LABEL} mt-4`} htmlFor="launch-description">
           <span>Description</span>
-          <span className="normal-case tracking-[0.04em]">{[...description].length}/{DESCRIPTION_MAX_CHARS}</span>
+          <span className={counterClass(descriptionChars > DESCRIPTION_MAX_CHARS)}>{descriptionChars}/{DESCRIPTION_MAX_CHARS}</span>
         </label>
         <textarea
           id="launch-description"
           aria-label="Description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
+          {...described("description")}
           rows={3}
           className="mt-2 w-full border border-hairline-strong bg-transparent px-3 py-2 text-[13px] outline-none focus:border-hairline-focus"
         />
+        <FieldNote id="launch-description-note" text={noteFor("description")} />
 
         {(
           [
-            ["Website", website, setWebsite, "https://"],
-            ["X", x, setX, "handle or x.com link"],
-            ["Telegram", telegram, setTelegram, "name or t.me link"],
+            ["website", "Website", website, setWebsite, "https://"],
+            ["x", "X", x, setX, "handle or x.com link"],
+            ["telegram", "Telegram", telegram, setTelegram, "name or t.me link"],
           ] as const
-        ).map(([label, value, setter, hint]) => (
+        ).map(([field, label, value, setter, hint]) => (
           <div key={label}>
             <label className={`${LABEL} mt-4`} htmlFor={`launch-${label}`}>
               <span>{label}</span>
               <span className="normal-case tracking-[0.04em]">optional</span>
             </label>
-            <input id={`launch-${label}`} aria-label={label} value={value} placeholder={hint} onChange={(e) => setter(e.target.value)} className={INPUT} autoComplete="off" />
+            {/* A phone must not capitalise, correct or spell-check a link (fix round 1, ruling 4). */}
+            <input
+              id={`launch-${label}`}
+              aria-label={label}
+              value={value}
+              placeholder={hint}
+              onChange={(e) => setter(e.target.value)}
+              {...described(field)}
+              className={INPUT}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              inputMode={field === "website" ? "url" : undefined}
+            />
+            <FieldNote id={`launch-${field}-note`} text={noteFor(field)} />
           </div>
         ))}
 
@@ -437,8 +664,23 @@ export default function LaunchForm() {
             <span className="pr-3 font-mono text-[11px] text-ink-45">{usd !== null ? "USD" : asset?.symbol}</span>
           </div>
         ) : null}
-        <div className="mt-2 font-mono text-[11px] text-ink-60" aria-live="polite">
-          {snapped ? `Opens at ${money(snapped)} · ${perToken(snapped)} per token` : opening.pending && inRange ? "Working out the opening price…" : ""}
+        {/*
+          The preview keeps one height in every state (no name yet, reading, read, rounded down or not), so First buy, Max and
+          the payout link never move under a tap while the price is read (fix round 1, ruling 3). Two layers share one grid
+          cell: the preview (one line, then the rounding note) is always laid out and only hidden, and the hint sits over it.
+        */}
+        <div className="mt-2 grid font-mono" aria-live="polite">
+          <div className={`col-start-1 row-start-1${snapped ? "" : " invisible"}`} aria-hidden={!snapped}>
+            <div className={`truncate text-[11px] leading-[1.5] ${opening.pending ? "text-ink-40" : "text-ink-60"}`} title={previewText || undefined}>
+              {previewText || "\u{A0}"}
+            </div>
+            <div className={`mt-1 text-[10.5px] leading-[1.5] text-ink-45${roundedDown ? "" : " invisible"}`} aria-hidden={!roundedDown}>
+              {ROUNDED_NOTE}
+            </div>
+          </div>
+          <div className={`col-start-1 row-start-1 text-[11px] leading-[1.5] text-ink-60${snapped ? " invisible" : ""}`} aria-hidden={Boolean(snapped)}>
+            {hintText}
+          </div>
         </div>
 
         <label className={`${LABEL} mt-5`} htmlFor="launch-first-buy">
@@ -466,18 +708,47 @@ export default function LaunchForm() {
           </button>
           <span className="pr-3 font-mono text-[11px] text-ink-45">{asset?.symbol}</span>
         </div>
-        {firstBuyRaw > 0n && snapped ? (
-          <div className="mt-2 font-mono text-[11px] text-ink-60">
-            About {fmtAmt(rawToNumber(estimate, 18), 0)} tokens, {shareOfSupplyPct(estimate).toFixed(2)} % of supply
+        {/*
+          Fix round 1, ruling 3: the cap line holds two lines, the most its sentence takes at 320 px, while its cost is read
+          again; the estimate stays in place, hidden, while the price is read. Nothing below them moves under a tap.
+        */}
+        <div className="mt-2 min-h-[3em] font-mono text-[10.5px] leading-[1.5] text-ink-45">{capLine ?? ""}</div>
+        {firstBuyRaw > 0n ? (
+          <div className={`mt-1 min-h-[1.5em] font-mono text-[10.5px] leading-[1.5] text-ink-60${snapped ? "" : " invisible"}`} aria-hidden={!snapped}>
+            {snapped ? `About ${fmtAmt(rawToNumber(estimate, 18), 0)} tokens, ${shareOfSupplyPct(estimate).toFixed(2)}${PCT} of supply` : "\u{A0}"}
           </div>
         ) : null}
 
-        <button type="button" onClick={() => setPayoutOpen((o) => !o)} aria-expanded={payoutOpen} className={`${LABEL} mt-5 w-full bg-transparent p-0`}>
+        <div className={`${LABEL} mt-5`}>
           <span>Fee payout</span>
-          <span className="normal-case tracking-[0.04em]">{payoutOpen ? "Another address" : "Your wallet"}</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setPayoutOpen((o) => !o)}
+            aria-expanded={payoutOpen}
+            aria-controls={payoutOpen ? "launch-payout" : undefined}
+            className={TEXT_LINK}
+          >
+            {payoutOpen ? "Use this wallet" : "Pay another address"}
+          </button>
+        </div>
         {payoutOpen ? (
-          <input aria-label="Payout address" placeholder="0x…" value={payout} onChange={(e) => setPayout(e.target.value.trim())} className={INPUT} autoComplete="off" spellCheck={false} />
+          <>
+            <input
+              id="launch-payout"
+              aria-label="Payout address"
+              placeholder="Leave empty to use this wallet"
+              value={payout}
+              onChange={(e) => setPayout(e.target.value.trim())}
+              aria-invalid={payoutProblem !== null}
+              aria-describedby={payoutProblem !== null ? "launch-payout-note" : undefined}
+              className={INPUT}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <FieldNote id="launch-payout-note" text={payoutProblem} />
+          </>
         ) : null}
       </div>
 
@@ -488,17 +759,19 @@ export default function LaunchForm() {
           <Row label="First buy">{firstBuyRaw > 0n ? units(firstBuyRaw) : "None"}</Row>
           {firstBuyRaw > 0n && routerFeeBps !== undefined ? (
             <div className="pb-1 text-right text-[10.5px] text-ink-45">
-              of which router fee {units(routerFeeOf(firstBuyRaw, routerFeeBps))} at {(routerFeeBps / 100).toFixed(2)} %
+              of which router fee {units(routerFeeOf(firstBuyRaw, routerFeeBps))} at {(routerFeeBps / 100).toFixed(2)}
+              {PCT}
             </div>
           ) : null}
           <Row label="Creation fee">{creationFee === 0n ? "Free" : units(creationFee)}</Row>
           <Row label="You pay">{total === 0n ? "Gas only" : units(total)}</Row>
+          <Row label="Fee payout">{payoutProblem !== null ? <span className="text-down">Not a valid address</span> : payoutText}</Row>
           <div className="mt-3 border-t border-hairline-soft pt-3 text-[11px] leading-[1.5] text-ink-60">
-            {shareBps !== undefined ? <div>{`${shareBps / 100} % of trading fees to your payout address`}</div> : null}
+            {feeLine ? <div>{feeLine}</div> : null}
             {settings.dailyLimit !== undefined && settings.launchesToday !== undefined ? (
               <div className="mt-1">{`${Math.max(0, settings.dailyLimit - settings.launchesToday)} of ${settings.dailyLimit} left today. The count resets at 00:00 UTC.`}</div>
             ) : null}
-            <div className="mt-1">{RULE_OF_THUMB}</div>
+            <div className="mt-1">{RULE_OF_THUMB_SHOWN}</div>
           </div>
 
           {/*
@@ -507,20 +780,50 @@ export default function LaunchForm() {
           */}
           <button
             type="button"
-            disabled={reason !== null && !busy}
-            aria-disabled={busy || reason !== null}
-            onClick={() => void submit(Date.now())}
-            className={busy ? PENDING : reason === null ? PRIMARY : DISABLED}
+            disabled={button.disabled}
+            aria-disabled={button.ariaDisabled}
+            onClick={() => {
+              if (button.action === "connect") openConnectModal?.();
+              else if (button.action === "switch") onSwitch();
+              else if (button.action === "launch") void submit(Date.now());
+            }}
+            className={button.className}
           >
-            {busy ? <Spinner dark /> : null}
-            {done ? "Launched" : pending && current ? STEP_LABELS[current] : "Launch"}
+            {button.spinner ? <Spinner dark /> : null}
+            {button.label}
           </button>
           <div role="status" aria-live="polite" className="mt-2 text-center text-[10.5px] text-ink-50 empty:hidden">
-            {reason !== null && !busy ? reason : ""}
+            {statusLine}
           </div>
-          {error ? (
+          {held ? (
+            <>
+              <div role="alert" className="mt-2 text-center text-[10.5px] leading-[1.5] text-ink-70">
+                {heldText}
+              </div>
+              <div className="mt-1 flex flex-wrap justify-center gap-x-5">
+                {heldHash ? (
+                  <a href={txUrl(heldHash)} target="_blank" rel="noreferrer" className={LINK}>
+                    View the transaction ↗
+                  </a>
+                ) : null}
+                <Link href={`/t/${held.token.toLowerCase()}${heldHash ? `?launched=${heldHash}` : ""}`} className={LINK}>
+                  Open the token page
+                </Link>
+              </div>
+              <div className="mt-1 text-center">
+                <button type="button" onClick={startOver} className={TEXT_LINK}>
+                  Start a new launch
+                </button>
+              </div>
+            </>
+          ) : error ? (
             <div role="alert" className="mt-2 text-center text-[10.5px] text-down">
               {error}
+            </div>
+          ) : null}
+          {wrongNetwork && switchNote !== null && switchNote.from === chainId ? (
+            <div role="alert" className="mt-2 text-center text-[10.5px] text-down">
+              {switchNote.text}
             </div>
           ) : null}
           <div role="status" aria-live="polite" aria-label="Launch steps">

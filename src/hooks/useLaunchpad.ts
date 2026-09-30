@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { Hex } from "viem";
-import { useReadContract, useReadContracts } from "wagmi";
+import { useBytecode, useReadContract, useReadContracts } from "wagmi";
 import { robinhoodChain } from "@/lib/chain";
 import { svLaunchpadAbi } from "@/lib/launch/abi";
 import { LAUNCHPAD_ADDRESS } from "@/lib/launch/address";
@@ -112,6 +112,19 @@ export function useOpening(input: OpeningInput): Opening {
     snapped: opening.data?.[2],
     pending: key !== settled || predicted.isFetching || opening.isFetching,
   };
+}
+
+/**
+ * Whether the token's code is on chain, re-read every 5 s while `watch` is on. The form watches the predicted address while
+ * a launch's outcome is unknown: the token turning up is, with "Start a new launch", the only way out (fix round 1, ruling 6).
+ */
+export function useTokenDeployed(token: Address | undefined, watch: boolean): boolean {
+  const { data } = useBytecode({
+    address: token,
+    chainId: robinhoodChain.id,
+    query: { enabled: watch && token !== undefined, refetchInterval: 5_000 },
+  });
+  return data !== undefined && data !== null && data !== "0x";
 }
 
 export function useTokenBalanceOf(token?: Address, account?: Address): bigint | undefined {

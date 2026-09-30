@@ -8,8 +8,8 @@ import { PERMIT2_ADDRESS, robinhoodChain } from "@/lib/chain";
 import type { Address } from "@/lib/types";
 import { svLaunchpadAbi } from "./launch/abi";
 import {
-  LAUNCH_MESSAGES, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, changePayout, claimOwed, collectLaunchFees,
-  executeLaunch, messageForRevert, type LaunchDeps, type LaunchInput, type LaunchStep,
+  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, changePayout, claimOwed,
+  collectLaunchFees, executeLaunch, messageForRevert, type LaunchDeps, type LaunchInput, type LaunchStep,
 } from "./launch";
 
 const h = vi.hoisted(() => ({ launchpad: "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" as string | undefined }));
@@ -34,8 +34,10 @@ const NOW_SEC = 1_790_000_000;
 
 const INPUT: LaunchInput = {
   name: "Tailor's Chalk", symbol: "CHALK", metadataUri: "ipfs://bafymeta", quote: QUOTE, valuation: 5_000_000_000n, firstBuy: 0n,
-  minFirstBuyTokens: 0n, payout: ACCOUNT, salt: SALT, creationFee: 0n,
+  minFirstBuyTokens: 0n, payout: ACCOUNT, salt: SALT, creationFee: 0n, token: TOKEN,
 };
+/** Runtime code at the predicted address: an earlier press of Launch landed there. */
+const DEPLOYED: Hex = "0x6080604052";
 
 /** One Launched log, built with viem so the encoding is the real one; `address` defaults to the launchpad. */
 function launchedLog(creator: Address = ACCOUNT, address: Address = LAUNCHPAD): Log {
@@ -58,7 +60,9 @@ function reverted(errorName: string, args?: readonly unknown[]): Error {
   });
 }
 
-function harness(o: { allowance?: bigint; logs?: Log[]; status?: "success" | "reverted"; chainId?: number } = {}) {
+function harness(o: { allowance?: bigint; logs?: Log[]; status?: "success" | "reverted"; chainId?: number; code?: Hex } = {}) {
+  // viem answers undefined for an address with no code.
+  const getCode = vi.fn().mockResolvedValue(o.code);
   const readContract = vi.fn().mockResolvedValue(o.allowance ?? 0n);
   const simulateContract = vi.fn().mockResolvedValue({ request: {} });
   const writeContract = vi.fn(async ({ functionName }: { functionName: string; args: readonly unknown[] }) => (functionName === "approve" ? APPROVE_HASH : TX_HASH));
@@ -71,10 +75,10 @@ function harness(o: { allowance?: bigint; logs?: Log[]; status?: "success" | "re
   const getChainId = vi.fn().mockResolvedValue(o.chainId ?? robinhoodChain.id);
   const deps: LaunchDeps = {
     wallet: { writeContract, signTypedData, getChainId } as unknown as WalletClient,
-    publicClient: { readContract, simulateContract, waitForTransactionReceipt, getTransaction, call } as unknown as PublicClient,
+    publicClient: { getCode, readContract, simulateContract, waitForTransactionReceipt, getTransaction, call } as unknown as PublicClient,
     account: ACCOUNT,
   };
-  return { deps, readContract, simulateContract, writeContract, signTypedData, waitForTransactionReceipt, getTransaction, call };
+  return { deps, getCode, readContract, simulateContract, writeContract, signTypedData, waitForTransactionReceipt, getTransaction, call };
 }
 
 beforeEach(() => {
@@ -206,10 +210,80 @@ describe("executeLaunch (spec 7.2, submit steps 3 to 6)", () => {
     await expect(handle.confirmation).rejects.toBeInstanceOf(LaunchUnconfirmedError);
   });
 
-  it("ignores a Launched emitted by another contract, and fails when none is ours", async () => {
+  // UX review, should fix 14: the transaction was mined and succeeded, so the money moved; "failed, nothing was spent"
+  // would be wrong. Without our own Launched log the token cannot be read, which is exactly "could not confirm".
+  it("ignores a Launched emitted by another contract, and calls a successful receipt without ours unconfirmed, never failed", async () => {
     const t = harness({ logs: [launchedLog(ACCOUNT, DECOY)] });
     const handle = await executeLaunch(INPUT, t.deps);
-    await expect(handle.confirmation).rejects.toThrow(LAUNCH_MESSAGES.launchFallback);
+    const err = await handle.confirmation.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchUnconfirmedError);
+    expect((err as Error).message).toBe(LAUNCH_MESSAGES.unconfirmed);
+
+    const empty = harness({ logs: [] });
+    await expect((await executeLaunch(INPUT, empty.deps)).confirmation).rejects.toBeInstanceOf(LaunchUnconfirmedError);
+    const theirs = harness({ logs: [launchedLog(OTHER)] }); // another creator's launch in the same transaction's logs
+    await expect((await executeLaunch(INPUT, theirs.deps)).confirmation).rejects.toBeInstanceOf(LaunchUnconfirmedError);
+  });
+
+  // UX review, blocker B3: a retry after "could not confirm" would deploy to an address that is already taken.
+  it("reads the code at the predicted token address before anything is sent, and sends nothing when a token is there", async () => {
+    const t = harness({ allowance: 10n, code: DEPLOYED }); // a short allowance, so a send would begin with the approval
+    const steps: LaunchStep[] = [];
+    const err = await executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps, (s) => steps.push(s)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchExistsError);
+    expect((err as LaunchExistsError).token).toBe(TOKEN);
+    expect((err as Error).message).toBe(LAUNCH_MESSAGES.alreadyLive);
+    expect(t.getCode).toHaveBeenCalledWith({ address: TOKEN });
+    expect(t.readContract).not.toHaveBeenCalled();
+    expect(t.signTypedData).not.toHaveBeenCalled();
+    expect(t.simulateContract).not.toHaveBeenCalled();
+    expect(t.writeContract).not.toHaveBeenCalled();
+    expect(steps).toEqual([]);
+  });
+
+  // Fix round 1, ruling 5: when the check cannot be made, nothing has been read, signed or sent yet.
+  it("says nothing was sent, and mentions no gas, when the check for the token's code cannot be made", async () => {
+    const t = harness({ allowance: 10n });
+    t.getCode.mockRejectedValueOnce(new Error("fetch failed"));
+    const err = await executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchFailedError);
+    expect((err as Error).message).toBe("Could not check the network. Nothing was sent. Try again.");
+    expect((err as Error).message).not.toMatch(/gas/);
+    expect(t.readContract).not.toHaveBeenCalled();
+    expect(t.signTypedData).not.toHaveBeenCalled();
+    expect(t.simulateContract).not.toHaveBeenCalled();
+    expect(t.writeContract).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1, ruling 1: once the simulation passed and the wallet was asked to send, the launch may be on its way; only
+  // the creator's own rejection means it is not. A WalletConnect request that expired after approval, or an injected
+  // wallet's "Internal JSON-RPC error" after it broadcast, look exactly like this.
+  it("calls a wallet error after the send was requested an unknown outcome, never a failure and never 'nothing was spent'", async () => {
+    const t = harness();
+    t.writeContract.mockRejectedValueOnce(new Error("Internal JSON-RPC error."));
+    const err = await executeLaunch(INPUT, t.deps).catch((e: unknown) => e);
+    expect(t.simulateContract).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(LaunchUnconfirmedError);
+    expect((err as Error).message).toBe(LAUNCH_MESSAGES.maybeSent);
+    expect(LAUNCH_MESSAGES.maybeSent).toBe(
+      "Your wallet reported an error after the launch was requested. It may have been sent. Check your wallet's activity before trying again.",
+    );
+  });
+
+  it("keeps a rejection of the send itself as cancelled, the one way the form opens again once the wallet was asked", async () => {
+    const t = harness();
+    t.writeContract.mockRejectedValueOnce(new UserRejectedRequestError(new Error("User rejected the request.")));
+    await expect(executeLaunch(INPUT, t.deps)).rejects.toThrow(new LaunchRejectedError(LAUNCH_MESSAGES.rejected));
+  });
+
+  it("goes ahead when the predicted address holds no code, checking it before the approval", async () => {
+    for (const code of [undefined, "0x"] as const) {
+      const t = harness({ allowance: 10n, code });
+      await executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps);
+      expect(t.getCode).toHaveBeenCalledWith({ address: TOKEN });
+      expect(t.writeContract).toHaveBeenCalledTimes(2); // the approval, then the launch
+      expect(t.getCode.mock.invocationCallOrder[0]!).toBeLessThan(t.writeContract.mock.invocationCallOrder[0]!);
+    }
   });
 
   it("names the wrong network before any approval, signature or simulation", async () => {

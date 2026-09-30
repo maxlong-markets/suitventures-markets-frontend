@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { robinhoodChain } from "@/lib/chain";
-import { LAUNCH_MESSAGES, LaunchFailedError, messageForRevert } from "@/lib/launch";
-import { estimateFirstBuyTokens, minFirstBuyTokens } from "@/lib/launch/math";
+import { robinhoodChain, txUrl } from "@/lib/chain";
+import {
+  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, messageForRevert,
+} from "@/lib/launch";
+import { fmtInt } from "@/lib/format";
+import { UNSETTLED_KEY, UPLOAD_MESSAGES, UploadError, parseUnsettled, rememberUnsettled } from "@/lib/launch/client";
+import { estimateFirstBuyTokens, firstBuyCapGross, minFirstBuyTokens, rawToNumber } from "@/lib/launch/math";
 import type { Address, QuoteAsset } from "@/lib/types";
 import { act, fireEvent, render, screen, waitFor, within } from "@/test/dom";
 import LaunchForm from "./LaunchForm";
 
 const WALLET = "0x1111111111111111111111111111111111111111" as Address;
+const OTHER_WALLET = "0x2222222222222222222222222222222222222222" as Address;
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168" as Address;
 const AMC = "0x05a3d1cd21d0c88145e82600e62e7e496e0f222b" as Address;
 const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec" as Address;
@@ -27,12 +32,23 @@ const h = vi.hoisted(() => ({
     isConnected: true,
     signed: true,
     withSignIn: vi.fn(),
+    dropSession: vi.fn(),
     addToast: vi.fn(() => 1),
     updateToast: vi.fn(),
   },
   settings: {} as Record<string, unknown>,
   bounds: {} as Record<string, { min: bigint; max: bigint; creationFee: bigint }>,
-  opening: { token: "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a", openTick: -398_400, snapped: 4_995_430_000n as bigint | undefined, pending: false },
+  opening: {
+    token: "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a" as string | undefined,
+    openTick: -398_400 as number | undefined,
+    snapped: 4_995_430_000n as bigint | undefined,
+    pending: false,
+  },
+  /** What the form last asked the preview for: the account, salt, name and symbol predictToken sees. */
+  openingInput: null as null | { account?: string; salt: string; name: string; symbol: string },
+  /** The token-found watch: what the form asked, and what it answers. */
+  deployedArgs: null as null | { token?: string; watch: boolean },
+  deployed: false,
   balance: 1_000_000_000n as bigint | undefined,
   quotes: [] as unknown[],
   upload: vi.fn(),
@@ -41,6 +57,9 @@ const h = vi.hoisted(() => ({
   refetch: vi.fn(),
   chainId: 46630 as number | undefined,
   wallet: { id: "wallet" } as unknown,
+  openConnect: vi.fn(),
+  switchChain: vi.fn(),
+  switching: false,
 }));
 
 vi.mock("@/context/AppState", () => ({ useAppState: () => h.state }));
@@ -51,14 +70,23 @@ vi.mock("@/hooks/useLaunchpad", () => ({
     const b = quote ? h.bounds[quote.toLowerCase()] : undefined;
     return b ? { ...b, refetch: h.refetch } : undefined;
   },
-  useOpening: () => h.opening,
+  useOpening: (input: { account?: string; salt: string; name: string; symbol: string }) => {
+    h.openingInput = input;
+    return h.opening;
+  },
   useTokenBalanceOf: () => h.balance,
+  useTokenDeployed: (token: string | undefined, watch: boolean) => {
+    h.deployedArgs = { token, watch };
+    return h.deployed;
+  },
 }));
 vi.mock("wagmi", () => ({
   useAccount: () => ({ chainId: h.chainId }),
   usePublicClient: () => ({ id: "public" }),
   useWalletClient: () => ({ data: h.wallet }),
+  useSwitchChain: () => ({ mutate: h.switchChain, isPending: h.switching }),
 }));
+vi.mock("@rainbow-me/rainbowkit", () => ({ useConnectModal: () => ({ openConnectModal: h.openConnect }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: h.push }) }));
 vi.mock("@/lib/launch/client", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/launch/client")>()), uploadLaunchAssets: h.upload }));
 vi.mock("@/lib/launch", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/launch")>()), executeLaunch: h.execute }));
@@ -68,6 +96,7 @@ beforeEach(() => {
   h.state.isConnected = true;
   h.state.signed = true;
   h.state.withSignIn.mockReset();
+  h.state.dropSession.mockReset();
   h.state.addToast.mockClear();
   h.state.updateToast.mockClear();
   h.settings = {
@@ -82,6 +111,7 @@ beforeEach(() => {
     [AMC]: { min: 50n * 10n ** 18n, max: 100_000n * 10n ** 18n, creationFee: 0n },
   };
   h.opening = { token: TOKEN, openTick: -398_400, snapped: SNAPPED, pending: false };
+  h.openingInput = null;
   h.balance = 1_000_000_000n; // 1,000 USDG
   h.quotes = QUOTES;
   h.upload.mockReset().mockResolvedValue(ANSWER);
@@ -90,6 +120,13 @@ beforeEach(() => {
   h.refetch.mockReset();
   h.chainId = robinhoodChain.id;
   h.wallet = { id: "wallet" };
+  h.openConnect.mockReset();
+  h.switchChain.mockReset();
+  h.switching = false;
+  h.deployedArgs = null;
+  h.deployed = false;
+  // A launch remembered by one case must not lock the next one.
+  sessionStorage.clear();
 });
 
 function fill(o: { name?: string; symbol?: string } = {}) {
@@ -103,18 +140,31 @@ const press = async () => {
     fireEvent.click(launch());
   });
 };
+/** Seen, not only laid out: fix round 1 (ruling 3) keeps some lines in place with `invisible` so nothing below them moves. */
+const shown = (el: Element) => el.closest(".invisible") === null;
+const ROUNDED = "Rounded down to the pool's nearest price step, at most about 2 % below your pick.";
+const feeLine = (share: string, cut: string, token: string) =>
+  `Your payout address gets ${share} % of the pool fee that the launch's locked liquidity earns, up to ${cut} % of every trade. It is paid in ${token} and USDG when anyone presses Collect on the token's page.`;
 
 describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => {
-  it("asks for a wallet, then a Suit, then a launch left today, then the fields", () => {
+  // Was: a disabled Launch with "Connect a wallet to launch." under it. UX review 8 makes the button itself open the
+  // connect modal, so the line under it no longer repeats that.
+  it("offers the connect modal instead of a dead button, then asks for a Suit, a launch left today, then the fields", () => {
     h.state.isConnected = false;
     h.state.address = undefined;
     const { rerender } = render(<LaunchForm />);
-    expect(screen.getByText("Connect a wallet to launch.")).toBeTruthy();
-    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+    const connect = screen.getByRole("button", { name: "Connect wallet" });
+    expect((connect as HTMLButtonElement).disabled).toBe(false);
+    expect(connect.getAttribute("aria-disabled")).toBe("false");
+    expect(screen.queryByText("Connect a wallet to launch.")).toBeNull();
+    fireEvent.click(connect);
+    expect(h.openConnect).toHaveBeenCalledTimes(1);
+    expect(h.upload).not.toHaveBeenCalled();
     h.state.isConnected = true;
     h.state.address = WALLET;
     h.settings = { ...h.settings, allowed: false };
     rerender(<LaunchForm />);
+    expect(launch()).toBe(connect); // the same element, so keyboard focus stays on it
     expect(screen.getByText("Launching is open to Suits holders.")).toBeTruthy();
     h.settings = { ...h.settings, allowed: true, launchesToday: 5 };
     rerender(<LaunchForm />);
@@ -155,6 +205,8 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect((launch() as HTMLButtonElement).disabled).toBe(true);
   });
 
+  // The shared line "The name fits 32 bytes and the symbol 11." gave way to the name's own message under the field (UX
+  // review 6, next test); the button's reason now points at the field.
   it("counts the name in bytes: 8 rockets fit, 9 do not (Review Focus 1)", () => {
     render(<LaunchForm />);
     fill({ name: "🚀".repeat(8) });
@@ -162,7 +214,86 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect((launch() as HTMLButtonElement).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "🚀".repeat(9) } });
     expect(screen.getByText("36/32 bytes")).toBeTruthy();
-    expect(screen.getByText("The name fits 32 bytes and the symbol 11.")).toBeTruthy();
+    expect(screen.getByText("Check the name.")).toBeTruthy();
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // UX review, should fix 6. The message shows as soon as the value breaks a rule, not on leaving the field: a message that
+  // appeared on blur pushed the next field down between pointerdown and click, and swallowed the click (seen at 320 px).
+  it("shows the name's own message under it as soon as it is over, and turns the byte counter red while over", () => {
+    render(<LaunchForm />);
+    fill({ name: "🚀".repeat(9) });
+    expect(screen.getByText("36/32 bytes").className).toContain("text-down");
+    // Fix round 1, ruling 11: the byte costs name Chinese, Japanese and Korean characters too.
+    const message =
+      "Shorten the name to 32 bytes. A plain letter takes 1, an accented letter 2, a Chinese, Japanese or Korean character 3, an emoji 4.";
+    const input = screen.getByLabelText("Name");
+    const note = screen.getByText(message);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(note.id);
+    fireEvent.blur(input);
+    expect(screen.getByText(message)).toBe(note); // leaving the field changes nothing, so nothing below it moves
+    fireEvent.change(input, { target: { value: "🚀".repeat(8) } });
+    expect(screen.queryByText(message)).toBeNull(); // gone the moment it fits
+    expect(screen.getByText("32/32 bytes").className).not.toContain("text-down");
+    expect(input.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("says under each field what to change: a joined emoji, a tab, a website without https://, an X share link, a Telegram invite", () => {
+    render(<LaunchForm />);
+    // Nothing said on an untouched form. The regions themselves are always there since fix round 1 (ruling 8), empty.
+    const regions = [...document.querySelectorAll("[id$='-note']")];
+    expect(regions.length).toBeGreaterThan(0);
+    for (const region of regions) expect(region.textContent).toBe("");
+    fill({ name: "Dev \u{1F468}\u{200D}\u{1F4BB}" });
+    expect(screen.getByText("Joined emoji such as \u{1F468}\u{200D}\u{1F4BB} cannot go in the name. Use single emoji.")).toBeTruthy();
+    const cases: ReadonlyArray<[string, string, string]> = [
+      ["Symbol", "CH\tK", "The symbol holds a hidden character, such as a tab or line break. Type it again by hand."],
+      ["Description", "one\ttwo", "The description holds a tab or a similar hidden character. Use spaces instead."],
+      ["Website", "mysite.com", "The website must start with https://, as in https://example.com."],
+      ["X", "https://x.com/chalk?s=21", "Remove the ? and everything after it from the X link."],
+      ["Telegram", "https://t.me/+invite", "Invite links cannot be listed. Use a public group or channel, like https://t.me/name."],
+    ];
+    for (const [label, value, message] of cases) {
+      const input = screen.getByLabelText(label);
+      fireEvent.change(input, { target: { value } });
+      expect(input.getAttribute("aria-describedby")).toBe(screen.getByText(message).id);
+    }
+    expect(screen.getByText("Check the name.")).toBeTruthy(); // the first field in form order
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("says nothing under an empty name, which the button's reason covers, but names a name of spaces", () => {
+    render(<LaunchForm />);
+    fill({ name: "" });
+    expect(screen.queryByText("Enter a name.")).toBeNull();
+    expect(screen.getByText("Add an image, a name and a symbol.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "   " } });
+    expect(screen.getByText("Enter a name.")).toBeTruthy();
+  });
+
+  it("turns the description counter red over 500 characters", () => {
+    render(<LaunchForm />);
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "a".repeat(501) } });
+    expect(screen.getByText("501/500").className).toContain("text-down");
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "a".repeat(500) } });
+    expect(screen.getByText("500/500").className).not.toContain("text-down");
+  });
+
+  // UX review, should fix 7: a stray space would go on chain for good, and the preview must predict the address it lands at.
+  it("trims the name and symbol for the counter, the preview, the upload and the launch alike", async () => {
+    render(<LaunchForm />);
+    fill({ name: "   ", symbol: "CHALK" });
+    expect(screen.getByText("Add an image, a name and a symbol.")).toBeTruthy(); // spaces alone are no name
+    fill({ name: "  Tailor's Chalk ", symbol: " CHALK  " });
+    expect(screen.getByText("14/32 bytes")).toBeTruthy();
+    expect(screen.getByText("5/11 bytes")).toBeTruthy();
+    expect(h.openingInput).toMatchObject({ name: "Tailor's Chalk", symbol: "CHALK" });
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.upload.mock.calls[0]![0]).toMatchObject({ name: "Tailor's Chalk", symbol: "CHALK" });
+    expect(h.execute.mock.calls[0]![0]).toMatchObject({ name: "Tailor's Chalk", symbol: "CHALK", token: TOKEN });
+    expect(h.state.addToast).toHaveBeenCalledWith({ kind: "pending", message: "Launching CHALK", hash: TX });
   });
 
   it("refuses a valuation outside the currency's bounds, a first buy above the balance, then one above the cap", () => {
@@ -179,10 +310,12 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("The first buy is above the cap.")).toBeTruthy();
   });
 
+  // The fee line read "65 % of trading fees to your payout address"; UX review 2 reworded it around the pool fee, and fix
+  // round 1 (ruling 2) says "up to": other people can add liquidity to the pool, and the launch's earns only its share.
   it("reads the fee share from the contract, never a fixed 70 %, and shows the snapped opening in USD", () => {
     h.settings = { ...h.settings, creatorShareBps: 6500 };
     render(<LaunchForm />);
-    expect(screen.getByText("65 % of trading fees to your payout address")).toBeTruthy();
+    expect(screen.getByText(feeLine("65", "0.65", "your token"))).toBeTruthy();
     expect(["$5,000", "$10,000", "$25,000", "$100,000"].every((label) => screen.getByRole("button", { name: label }))).toBe(true);
     expect(screen.getByText("Opens at $4,995 · $0.000004995 per token")).toBeTruthy();
     expect(screen.getByText("Gas only")).toBeTruthy();
@@ -205,13 +338,203 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("Pick a valuation between 50 AMC and 100,000 AMC.")).toBeTruthy();
   });
 
-  it("names the wrong network instead of an enabled button that does nothing", () => {
+  // Was: a disabled Launch with "Switch your wallet to Robinhood Chain." under it. UX review 8 makes the button ask the
+  // wallet to switch; the other reasons still show under it.
+  it("turns the button into a network switch on another network, and says so when the wallet does not switch", () => {
     h.chainId = 1;
     h.wallet = undefined;
     render(<LaunchForm />);
+    const button = screen.getByRole("button", { name: "Switch to Robinhood Chain" });
+    expect(screen.getByText("Add an image, a name and a symbol.")).toBeTruthy(); // what else is missing still shows
     fill();
-    expect(screen.getByText("Switch your wallet to Robinhood Chain.")).toBeTruthy();
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("Switch your wallet to Robinhood Chain.")).toBeNull(); // not repeated under the button
+    fireEvent.click(button);
+    expect(h.switchChain).toHaveBeenCalledWith({ chainId: robinhoodChain.id }, expect.anything());
+    expect(h.upload).not.toHaveBeenCalled();
+    const options = h.switchChain.mock.calls[0]![1] as { onError(e: Error): void };
+    act(() => options.onError(new Error("User rejected the request.")));
+    expect(screen.getByRole("alert").textContent).toBe("The wallet did not switch. Pick Robinhood Chain in your wallet.");
+  });
+
+  it("waits on the wallet while it switches", () => {
+    h.chainId = 1;
+    h.wallet = undefined;
+    h.switching = true;
+    render(<LaunchForm />);
+    const button = screen.getByRole("button", { name: "Confirm in wallet" });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(button);
+    expect(h.switchChain).not.toHaveBeenCalled();
+  });
+
+  // UX review, should fix 2; worded in fix round 1 (ruling 2) as the share of what the launch's liquidity earns, at most
+  // the share of the 1 % pool fee.
+  it("words the creator's cut from the live share and the pool fee, in the token and the currency", () => {
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    expect(screen.getByText(feeLine("70", "0.7", "CHALK"))).toBeTruthy();
+    h.settings = { ...h.settings, creatorShareBps: 7050 };
+    rerender(<LaunchForm />);
+    expect(screen.getByText(feeLine("70.5", "0.705", "CHALK"))).toBeTruthy();
+  });
+
+  // UX review, should fix 3.
+  it("always shows where the fees go, with a link-style control to change it and a placeholder that says empty means this wallet", async () => {
+    render(<LaunchForm />);
+    fill();
+    expect(screen.getByText("0x1111…1111 (this wallet)")).toBeTruthy();
+    const toggle = screen.getByRole("button", { name: "Pay another address" });
+    expect(toggle.className).toContain("underline");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.textContent).toBe("Use this wallet");
+    const field = screen.getByLabelText("Payout address") as HTMLInputElement;
+    expect(field.placeholder).toBe("Leave empty to use this wallet");
+    expect(screen.getByText("0x1111…1111 (this wallet)")).toBeTruthy(); // left empty, it still pays this wallet
+    fireEvent.change(field, { target: { value: "0x12" } });
+    expect(screen.getByText("Not a valid address")).toBeTruthy();
+    // Was "Enter a valid payout address." under the button. Fix round 1 (rulings 8 and 12) puts the payout's own reason
+    // under its field, as for every other field, and the button's reason points at it.
+    expect(screen.getByText("Check the payout address.")).toBeTruthy();
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.getAttribute("aria-describedby")).toBe(screen.getByText("That is not a valid address. Check it for typos.").id);
+    fireEvent.change(field, { target: { value: OTHER_WALLET } });
+    expect(screen.getByText("0x2222…2222")).toBeTruthy();
+    expect(field.getAttribute("aria-invalid")).toBe("false");
+    await press();
+    await waitFor(() => expect(h.execute).toHaveBeenCalled());
+    expect(h.execute.mock.calls[0]![0].payout).toBe(OTHER_WALLET);
+  });
+
+  // Fix round 1, ruling 12: the contract would pay the zero address's fees to the creator instead.
+  it("refuses the zero address as the payout, with a plain reason under the field", () => {
+    render(<LaunchForm />);
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: "Pay another address" }));
+    const field = screen.getByLabelText("Payout address");
+    fireEvent.change(field, { target: { value: "0x0000000000000000000000000000000000000000" } });
+    const note = screen.getByText("The zero address cannot be the payout. Leave the field empty to use this wallet.");
+    expect(field.getAttribute("aria-describedby")).toBe(note.id);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByText("Not a valid address")).toBeTruthy();
+    expect(screen.getByText("Check the payout address.")).toBeTruthy();
     expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // UX review, should fix 4.
+  it("states the first buy's cap from the live setting, with its rough cost at this valuation", () => {
+    const usd = (raw: bigint) => `$${fmtInt(rawToNumber(raw, 6))}`;
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    expect(screen.getByText(`Up to 20 % of the supply, about ${usd(firstBuyCapGross(SNAPPED, 2000, 50)!)} at this valuation.`)).toBeTruthy();
+    h.settings = { ...h.settings, firstBuyCapBps: 1500 };
+    rerender(<LaunchForm />);
+    expect(screen.getByText(`Up to 15 % of the supply, about ${usd(firstBuyCapGross(SNAPPED, 1500, 50)!)} at this valuation.`)).toBeTruthy();
+    h.opening = { ...h.opening, snapped: undefined };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("Up to 15 % of the supply.")).toBeTruthy();
+    h.settings = { ...h.settings, firstBuyCapBps: 0 };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("First buys are closed for now.")).toBeTruthy();
+  });
+
+  // UX review, should fix 5: the contract opens at or below the pick, within one 1.0001^200 step. Since fix round 1 (ruling
+  // 3) the note is always laid out and hidden with `invisible` rather than removed, so nothing below it moves.
+  it("says when the opening valuation was rounded down to the pool's price step", () => {
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    const note = screen.getByText(ROUNDED);
+    expect(shown(note)).toBe(true); // $5,000 picked, $4,995.43 snapped
+    h.opening = { ...h.opening, pending: true };
+    rerender(<LaunchForm />);
+    expect(screen.getByText(ROUNDED)).toBe(note);
+    expect(shown(note)).toBe(false); // not while a new pick is being worked out
+    h.opening = { ...h.opening, pending: false, snapped: 5_000_000_000n }; // exactly on a step
+    rerender(<LaunchForm />);
+    expect(shown(note)).toBe(false);
+  });
+
+  // Fix round 1, ruling 3: a tap on First buy, Max or the payout link must never miss because a line came or went while the
+  // price re-read. The lines between them keep their place: hidden, reserved or held, never removed.
+  it("keeps every line below the valuation in place while the price re-reads", () => {
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    fireEvent.change(screen.getByLabelText("First buy"), { target: { value: "100" } });
+    const note = screen.getByText(ROUNDED);
+    const opens = screen.getByText("Opens at $4,995 · $0.000004995 per token");
+    const cap = screen.getByText(/^Up to 20 % of the supply, about/);
+    const estimate = screen.getByText(/^About [\d,]+ tokens/);
+    expect(cap.className).toContain("min-h-[3em]"); // two lines held, the most it needs at 320 px
+    expect([note, opens, estimate].every(shown)).toBe(true);
+    // A new pick: the settled read is gone and the new one is out.
+    h.opening = { token: undefined, openTick: undefined, snapped: undefined, pending: true };
+    rerender(<LaunchForm />);
+    for (const el of [note, opens, cap, estimate]) expect(el.isConnected).toBe(true); // the same elements, still laid out
+    expect(shown(note)).toBe(false);
+    expect(shown(opens)).toBe(false);
+    expect(shown(estimate)).toBe(false);
+    expect(cap.textContent).toBe("Up to 20\u{A0}% of the supply."); // shorter text in the same two-line box
+    expect(shown(screen.getByText("Working out the opening price…"))).toBe(true); // stacked over the preview, same height
+  });
+
+  // Fix round 1, ruling 4: iOS capitalised "https://" and "x.com", and the messages then described the wrong problem.
+  it("keeps a phone from capitalising, correcting or spell-checking the links, and offers the URL keyboard for the website", () => {
+    render(<LaunchForm />);
+    for (const label of ["Website", "X", "Telegram"]) {
+      const input = screen.getByLabelText(label);
+      expect(input.getAttribute("autocapitalize")).toBe("none");
+      expect(input.getAttribute("autocorrect")).toBe("off");
+      expect(input.getAttribute("spellcheck")).toBe("false");
+    }
+    expect(screen.getByLabelText("Website").getAttribute("inputmode")).toBe("url");
+  });
+
+  // Fix round 1, ruling 8: a message that appears while typing is spoken, once, from a region that was already there.
+  it("announces a field's message politely from a region that is always there, and not again while it stays the same", () => {
+    render(<LaunchForm />);
+    const region = document.getElementById("launch-website-note")!;
+    expect(region.getAttribute("aria-live")).toBe("polite");
+    expect(region.textContent).toBe("");
+    fireEvent.change(screen.getByLabelText("Website"), { target: { value: "m" } });
+    expect(document.getElementById("launch-website-note")).toBe(region); // filled in place, not mounted with its text
+    expect(region.textContent).toBe("The website must start with https://, as in https://example.com.");
+    const spoken = region.firstChild;
+    fireEvent.change(screen.getByLabelText("Website"), { target: { value: "my" } });
+    expect(region.firstChild).toBe(spoken); // the same text node: nothing new to announce on this keystroke
+    fireEvent.change(screen.getByLabelText("Website"), { target: { value: "https://mysite.com" } });
+    expect(region.textContent).toBe("");
+  });
+
+  // Fix round 1, ruling 10: "1 %" broke across lines at 320 px.
+  it("never lets a number part from its percent sign", () => {
+    const { container } = render(<LaunchForm />);
+    fill();
+    fireEvent.change(screen.getByLabelText("First buy"), { target: { value: "100" } });
+    expect(container.textContent).toMatch(/\d\u{A0}%/u);
+    expect(container.textContent).not.toMatch(/\d %/);
+  });
+
+  // UX review, should fix 18.
+  it("says why the opening price is blank: no name and symbol yet, or no wallet", () => {
+    h.opening = { token: undefined, openTick: undefined, snapped: undefined, pending: false }; // the hook without both
+    const { rerender } = render(<LaunchForm />);
+    const hint = "Enter a name and symbol to see the opening price.";
+    expect(screen.getByText(hint)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Tailor's Chalk" } });
+    expect(screen.getByText(hint)).toBeTruthy(); // the symbol is still missing
+    fireEvent.change(screen.getByLabelText("Symbol"), { target: { value: "  " } });
+    expect(screen.getByText(hint)).toBeTruthy(); // spaces are no symbol
+    fireEvent.change(screen.getByLabelText("Symbol"), { target: { value: "CHALK" } });
+    expect(screen.queryByText(hint)).toBeNull();
+    h.opening = { token: TOKEN, openTick: -398_400, snapped: SNAPPED, pending: false };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("Opens at $4,995 · $0.000004995 per token")).toBeTruthy();
+    h.state.isConnected = false;
+    h.state.address = undefined;
+    h.opening = { token: undefined, openTick: undefined, snapped: undefined, pending: false };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("Connect a wallet to see the opening price.")).toBeTruthy();
   });
 
   it("waits for the wallet client on the right network", () => {
@@ -284,6 +607,7 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     expect(h.execute.mock.calls[0]![0]).toMatchObject({
       name: "Tailor's Chalk", symbol: "CHALK", metadataUri: "ipfs://bafymeta", quote: USDG, valuation: 5_000_000_000n,
       firstBuy: 0n, minFirstBuyTokens: 0n, payout: WALLET, creationFee: 0n,
+      token: TOKEN, // the preview's predicted address, which the wallet code checks for code before sending
     });
     expect(h.state.addToast).toHaveBeenCalledWith({ kind: "pending", message: "Launching CHALK", hash: TX });
     expect(h.state.updateToast).toHaveBeenCalledWith(1, { kind: "confirmed", message: "Launched CHALK" });
@@ -467,6 +791,159 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     expect(h.execute).toHaveBeenCalledTimes(1);
   });
 
+  // UX review, blocker B2.
+  it("drops the expired session when the upload answers 401, and the next Launch signs in again and carries on by itself", async () => {
+    h.upload.mockRejectedValueOnce(new UploadError(UPLOAD_MESSAGES.signIn, "not-signed-in"));
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Your sign-in has expired. Press Launch to sign in again."));
+    expect(h.state.dropSession).toHaveBeenCalledTimes(1);
+    expect(h.state.dropSession).toHaveBeenCalledWith(WALLET); // fix round 1, ruling 7: the wallet the upload was made for
+    expect(h.execute).not.toHaveBeenCalled();
+    h.state.signed = false; // what AppState reports once the session is dropped
+    rerender(<LaunchForm />);
+    expect(launch().getAttribute("aria-disabled")).toBe("false");
+    await press();
+    expect(h.state.withSignIn).toHaveBeenCalledWith("launch", expect.any(Function), expect.any(Function));
+    expect(screen.getByText("Sign in")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull(); // the old line goes once the new attempt starts
+    h.state.signed = true; // the signature landed
+    await act(async () => {
+      rerender(<LaunchForm />);
+    });
+    await waitFor(() => expect(h.push).toHaveBeenCalledWith(`/t/${TOKEN}?launched=${TX}`));
+    expect(h.upload).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the session on any other upload refusal", async () => {
+    h.upload.mockRejectedValueOnce(new UploadError(UPLOAD_MESSAGES.limit, "upload-limit"));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(UPLOAD_MESSAGES.limit));
+    expect(h.state.dropSession).not.toHaveBeenCalled();
+  });
+
+  // UX review, blocker B3: the same salt again would deploy onto a live token, revert, and read "Launch failed".
+  it("stays locked after a launch it could not confirm, with the transaction and the token page one tap away", async () => {
+    h.execute.mockImplementationOnce(async () => {
+      const confirmation = Promise.reject(new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed));
+      confirmation.catch(() => {});
+      return { hash: TX, confirmation };
+    });
+    render(<LaunchForm />);
+    fill();
+    const button = launch();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.unconfirmed));
+    expect(screen.getByRole("link", { name: "View the transaction ↗" }).getAttribute("href")).toBe(txUrl(TX));
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}?launched=${TX}`);
+    expect(h.state.updateToast).toHaveBeenLastCalledWith(1, { kind: "unconfirmed", message: LAUNCH_MESSAGES.unconfirmed });
+    const locked = screen.getByRole("button", { name: "Sent" });
+    expect(locked).toBe(button); // the same element, so keyboard focus is never lost
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.queryByRole("button", { name: "Launch" })).toBeNull();
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it("points to the token page instead of launching again when the predicted address is already live", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchExistsError(LAUNCH_MESSAGES.alreadyLive, TOKEN));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.alreadyLive));
+    expect(h.execute.mock.calls[0]![0].token).toBe(TOKEN);
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}`);
+    expect(screen.queryByRole("link", { name: /transaction/ })).toBeNull(); // no hash is known for an earlier press
+    const locked = screen.getByRole("button", { name: "Already live" });
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  });
+
+  // UX review, should fix 15.
+  it("never reuses an upload made while another wallet was connected", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchRejectedError(LAUNCH_MESSAGES.rejected));
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.rejected));
+    h.state.address = OTHER_WALLET;
+    rerender(<LaunchForm />);
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.upload).toHaveBeenCalledTimes(2);
+    expect(h.execute.mock.calls[1]![1]).toMatchObject({ account: OTHER_WALLET });
+  });
+
+  // Fix round 1, ruling 1: an error once the wallet was asked to send leaves the outcome unknown.
+  it("locks when the wallet erred after it was asked to send, and an edit and a press send nothing", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchUnconfirmedError(LAUNCH_MESSAGES.maybeSent));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.maybeSent));
+    expect(screen.getByRole("alert").textContent).not.toMatch(/nothing was spent/i);
+    expect(screen.queryByRole("link", { name: /transaction/ })).toBeNull(); // no hash is known
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}`);
+    const locked = screen.getByRole("button", { name: "Sent" });
+    // Edited, the name predicts another address, which the code check would find empty: the lock is what stops a second coin.
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Another Chalk" } });
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  });
+
+  // Fix round 1, ruling 9: the lock holds through what a creator might try next.
+  it("keeps an unconfirmed launch locked through a name edit and a wallet switch", async () => {
+    h.execute.mockImplementationOnce(async () => {
+      const confirmation = Promise.reject(new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed));
+      confirmation.catch(() => {});
+      return { hash: TX, confirmation };
+    });
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Another Chalk" } });
+    h.state.address = OTHER_WALLET;
+    rerender(<LaunchForm />);
+    const locked = screen.getByRole("button", { name: "Sent" });
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.unconfirmed);
+  });
+
+  // Fix round 1, ruling 9: the code check guards the address the preview predicted, so the launch must send that preview's
+  // salt and account, also after PoolAlreadyInitialized draws a new salt.
+  it("launches with the salt and account the preview predicted from, also after a new salt is drawn", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchFailedError(messageForRevert("PoolAlreadyInitialized"), "PoolAlreadyInitialized"));
+    render(<LaunchForm />);
+    fill();
+    const first = { ...h.openingInput! };
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(h.execute.mock.calls[0]![0].salt).toBe(first.salt);
+    expect(h.execute.mock.calls[0]![1]).toMatchObject({ account: first.account });
+    expect(first.account).toBe(WALLET);
+    const second = { ...h.openingInput! };
+    expect(second.salt).not.toBe(first.salt); // the preview already predicts from the new salt
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.execute.mock.calls[1]![0]).toMatchObject({ salt: second.salt, token: TOKEN });
+    expect(h.execute.mock.calls[1]![1]).toMatchObject({ account: second.account });
+  });
+
   it("lists Approve only when the wallet code reports it", async () => {
     h.execute.mockImplementation(async (_input: unknown, _deps: unknown, onStep: (s: string) => void) => {
       onStep("sign");
@@ -494,5 +971,110 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     expect([...steps.querySelectorAll("li")].map((li) => li.textContent?.replace(/^[✓\d]*/, ""))).toEqual([
       "Upload", "Approve", "Sign the payment", "Confirm in wallet", "Launching",
     ]);
+  });
+});
+
+// Fix round 1, ruling 6: after "could not confirm", a reload gave a blank form one press away from a second coin.
+describe("LaunchForm: a launch whose outcome is not known, remembered for this tab", () => {
+  const unconfirmedOnce = () =>
+    h.execute.mockImplementationOnce(async () => {
+      const confirmation = Promise.reject(new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed));
+      confirmation.catch(() => {});
+      return { hash: TX, confirmation };
+    });
+
+  it("remembers a launch it could not confirm: the wallet, the predicted token, the hash and the time", async () => {
+    unconfirmedOnce();
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy());
+    expect(parseUnsettled(sessionStorage.getItem(UNSETTLED_KEY))).toEqual({
+      wallet: WALLET.toLowerCase(), token: TOKEN, hash: TX, at: expect.any(Number),
+    });
+  });
+
+  it("remembers one whose wallet erred after it was asked, with no hash", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchUnconfirmedError(LAUNCH_MESSAGES.maybeSent));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy());
+    expect(parseUnsettled(sessionStorage.getItem(UNSETTLED_KEY))).toEqual({ wallet: WALLET.toLowerCase(), token: TOKEN, at: expect.any(Number) });
+  });
+
+  it("shows the same locked card after a reload for the same wallet, and a fresh form for another wallet", async () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, hash: TX, at: 101 });
+    const { unmount } = render(<LaunchForm />);
+    expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.unconfirmed);
+    expect(screen.getByRole("link", { name: "View the transaction ↗" }).getAttribute("href")).toBe(txUrl(TX));
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}?launched=${TX}`);
+    expect(h.deployedArgs).toEqual({ token: TOKEN, watch: true }); // waiting for the token to turn up
+    fill();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sent" }));
+    });
+    expect(h.execute).not.toHaveBeenCalled();
+    unmount();
+    h.state.address = OTHER_WALLET;
+    render(<LaunchForm />);
+    fill();
+    expect(screen.queryByRole("button", { name: "Sent" })).toBeNull();
+    expect((launch() as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("restores the card for a launch whose wallet erred after it was asked, with no transaction link", () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, at: 102 });
+    render(<LaunchForm />);
+    expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.maybeSent);
+    expect(screen.queryByRole("link", { name: /transaction/ })).toBeNull();
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}`);
+  });
+
+  it("offers 'Start a new launch', which forgets the launch and opens the form with a new salt", async () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, hash: TX, at: 103 });
+    render(<LaunchForm />);
+    fill();
+    const before = h.openingInput!.salt;
+    fireEvent.click(screen.getByRole("button", { name: "Start a new launch" }));
+    expect(sessionStorage.getItem(UNSETTLED_KEY)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(h.openingInput!.salt).not.toBe(before);
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.execute.mock.calls[0]![0].salt).toBe(h.openingInput!.salt);
+  });
+
+  it("says the launch went through once the token turns up at its predicted address", () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, hash: TX, at: 104 });
+    h.deployed = true;
+    render(<LaunchForm />);
+    expect(screen.getByRole("alert").textContent).toBe("It went through: your token is live.");
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}?launched=${TX}`);
+    expect(screen.getByRole("button", { name: "Launched" }).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "Start a new launch" })).toBeTruthy();
+  });
+
+  it("still launches, and still locks, when the tab's storage refuses", async () => {
+    const refuse = () => {
+      throw new Error("The operation is insecure.");
+    };
+    const spies = [
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(refuse),
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(refuse),
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(refuse),
+    ];
+    try {
+      unconfirmedOnce();
+      render(<LaunchForm />);
+      fill();
+      await press();
+      await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy()); // the open form still locks
+      fireEvent.click(screen.getByRole("button", { name: "Start a new launch" }));
+      await press();
+      await waitFor(() => expect(h.push).toHaveBeenCalled());
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });
