@@ -144,11 +144,16 @@ describe("WatchlistPage", () => {
     expect(screen.getByText("1 token")).toBeTruthy();
   });
 
+  // Review round 1, finding 13: the loading skeleton is already up on the very first render regardless of
+  // the Suits list, so asserting it right after show() would pass on the old code too (before it also
+  // waited on the Suits query). Waiting for h.ds.watchlist first proves the session probe and the default
+  // list have both settled, so the loading state checked after that is driven only by the Suits list.
   it("keeps the loading state up while the Suits list is still in flight, even once the default list and session settle", async () => {
     h.ds.session.mockResolvedValue(WALLET);
     h.ds.pairs.mockImplementation((scope) => (scope === "sv" ? new Promise<TokenPair[]>(() => {}) : Promise.resolve([])));
     show();
 
+    await waitFor(() => expect(h.ds.watchlist).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByLabelText("Loading pairs")).toBeTruthy());
     expect(screen.queryByText("Nothing on your watchlist yet.")).toBeNull();
   });

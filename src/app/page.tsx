@@ -36,10 +36,12 @@ export default function MarketsPage() {
     : `No ${filters.quotes.length ? filters.quotes.join(" / ") + " " : ""}pairs${
         filters.origin !== "all" ? ` on ${originLabel(filters.origin)}` : ""
       } match ${presetLabel(filters.preset)}.`;
-  // Review Focus 16: "no launches" is read off the Suits list itself, never the post-filter row count, so a
-  // preset or a search that happens to filter every launch out still gets the usual reset-minded copy rather
-  // than a "go launch one" nudge that would be wrong the moment any launch exists.
-  const noLaunches = suits && !query && !loading && !pairsQuery.isError && (pairsQuery.data ?? []).length === 0;
+  // Review round 1, finding 15: "no launches" means the Suits list itself is empty, read off its raw length,
+  // not the post-filter row count, so a preset that filters an existing list to zero rows still gets the usual
+  // reset-minded copy. A search is covered by the !query check above: while one is typed this state never
+  // applies, so the regular "No pair matches" copy takes over as usual. The ternary below already checks
+  // pairsQuery.isError first, so this never needs its own check on it.
+  const noLaunches = suits && !query && !loading && (pairsQuery.data ?? []).length === 0;
   const showMockNote =
     isMockSource(ds) &&
     !loading &&

@@ -223,7 +223,7 @@ describe("ActivityTabs: the launch rows (spec 7.3)", () => {
     expect(screen.getByText(`${fmtAmt(100)} USDG · ${fmtAmt(19_000_000)} CHALK`)).toBeTruthy(); // 99.5 net plus the 0.5 router fee
     const at = LAUNCHED_AT * 1000;
     expect(screen.getByRole("link", { name: `${fmtISODate(at)} · ${fmtAge(ageHours(at, NOW_MS))} ago` }).getAttribute("href")).toBe(txUrl(LAUNCH_TX));
-    expect(screen.getByText("Creator's share of the pool fee")).toBeTruthy();
+    expect(screen.getByText("Pool fee share")).toBeTruthy();
     expect(screen.queryByText("Fee share")).toBeNull();
     expect(screen.getByText("70 % payout · 30 % MaxLong")).toBeTruthy();
     expect(screen.getByRole("link", { name: "https://chalk.test" }).getAttribute("href")).toBe("https://chalk.test");
