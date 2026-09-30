@@ -70,13 +70,18 @@ export default function TokenView({ address, launchedTx, serverHadPair }: Props)
     return () => window.clearTimeout(id);
   }, [launchedTx, waitAttempt]);
   /**
-   * B1a, amended 30 Sep 2026, guarded per fix round 1 finding 5: the server rendered this page's
-   * facts block and tab title before the wait above ever started, so once the wait actually finds
-   * the token those server-rendered parts must catch up without the visitor reloading. That is
-   * only true when the server itself had no pair yet (`!serverHadPair`); a shared or reloaded
-   * `?launched=` link whose server render already found the token needs no refresh, since
-   * TokenFacts and the tab title are already right, and firing one anyway would be one needless
-   * server render on every such view. `router.refresh()` re-runs the Server Components for this
+   * B1a, amended 30 Sep 2026, guarded per fix round 1 finding 5, widened per re-review finding 2:
+   * the server rendered this page's facts block and tab title before this component's own client
+   * read ever settled, so once that read actually finds the token those server-rendered parts
+   * must catch up without the visitor reloading. That is only true when the server itself had no
+   * pair yet (`!serverHadPair`); a shared or reloaded link whose server render already found the
+   * token needs no refresh, since TokenFacts and the tab title are already right, and firing one
+   * anyway would be one needless server render on every such view. This is no longer limited to
+   * `launchedTx`: a plain `/t/<address>` link opened in the minute after a launch, with no
+   * `?launched=` at all, has exactly the same shape of gap between the server's miss and a later
+   * client-side find (the pairs list catching up, or the single-pair fallback's own refetch), and
+   * left uncorrected the app would sit above a facts block still saying "No token at ..." under a
+   * tab still reading "Unknown token". `router.refresh()` re-runs the Server Components for this
    * route with a fresh read; it does not touch this component's own state (`pair` above keeps
    * coming from react-query, not from the server), so refreshing does not by itself change any of
    * this effect's dependencies and cannot loop on its own. The ref is the actual guard: it
@@ -85,11 +90,11 @@ export default function TokenView({ address, launchedTx, serverHadPair }: Props)
    */
   const refreshedForRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!launchedTx || !pair || serverHadPair) return;
+    if (!pair || serverHadPair) return;
     if (refreshedForRef.current === pair.id) return;
     refreshedForRef.current = pair.id;
     router.refresh();
-  }, [launchedTx, pair, serverHadPair, router]);
+  }, [pair, serverHadPair, router]);
   /** B1b: the wait timed out with nothing found. Same countdown, asked again right now. */
   const retry = () => {
     setWaitOver(false);

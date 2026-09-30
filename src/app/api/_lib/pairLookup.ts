@@ -18,12 +18,20 @@ const TTL_MS = 30_000;
  * serving a stale 404 seconds after the store actually had the token, with the creator's own
  * `router.refresh()` landing on nothing.
  *
+ * Lowercases `id` itself (re-review finding 5, since every caller already lowercased before
+ * calling this, but the helper silently answering "not found" for a checksummed or uppercase id
+ * it was ever handed unlowercased, rather than reading it, was a footgun for the next caller
+ * rather than a fact about the check). `isAddress` only accepts lowercase hex, and reads and
+ * writes both went by the raw, unlowercased id before this, so two different casings of the same
+ * address would have been two different memo keys and two different backend reads.
+ *
  * A malformed address (finding 9) answers `null` immediately, with no `ttlCache` call and no
  * database read at all: `isAddress` is the same check the token API and the quote route already
  * ran on their own before this, now the one place that decides it for every caller, including the
  * token page, which never validated the address at all.
  */
 export function lookupPair(id: string): Promise<TokenPair | null> {
-  if (!isAddress(id)) return Promise.resolve(null);
-  return ttlCache(`pair:${id}`, TTL_MS, () => getBackend().pair(id), { skipCache: (v) => v === null });
+  const key = id.toLowerCase();
+  if (!isAddress(key)) return Promise.resolve(null);
+  return ttlCache(`pair:${key}`, TTL_MS, () => getBackend().pair(key), { skipCache: (v) => v === null });
 }

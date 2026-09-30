@@ -193,8 +193,16 @@ export default function TokenFacts({ pair, address, launchedTx }: Props) {
     // `launchedTx` prop doc above. TokenView (above this section) has no heading of its own while
     // it waits, so this one is server-rendered but visually hidden, naming the same state its tab
     // title (`generateMetadata`, page.tsx) already does, rather than repeating TokenView's own
-    // visible copy a second time.
-    if (launchedTx) return <h1 className="sr-only">Indexing your token</h1>;
+    // visible copy a second time. Re-review finding 1: the wrapping section's own top border is
+    // what closes GatedSection's lock card from below for a visitor the gate does not admit; the
+    // bare `<h1>` alone left that card open-bottomed for the whole wait.
+    if (launchedTx) {
+      return (
+        <section className="border-t border-hairline">
+          <h1 className="sr-only">Indexing your token</h1>
+        </section>
+      );
+    }
     // Keep today's wording for every other case unchanged; it is now the page's <h1>.
     return (
       <section className="border-t border-hairline px-4 py-16 text-center tablet:px-5">
@@ -224,7 +232,8 @@ export default function TokenFacts({ pair, address, launchedTx }: Props) {
         <span className="font-sans text-[13px] text-ink-50">{pair.name}</span>
       </h1>
       {/* TokenFactsDetails is the only client-rendered piece here: a native <details> around
-          these server-rendered rows, closed by default once the gate admits the viewer. */}
+          these server-rendered rows, closed by default once the gate admits the viewer, and also
+          while the Suits check for a connected wallet is still running (fix round 1 finding 4). */}
       <TokenFactsDetails ticker={pair.ticker} name={pair.name}>
         <dl className="mt-[14px] grid grid-cols-1 gap-x-8 tablet:grid-cols-2">
           {rows.map(({ label, value, href, toneClass, note }) => (

@@ -38,10 +38,25 @@ describe("lookupPair", () => {
     expect(pair).not.toHaveBeenCalled();
   });
 
-  it("answers null with no backend read for an uppercase address (the callers lowercase first, this does not assume it)", async () => {
-    const result = await lookupPair(ADDR.toUpperCase().replace("0X", "0x"));
-    expect(result).toBeNull();
-    expect(pair).not.toHaveBeenCalled();
+  // Re-review finding 5: every caller already lowercases before calling this, but the helper
+  // answering "not found" for a checksummed or uppercase id was a footgun of its own rather than
+  // a fact about the address, and would have quietly served the wrong answer to a future caller
+  // (a viem `getAddress` value, say) that did not lowercase first. On the round-1 code this test
+  // asserted the opposite (null, no backend call); that is the very behaviour this round drops.
+  it("lowercases a checksummed or uppercase address before checking and reading it", async () => {
+    pair.mockResolvedValue(FOUND);
+    const upper = ADDR.toUpperCase().replace("0X", "0x");
+    const result = await lookupPair(upper);
+    expect(result).toEqual(FOUND);
+    expect(pair).toHaveBeenCalledWith(ADDR);
+  });
+
+  it("shares one memo entry for the same address regardless of casing", async () => {
+    pair.mockResolvedValue(FOUND);
+    const upper = ADDR.toUpperCase().replace("0X", "0x");
+    await lookupPair(upper);
+    await lookupPair(ADDR);
+    expect(pair).toHaveBeenCalledTimes(1);
   });
 
   it("reads the backend for a well-formed address", async () => {

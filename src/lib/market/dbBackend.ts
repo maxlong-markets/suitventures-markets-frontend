@@ -209,8 +209,8 @@ export function createDbBackend(db: Db, opts: DbBackendOpts = {}): MarketBackend
       const rows = await db.query<PairRow>(`${PAIR_ONE_SELECT} where t.id = $1`, [id]);
       const pair = (await shapeRows(rows, now()))[0];
       if (!pair) return null;
-      // Spec 5.5: the launch block rides the single-token answer only; `/api/tokens/[address]` and the token page share it
-      // through the `pair:${id}` memo, so neither needs a change.
+      // Spec 5.5: the launch block rides the single-token answer only; `/api/tokens/[address]`, the token page and the
+      // quote route all share it through the `pair:${id}` memo (`src/app/api/_lib/pairLookup.ts`), so none needs a change.
       return { ...pair, launch: await readLaunchInfo(db, id) };
     },
     async quotes() {

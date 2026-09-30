@@ -179,13 +179,25 @@ describe("TokenView and the instant launchpad (spec 7.3)", () => {
     expect(h.refresh).not.toHaveBeenCalled();
   });
 
-  it("never refreshes when there is no launch in play", () => {
+  // Re-review finding 2: a plain link (no `?launched=`) whose server render missed the token
+  // needs the same refresh once this component's own client read finds it, or the app renders
+  // fully above a facts block still saying "No token at ..." under a tab still reading "Unknown
+  // token", uncorrected until a reload. On the pre-fix code (the effect bailed on `!launchedTx`
+  // unconditionally) `h.refresh` was never called here; this is the flip of that old expectation.
+  it("refreshes exactly once when a plain link's client read finds a token the server did not have", () => {
     h.pair = undefined;
     h.isPending = false;
     const { rerender } = render(<TokenView address={PAIR_A.id} serverHadPair={false} />);
+    expect(h.refresh).not.toHaveBeenCalled();
+
     h.pair = { ...PAIR_A, launch: null } as TokenPair;
     rerender(<TokenView address={PAIR_A.id} serverHadPair={false} />);
-    expect(h.refresh).not.toHaveBeenCalled();
+    expect(h.refresh).toHaveBeenCalledTimes(1);
+
+    // Still just once on a later re-render with a fresh object for the same token.
+    h.pair = { ...PAIR_A, launch: null } as TokenPair;
+    rerender(<TokenView address={PAIR_A.id} serverHadPair={false} />);
+    expect(h.refresh).toHaveBeenCalledTimes(1);
   });
 
   it("shows the fee panel for a token launched here, and nothing for any other", () => {

@@ -342,3 +342,46 @@ A review of this section's own build (token-page-review.md) found five things wo
 - **The summary line's contrast, tap target and wrap.** The opacity that dimmed the whole summary
   is gone; the row is at least 40px tall; "Token details" no longer breaks across two lines at a
   phone's width.
+
+Three more changes landed in the same commit, worth recording even though the review above only
+named five things (re-review finding 7):
+
+- **Exactly one `<h1>`, in every state.** The unknown-token message is now an `<h1>` (previously a
+  `<div>`; Tailwind's preflight resets heading size and weight, so it looks the same). The
+  launched-wait state, which used to render nothing at all, now renders a visually hidden
+  `<h1 class="sr-only">Indexing your token</h1>`, naming the same state the tab title already
+  does.
+- **The fee-split sentence's final wording**, after a second review the same day corrected the
+  first pass: "*<tier>* of every trade. The launch's locked liquidity earns this fee, and *N*% of
+  what it earns goes to the creator's payout address and *M*% to MaxLong." The pool itself is
+  open (its hook is zero), so other liquidity can sit alongside the launch's own; the sentence
+  now claims only the launch's own share of the fee, not the whole pool's.
+- **`GatedSection.tsx`'s lock card dropped its bottom border** (`border` to `border-x border-t`),
+  since `TokenFacts`' own top border now sits directly under it on the token page and the two
+  hairlines read as one doubled line.
+
+## 11. Re-review polish, 30 Sep 2026
+
+A second review of commit d39b98f (token-page-review-2.md) approved it outright and found six
+small follow-ups, none blocking. Five landed in one more commit:
+
+- **The `?launched=` hidden `<h1>` now sits inside its own `border-t` section.** A bare `<h1>`
+  had nothing to close `GatedSection`'s lock card from below for a visitor the gate does not
+  admit while the wait is in progress, leaving the card open-bottomed over an otherwise empty
+  page.
+- **`router.refresh()` no longer requires `?launched=`.** The guard is now `!pair || serverHadPair`,
+  not `!launchedTx || !pair || serverHadPair`: a plain `/t/<address>` link opened in the minute
+  after a launch has the exact same gap between the server's miss and a later client-side find,
+  and needs the same catch-up.
+- **The "Token details" label moved from ink-50 to ink-55**, clearing WCAG AA's 4.5:1 for 10px
+  text (ink-50 was about 4.2:1).
+- **The ticker in the summary now truncates** (`min-w-0 truncate`, was `flex-none`), since a
+  ticker from an origin other than the launchpad has no length cap and could otherwise push the
+  row past a phone's width.
+- **`lookupPair` lowercases the id itself** before checking or reading it, rather than assuming
+  every caller already has, so a checksummed or future caller's address is not quietly answered
+  "not found".
+
+The sixth finding (non-holders now see the details block collapse then reopen around the Suits
+check, for a wallet the check turns away) is the accepted trade-off ruling 4 already named
+("a denied wallet expands after the check") and needs no change.

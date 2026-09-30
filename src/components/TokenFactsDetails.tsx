@@ -65,10 +65,15 @@ export default function TokenFactsDetails({ ticker, name, children }: Props) {
         >
           +
         </span>
-        <span className="flex-none font-mono text-[10px] uppercase tracking-[0.16em] text-ink-50">
+        {/* Re-review finding 3: ink-50 on the void ground is about 4.2:1, just under AA's 4.5:1
+            for 10px text; ink-55 clears it (about 4.8:1). */}
+        <span className="flex-none font-mono text-[10px] uppercase tracking-[0.16em] text-ink-55">
           Token details
         </span>
-        <span className="flex-none font-mono text-[11px] text-ink-60">{ticker}</span>
+        {/* Re-review finding 4: truncates instead of flex-none, since a ticker from an origin
+            other than the launchpad has no length cap (fields.ts's 11-byte cap is launch-only)
+            and could otherwise push the row past a phone's width with nothing to clip it. */}
+        <span className="min-w-0 truncate font-mono text-[11px] text-ink-60">{ticker}</span>
         <span className="min-w-0 truncate font-sans text-[11px] text-ink-60">{name}</span>
       </summary>
       {children}

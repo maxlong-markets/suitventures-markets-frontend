@@ -136,8 +136,8 @@ describe("TokenFacts", () => {
   });
 });
 
-describe("TokenFacts: staying silent for a fresh launch (amended 30 Sep 2026, corrected fix round 1 finding 8)", () => {
-  it("shows nothing visible while a fresh launch is not indexed yet, but keeps one hidden h1", () => {
+describe("TokenFacts: staying silent for a fresh launch (amended 30 Sep 2026, corrected fix round 1 finding 8, re-review finding 1)", () => {
+  it("shows nothing visible while a fresh launch is not indexed yet, but keeps one hidden h1 in a section that closes the lock card below it", () => {
     const { container } = render(<TokenFacts pair={null} address={ADDRESS} launchedTx={TX} />);
     expect(screen.queryByText(/No token at/)).toBeNull();
     // The page still needs exactly one <h1>; TokenView (above, not rendered here) has none of its
@@ -148,9 +148,11 @@ describe("TokenFacts: staying silent for a fresh launch (amended 30 Sep 2026, co
     expect(h1?.textContent).toBe("Indexing your token");
     expect(h1?.className).toContain("sr-only");
     expect(container.querySelectorAll("h1").length).toBe(1);
-    // Nothing else renders: the hidden heading is the only content, matching the tab title
-    // (generateMetadata, page.tsx) rather than adding a second, visible message of its own.
-    expect(container.querySelectorAll("*").length).toBe(1);
+    // Re-review finding 1: the hidden heading needs its own bordered section, or nothing closes
+    // GatedSection's lock card from below for a visitor the gate does not admit while the wait is
+    // in progress. So the only content is the section and the h1 inside it: two elements, not one.
+    expect(container.querySelectorAll("*").length).toBe(2);
+    expect(container.querySelector("section")?.className).toContain("border-t");
   });
 
   it("keeps the unknown-token message when there is no launch in play", () => {
@@ -370,6 +372,26 @@ describe("TokenFacts: the details disclosure (amended 30 Sep 2026, corrected fix
     const name = screen.getByText("Artificial Inu", { selector: "summary span" });
     expect(name.className).toContain("min-w-0");
     expect(name.className).toContain("truncate");
+  });
+
+  // Re-review finding 3: ink-50 (about 4.2:1) was still just under AA's 4.5:1 for 10px text; the
+  // label moved to ink-55 (about 4.8:1). On the round-1 code this fails, since the class there is
+  // ink-50.
+  it("gives the Token details label AA-passing contrast", () => {
+    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
+    expect(screen.getByText("Token details").className).toContain("text-ink-55");
+  });
+
+  // Re-review finding 4: a ticker from an origin other than the launchpad has no length cap, and
+  // with `flex-none` on both the label and the ticker, nothing but a long ticker itself gave way,
+  // pushing the row past a phone's width. On the round-1 code (`flex-none` on the ticker) this
+  // fails, since a `flex-none` element never gets `min-w-0` or `truncate`.
+  it("lets a long ticker truncate rather than pushing the summary past the page edge", () => {
+    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
+    const ticker = screen.getByText("AI", { selector: "summary span" });
+    expect(ticker.className).toContain("min-w-0");
+    expect(ticker.className).toContain("truncate");
+    expect(ticker.className).not.toContain("flex-none");
   });
 
   it("keeps a manual toggle across a re-render that leaves access unchanged", () => {
