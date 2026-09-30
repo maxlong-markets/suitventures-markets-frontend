@@ -10,7 +10,7 @@ import { useLaunchFees } from "@/hooks/useLaunchpad";
 import { keys } from "@/hooks/useMarketsData";
 import { LAUNCHPAD_EVENTS_ABI } from "@/lib/chain/abi";
 import { robinhoodChain, ZERO_ADDRESS } from "@/lib/chain";
-import { ageHours, fmtAge, fmtAmt } from "@/lib/format";
+import { ageHours, fmtAge, fmtAmt, short } from "@/lib/format";
 import {
   LAUNCH_MESSAGES, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, claimOwed, collectLaunchFees,
   type LaunchDeps, type WriteHandle,
@@ -66,9 +66,9 @@ function Line({ label, value }: { label: string; value: string }) {
 
 type WalletState = "disconnected" | "wrong-network" | "connecting" | "ready";
 
-/** What one Collect transaction's own `FeesCollected` log paid the payout address, and which address that was.
- * "unknown" when the receipt or the event could not be read: the collection still went through. */
-type PaidToPayout = { payout: Address; token: bigint; quote: bigint } | "unknown";
+/** What one Collect transaction's own `FeesCollected` log paid the payout address. "unknown" when the receipt or the
+ * event could not be read: the collection still went through. */
+type PaidToPayout = { token: bigint; quote: bigint } | "unknown";
 type JustCollected = { baseline: number; paid: PaidToPayout };
 
 type Props = { pair: TokenPair; launch: LaunchInfo; now: number };
@@ -86,7 +86,9 @@ function isOwner(address: string | undefined, launch: LaunchInfo): boolean {
  * nothing here. It shows the owner's own side: what the launch's liquidity has earned for the payout address and not
  * yet collected, read live from the contract; what the payout address was paid so far, summed by the store; Collect;
  * and anything owed to the connected wallet, with a claim to an address it picks. MaxLong's share is not shown, and
- * the payout address can no longer be changed from the site (the contract's `setPayout` is untouched).
+ * the payout address can no longer be changed from the site (the contract's `setPayout` is untouched). The two
+ * figures carry no "to you" or "to payout" label: both are the owner's. Only a creator whose fees go to another
+ * address is told which one.
  */
 export default function LaunchFeesPanel(props: Props) {
   const { address } = useAppState();
@@ -248,7 +250,7 @@ function OwnerFees({ pair, launch, now }: Props) {
         logs: receipt.logs.filter((log) => isAddressEqual(log.address, launchpadAddress)),
       }).filter((e) => isAddressEqual(e.args.token, token));
       if (!event) return "unknown";
-      return { payout: event.args.payout, token: event.args.tokenToPayout, quote: event.args.quoteToPayout };
+      return { token: event.args.tokenToPayout, quote: event.args.quoteToPayout };
     } catch {
       return "unknown";
     }
@@ -294,35 +296,27 @@ function OwnerFees({ pair, launch, now }: Props) {
     <div className="mt-6 border border-hairline p-4">
       <div className="mb-3 font-mono text-[9.5px] uppercase tracking-[0.22em] text-ink-40">Pool fees</div>
       <div className="flex flex-col gap-3">
-        <Section title="Uncollected fees">
+        <div>
           {fees.uncollectedFailed ? (
-            <div className="font-mono text-[11px] text-ink-50">Could not read the uncollected fees just now.</div>
-          ) : u ? (
-            <Line label={isPayout ? "To you" : "To payout"} value={both(u.tokenToPayout, u.quoteToPayout)} />
+            <div className="py-[3px] font-mono text-[11px] text-ink-50">Could not read the uncollected fees just now.</div>
           ) : (
-            <div className="font-mono text-[11px] text-ink-40">Reading…</div>
+            <Line label="Uncollected" value={u ? both(u.tokenToPayout, u.quoteToPayout) : "Reading…"} />
           )}
-        </Section>
-
-        <Section title="Collected so far">
-          {/* This sums what every payout address the token has ever had was paid (src/lib/launch/read.ts), so it reads
-              "To payout" even for the payout address: only the uncollected line above, which the next Collect pays,
-              is about the viewer. */}
-          <Line label="To payout" value={both(BigInt(launch.feesCollected.tokenToPayout), BigInt(launch.feesCollected.quoteToPayout))} />
+          {/* What every payout address this token has had was paid so far, summed by the store. */}
+          <Line label="Collected so far" value={both(BigInt(launch.feesCollected.tokenToPayout), BigInt(launch.feesCollected.quoteToPayout))} />
           <div className="mt-1 font-mono text-[10.5px] text-ink-45">
             {launch.feesCollectedAt > 0 ? `Last collected ${fmtAge(ageHours(launch.feesCollectedAt * 1000, now))} ago` : "Not collected yet"}
           </div>
+          {/* Only a creator whose fees go to another address needs telling where they go. */}
+          {isPayout ? null : <div className="mt-1 font-mono text-[10.5px] text-ink-45">Paid to {short(launch.payout)}.</div>}
           {justCollected && launch.feesCollectedAt === justCollected.baseline ? (
             <div className="mt-1 font-mono text-[10.5px] text-ink-45">
               {justCollected.paid === "unknown"
                 ? "Collected. Totals update shortly."
-                : `Just collected: ${both(justCollected.paid.token, justCollected.paid.quote)} to ${
-                    // The address the transaction itself paid, not the panel's current idea of the payout.
-                    address && isAddressEqual(justCollected.paid.payout, address) ? "you" : "the payout"
-                  }.`}
+                : `Just collected: ${both(justCollected.paid.token, justCollected.paid.quote)}.`}
             </div>
           ) : null}
-        </Section>
+        </div>
 
         {owedToken > 0n || owedQuote > 0n ? (
           <Section title="Owed to you">

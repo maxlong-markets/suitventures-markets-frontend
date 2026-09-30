@@ -1240,6 +1240,13 @@ row from its first buy (added 29 Sep 2026).
 - **Change payout**, only when the connected wallet equals the current payout: an address field and a button sending
   `setPayout(token, address)`; the panel says the change is permanent for this wallet once it hands the payout on.
 
+Amended 30 Sep 2026, the owner's ruling. The panel is for the coin's owner only: it renders for the payout address
+and for the creator, and for nobody else. It shows the owner's side alone as two plain figures, Uncollected and
+Collected so far, with no recipient label on either, since both are the owner's, and no MaxLong line anywhere. A
+creator whose fees go to another address is told which one. The "Just collected" line names only what the
+transaction paid the payout address. Change payout is no longer offered on the site; the contract's `setPayout` is
+untouched. Collect fees and the owed-amount claim stay as described.
+
 ### 7.4 Markets table
 
 `ORIGIN_OPTIONS` in `src/lib/markets.ts:36-45` gains `{ key: "SV", label: "SV" }`; `filterPairs` already compares

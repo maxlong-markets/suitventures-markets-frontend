@@ -11,6 +11,7 @@ import ActivityTabs, { type ActivityTab } from "./ActivityTabs";
 import CandleChart from "./CandleChart";
 import LaunchFeesPanel from "./LaunchFeesPanel";
 import TokenHeader from "./TokenHeader";
+import TokenDetailsCard from "./TokenDetailsCard";
 import TradePanel from "./TradePanel";
 import { Spinner } from "./ui";
 
@@ -202,6 +203,9 @@ export default function TokenView({ address, launchedTx, serverHadPair }: Props)
         </div>
         <div className="order-1 w-full flex-none twocol:order-2 twocol:w-[360px]">
           <TradePanel pair={pair} />
+          {/* The owner's request of 30 Sep 2026: the token's details sit right under the trade panel, the six key
+              figures first and the rest behind "All details". */}
+          <TokenDetailsCard pair={pair} now={dataUpdatedAt} />
           {/* The panel carries its own top margin and renders nothing for anyone but the coin's owner, so no wrapper
               is left behind as an empty gap. */}
           {pair.launch ? <LaunchFeesPanel pair={pair} launch={pair.launch} now={dataUpdatedAt} /> : null}

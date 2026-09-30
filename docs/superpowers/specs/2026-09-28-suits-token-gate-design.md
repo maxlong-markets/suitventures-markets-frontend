@@ -385,3 +385,19 @@ small follow-ups, none blocking. Five landed in one more commit:
 The sixth finding (non-holders now see the details block collapse then reopen around the Suits
 check, for a wallet the check turns away) is the accepted trade-off ruling 4 already named
 ("a denied wallet expands after the check") and needs no change.
+
+
+## Amended 30 Sep 2026, later the same day: the details card under the trade panel
+
+The owner asked for the token's details right under the buy and sell panel, the important figures first and the rest
+on request. Inside the app, `TokenView` now renders `TokenDetailsCard` directly below `TradePanel`: six figures always
+on screen (1h change, 24h change, 24h volume, FDV, liquidity, holders) and a native `<details>` reading "All details"
+for everything else, closed until asked for. The rows come from `src/lib/tokenFacts.ts`, shared with the public block,
+and both render them through `TokenFactsList`.
+
+The public, server-rendered block stays at the bottom of the page for what it was built for. `PublicFactsSection`,
+which replaces `TokenFactsDetails`, puts it on screen only for a viewer the gate keeps outside the app: no wallet,
+turned away, or a failed check, with the gate on. For everyone inside, and for everyone when the gate is off, the
+section is kept off screen with `sr-only`, so the figures never show twice; the heading remains the page's one `<h1>`
+for a screen reader and the text remains in the HTML for a crawler. The first client render still equals the server
+HTML in every case.

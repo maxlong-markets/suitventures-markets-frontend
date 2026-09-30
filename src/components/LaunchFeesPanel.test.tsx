@@ -157,15 +157,15 @@ describe("LaunchFeesPanel is for the coin's owner only (30 Sep 2026)", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("shows the payout address its own side only: no MaxLong line and no Change payout", () => {
+  it("shows the owner two plain figures, uncollected and collected so far, with no recipient label on either", () => {
     show();
     expect(screen.getByText("Pool fees")).toBeTruthy();
-    const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
-    expect(uncollected.getByText("To you")).toBeTruthy();
-    expect(uncollected.getByText("700 CHALK · 7 USDG")).toBeTruthy();
-    const collected = within(screen.getByRole("region", { name: "Collected so far" }));
-    expect(collected.getByText("To payout")).toBeTruthy();
-    expect(collected.getByText("770 CHALK · 7 USDG")).toBeTruthy();
+    expect(screen.getByText("Uncollected").nextElementSibling?.textContent).toBe("700 CHALK · 7 USDG");
+    expect(screen.getByText("Collected so far").nextElementSibling?.textContent).toBe("770 CHALK · 7 USDG");
+    // Both figures are the owner's, so neither says who it goes to.
+    expect(screen.queryByText("To you")).toBeNull();
+    expect(screen.queryByText("To payout")).toBeNull();
+    expect(screen.queryByText(/Paid to/)).toBeNull();
     // MaxLong's share, 300 and 330 CHALK in the fixtures, is nowhere on the panel.
     expect(screen.queryByText(/MaxLong/)).toBeNull();
     expect(screen.queryByText(/300 CHALK/)).toBeNull();
@@ -177,12 +177,11 @@ describe("LaunchFeesPanel is for the coin's owner only (30 Sep 2026)", () => {
     expect(screen.getAllByRole("button")).toHaveLength(1);
   });
 
-  it("shows the creator the panel too, reading To payout when the fees go to another address", () => {
+  it("shows the creator the panel too, and says where the fees go when that is another address", () => {
     h.state.address = CREATOR;
     show();
-    const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
-    expect(uncollected.getByText("To payout")).toBeTruthy();
-    expect(uncollected.queryByText("To you")).toBeNull();
+    expect(screen.getByText("Uncollected").nextElementSibling?.textContent).toBe("700 CHALK · 7 USDG");
+    expect(screen.getByText(/^Paid to 0xc2c2/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Collect fees" })).toBeTruthy();
   });
 
@@ -190,7 +189,7 @@ describe("LaunchFeesPanel is for the coin's owner only (30 Sep 2026)", () => {
     h.state.address = getAddress(PAYOUT);
     show();
     expect(screen.getByText("Pool fees")).toBeTruthy();
-    expect(within(screen.getByRole("region", { name: "Uncollected fees" })).getByText("To you")).toBeTruthy();
+    expect(screen.queryByText(/Paid to/)).toBeNull();
   });
 
   it("titles the panel Pool fees, using the same words as the Info tab", () => {
@@ -389,7 +388,7 @@ describe("LaunchFeesPanel Just collected reads the receipt", () => {
     show();
     await collect();
     expect(h.getTransactionReceipt).toHaveBeenCalledWith({ hash: TX });
-    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG.")).toBeTruthy());
     expect(screen.queryByText(/MaxLong/)).toBeNull();
   });
 
@@ -424,7 +423,7 @@ describe("LaunchFeesPanel Just collected reads the receipt", () => {
     h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [spoofed(), anotherTokens(), real] });
     show();
     await collect();
-    await waitFor(() => expect(screen.getByText("Just collected: 140 CHALK · 14 USDG to you.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Just collected: 140 CHALK · 14 USDG.")).toBeTruthy());
   });
 
   it("shows no figure when the only logs are a spoofed one and another token's", async () => {
@@ -433,22 +432,6 @@ describe("LaunchFeesPanel Just collected reads the receipt", () => {
     await collect();
     await waitFor(() => expect(screen.getByText("Collected. Totals update shortly.")).toBeTruthy());
     expect(screen.queryByText(/Just collected/)).toBeNull();
-  });
-
-  it("says 'to you' by the address the transaction paid, not by who is looking", async () => {
-    // The creator presses Collect; the fees went to the payout address, which is another wallet.
-    h.state.address = CREATOR;
-    const { unmount } = show();
-    await collect();
-    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to the payout.")).toBeTruthy());
-    unmount();
-
-    // The same creator, on a collection that paid the creator's own address.
-    const paidCreator = feesCollectedLog({ token: TOKEN, payout: CREATOR, tokenFees: 1000n * E18, quoteFees: 10_000_000n, tokenToPayout: 700n * E18, quoteToPayout: 7_000_000n });
-    h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [paidCreator] });
-    show();
-    await collect();
-    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you.")).toBeTruthy());
   });
 
   // StrictMode, which the App Router turns on in development, mounts, unmounts and mounts again. A mounted flag that

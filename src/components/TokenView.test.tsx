@@ -23,7 +23,8 @@ vi.mock("@/hooks/useMarketsData", () => ({
 // token, rather than reading anything from the server itself.
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: h.refresh }) }));
 vi.mock("./TokenHeader", () => ({ default: () => null }));
-vi.mock("./TradePanel", () => ({ default: () => null }));
+vi.mock("./TradePanel", () => ({ default: () => <div>the trade panel</div> }));
+vi.mock("./TokenDetailsCard", () => ({ default: () => <div>the details card</div> }));
 vi.mock("./ActivityTabs", () => ({ default: () => null }));
 vi.mock("./LaunchFeesPanel", () => ({ default: () => <div>the fee panel</div> }));
 // A stand-in that only exercises the one contract TokenView owns: it reports whatever
@@ -198,6 +199,25 @@ describe("TokenView and the instant launchpad (spec 7.3)", () => {
     h.pair = { ...PAIR_A, launch: null } as TokenPair;
     rerender(<TokenView address={PAIR_A.id} serverHadPair={false} />);
     expect(h.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the details card right under the trade panel, ahead of the fee panel", () => {
+    h.isPending = false;
+    h.pair = { ...PAIR_A, launch: { creator: "0xc1" } as unknown as LaunchInfo } as TokenPair;
+    render(<TokenView address={PAIR_A.id} serverHadPair={true} />);
+    const trade = screen.getByText("the trade panel");
+    const details = screen.getByText("the details card");
+    const fees = screen.getByText("the fee panel");
+    expect(trade.nextElementSibling).toBe(details);
+    expect(details.nextElementSibling).toBe(fees);
+    expect(trade.parentElement).toBe(details.parentElement);
+  });
+
+  it("shows the details card for a token that was not launched here too", () => {
+    h.isPending = false;
+    h.pair = { ...PAIR_A, launch: null } as TokenPair;
+    render(<TokenView address={PAIR_A.id} serverHadPair={true} />);
+    expect(screen.getByText("the details card")).toBeTruthy();
   });
 
   it("shows the fee panel for a token launched here, and nothing for any other", () => {

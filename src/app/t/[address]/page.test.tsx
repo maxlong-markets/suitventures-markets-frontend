@@ -61,7 +61,7 @@ vi.mock("@/components/TokenView", () => ({
   },
 }));
 // TokenFacts (real, unmocked, since it is the component under test here) renders
-// TokenFactsDetails for a found pair, which reads these two the same way GatedSection does; see
+// PublicFactsSection for a found pair, which reads these two the same way GatedSection does; see
 // TokenFacts.test.tsx and GatedSection.test.tsx for the same pattern.
 vi.mock("@/context/AppState", () => ({ useAppState: () => ({ address: undefined }) }));
 vi.mock("@/lib/suits", () => ({ useSuitsAccess: () => ({ status: "idle" }), gateEnabled: () => true }));

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Address, Hex, LaunchInfo, TokenPair } from "@/lib/types";
 import type { SuitsAccess } from "@/lib/suits";
 import { fmtInt, fmtISODate, fmtPct, fmtPrice, fmtUsd } from "@/lib/format";
-import { fireEvent, render, screen } from "@/test/dom";
+import { render, screen } from "@/test/dom";
 import TokenFacts from "./TokenFacts";
 
 const ADDRESS = "0x1234567890123456789012345678901234567890" as Address;
@@ -34,10 +34,9 @@ const BASE_PAIR: TokenPair = {
   feeTier: "0.30%",
 };
 
-// TokenFactsDetails (the native <details> wrapper around the rows) reads the gate the same way
-// GatedSection and TokenGate do: `useAppState()` for the wallet, `useSuitsAccess` for the read.
-// Defaults here (gate on, status "idle") make `open` true, so every test below that only cares
-// about the facts themselves, not the disclosure, finds its text regardless of open/closed.
+// PublicFactsSection (the shell around the public block) reads the gate the same way GatedSection
+// and TokenGate do: `useAppState()` for the wallet, `useSuitsAccess` for the read. Defaults here
+// (gate on, status "idle") put the block on screen, as a crawler or a visitor with no wallet sees it.
 const h = vi.hoisted(() => ({
   address: undefined as string | undefined,
   access: { status: "idle" } as SuitsAccess,
@@ -302,108 +301,52 @@ describe("TokenFacts: the pool fee tier sentence", () => {
   });
 });
 
-describe("TokenFacts: the details disclosure (amended 30 Sep 2026, corrected fix round 1 finding 4)", () => {
-  it("is open when disconnected (idle) with the gate on", () => {
-    h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "idle" };
+describe("TokenFacts: the public block shows itself only to a viewer outside the app (30 Sep 2026)", () => {
+  const shell = (container: HTMLElement) => container.querySelector("section")!;
+  const rowsWrapper = (container: HTMLElement) => shell(container).querySelector("div")!;
+
+  it.each([
+    ["disconnected, as a crawler or a visitor with no wallet sees it", { status: "idle" }],
+    ["once a connected wallet is turned away", { status: "denied", count: 0n }],
+    ["when the Suits check failed", { status: "error", retry: () => {} }],
+  ] as const)("is on screen with the gate on: %s", (_name, access) => {
+    h.access = access as SuitsAccess;
     const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(container.querySelector("details")?.open).toBe(true);
+    expect(shell(container).className).not.toContain("sr-only");
+    expect(shell(container).className).toContain("border-t");
+    expect(rowsWrapper(container).getAttribute("aria-hidden")).toBeNull();
   });
 
-  // Fix round 1 finding 4: on the old formula (`access.status !== "granted"`) this was open,
-  // which is exactly the flash a holder saw on every hard load and every account switch.
-  it("is closed while the Suits check is still running", () => {
-    h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "checking" };
+  it.each([
+    ["while the Suits check is still running", true, { status: "checking" }],
+    ["once access is granted, since the app shows the same figures under the trade panel", true, { status: "granted", count: 1n }],
+    ["with the gate off, even for a wallet that holds no Suit", false, { status: "denied", count: 0n }],
+    ["with the gate off and no wallet", false, { status: "idle" }],
+  ] as const)("is kept off screen but in the HTML: %s", (_name, gateOn, access) => {
+    h.gateEnabled.mockReturnValue(gateOn);
+    h.access = access as SuitsAccess;
     const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(container.querySelector("details")?.open).toBe(false);
+    expect(shell(container).className).toBe("sr-only");
+    // The heading stays readable by a screen reader; the rows are hidden from it, because the card reads them out.
+    expect(shell(container).querySelector("h1")?.textContent).toContain("AI");
+    expect(shell(container).querySelector("h1")?.closest("[aria-hidden]")).toBeNull();
+    expect(rowsWrapper(container).getAttribute("aria-hidden")).toBe("true");
+    // Still real text in the HTML, for a crawler.
+    expect(container.textContent).toContain("Pool fee tier");
+    expect(container.querySelector('script[type="application/ld+json"]')).not.toBeNull();
   });
 
-  it("is open once a connected wallet is turned away", () => {
-    h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "denied", count: 0n };
+  it("puts the six key figures on screen and everything else behind All details, closed until asked for", () => {
     const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(container.querySelector("details")?.open).toBe(true);
-  });
-
-  it("is open when the check failed", () => {
-    h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "error", retry: () => {} };
-    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(container.querySelector("details")?.open).toBe(true);
-  });
-
-  it("is closed when the gate is off, even while access is denied", () => {
-    h.gateEnabled.mockReturnValue(false);
-    h.access = { status: "denied", count: 0n };
-    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(container.querySelector("details")?.open).toBe(false);
-  });
-
-  it("is closed once access is granted", () => {
-    h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "granted", count: 1n };
-    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(container.querySelector("details")?.open).toBe(false);
-  });
-
-  it("reads only Token details in the summary, since the heading above it already names the token", () => {
-    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    const summary = screen.getByText("Token details").closest("summary");
-    expect(summary?.textContent).toContain("Token details");
-    expect(summary?.textContent).not.toContain("AI");
-    expect(summary?.textContent).not.toContain("Artificial Inu");
-    // The one heading still carries both.
-    const heading = document.querySelector("h1");
-    expect(heading?.textContent).toContain("AI");
-    expect(heading?.textContent).toContain("Artificial Inu");
-  });
-
-  // Fix round 1 finding 7: the summary had about 2.2:1 contrast (opacity-70 compounded with
-  // ink-40), a row under 24px tall, and nothing stopping "Token details" from breaking across two
-  // lines once a long name squeezed it. On the old code the opacity/transition classes below were
-  // present and `min-h-[40px]` was absent, so these fail there.
-  it("has no opacity dimming, a summary at least 40px tall, and Token details that cannot wrap", () => {
-    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    const summary = screen.getByText("Token details").closest("summary")!;
-    expect(summary.className).not.toContain("opacity-70");
-    expect(summary.className).not.toContain("hover:opacity-100");
-    expect(summary.className).not.toContain("transition-opacity");
-    expect(summary.className).toContain("min-h-[40px]");
-    const label = screen.getByText("Token details");
-    expect(label.className).toContain("flex-none");
-  });
-
-  // Re-review finding 3: ink-50 (about 4.2:1) was still just under AA's 4.5:1 for 10px text; the
-  // label moved to ink-55 (about 4.8:1). On the round-1 code this fails, since the class there is
-  // ink-50.
-  it("gives the Token details label AA-passing contrast", () => {
-    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(screen.getByText("Token details").className).toContain("text-ink-55");
-  });
-
-  // A long ticker cannot push the summary past the page edge, because the summary no longer
-  // carries the ticker or the name at all: the heading above it does.
-  it("keeps the summary to its own short label, whatever the ticker's length", () => {
-    render(<TokenFacts pair={{ ...BASE_PAIR, ticker: "AVERYLONGTICKERWITHNOLENGTHCAPATALL" }} address={ADDRESS} />);
-    const summary = screen.getByText("Token details").closest("summary")!;
-    expect(summary.textContent).not.toContain("AVERYLONGTICKER");
-  });
-
-  it("keeps a manual toggle across a re-render that leaves access unchanged", () => {
-    h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "denied", count: 0n };
-    const { container, rerender } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
     const details = container.querySelector("details")!;
-    expect(details.open).toBe(true);
-
-    // The viewer closes it by hand.
-    fireEvent.click(container.querySelector("summary")!);
     expect(details.open).toBe(false);
-
-    // A later render with the very same access status (nothing granted, nothing changed) must
-    // not snap it back open.
-    rerender(<TokenFacts pair={{ ...BASE_PAIR }} address={ADDRESS} />);
-    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent).toContain("All details");
+    for (const label of ["1h change", "24h change", "24h volume", "FDV", "Liquidity", "Holders"]) {
+      const dt = screen.getByText(label);
+      expect(dt.closest("details")).toBeNull();
+    }
+    for (const label of ["Ticker", "Name", "Token address", "Quote asset", "Origin", "Price (USD)", "Market cap", "Age", "Pool fee tier"]) {
+      expect(screen.getByText(label).closest("details")).toBe(details);
+    }
   });
 });
