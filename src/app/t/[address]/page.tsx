@@ -3,8 +3,7 @@ import { cache } from "react";
 import GatedSection from "@/components/GatedSection";
 import TokenFacts from "@/components/TokenFacts";
 import TokenView from "@/components/TokenView";
-import { ttlCache } from "@/lib/envio/cache";
-import { getBackend } from "@/lib/market/backend";
+import { lookupPair } from "@/app/api/_lib/pairLookup";
 import { fmtPct, fmtPrice, fmtUsd, fmtUsdOrDash, fmtInt, MINUS } from "@/lib/format";
 import type { Hex, TokenPair } from "@/lib/types";
 
@@ -25,28 +24,23 @@ function parseLaunchedTx(searchParams: { [key: string]: string | string[] | unde
 }
 
 const SITE_URL = "https://www.maxlong.markets";
-// Same key and TTL as src/app/api/tokens/[address]/route.ts's GET handler, so this page's own
-// two reads (generateMetadata, then the page body) and any request to that API route all share
-// one process-wide memo instead of hitting the backend up to three times for one visit.
-const TTL = 30;
 
 /** This page is fetched fresh on every request rather than cached as a static route, because a
- *  crawler must see the same live price/volume a wallet-holding visitor does — `ttlCache` above
- *  is what actually bounds backend load, not Next's route cache. */
+ *  crawler must see the same live price/volume a wallet-holding visitor does: `lookupPair`'s own
+ *  memo is what actually bounds backend load, not Next's route cache. */
 export const dynamic = "force-dynamic";
 
 /**
  * `cache()` (amended 30 Sep 2026, should fix 9) makes `generateMetadata` and the page body call
- * this at most once each *request*, the same guarantee `fetch` gives for free and the Next.js
- * docs name `cache` as the stand-in for when `fetch` is not what is doing the reading
+ * `lookupPair` at most once each *request*, the same guarantee `fetch` gives for free and the
+ * Next.js docs name `cache` as the stand-in for when `fetch` is not what is doing the reading
  * (generate-metadata.md: "React `cache` can be used if `fetch` is unavailable"). That keeps the
- * "one database read per request" ceiling exact regardless of `ttlCache`'s own memo, which (see
- * cache.ts) no longer holds a `null` answer for a token that is not found yet, so two calls to
- * `getPair` a request apart must not turn into two database reads for one visit.
+ * "one database read per request" ceiling exact regardless of `lookupPair`'s own memo, which no
+ * longer holds a `null` answer for a token that is not found yet (fix round 1, finding 3: the
+ * same helper, and the same key and ttl, that `route.ts` and `quote/route.ts` now use too), so
+ * two calls to `getPair` a request apart must not turn into two database reads for one visit.
  */
-const getPair = cache(async (id: string): Promise<TokenPair | null> => {
-  return ttlCache(`pair:${id}`, TTL * 1000, () => getBackend().pair(id), { skipCache: (v) => v === null });
-});
+const getPair = cache(lookupPair);
 
 /**
  * One factual, quotable sentence: ticker, name, quote asset, price, 24h change, 24h volume,
@@ -125,11 +119,13 @@ export default async function TokenPage({ params, searchParams }: Props) {
       {/* The interactive app stays behind the gate; GatedSection renders a compact lock card in
           its place when the gate is on and the viewer holds no Suit. It comes first now (amended
           30 Sep 2026): it is what a visitor came for, and the facts block below used to push it
-          off a phone screen entirely. */}
+          off a phone screen entirely. `serverHadPair` (fix round 1, findings 1 and 5) is this
+          read's own answer, so TokenView knows whether it is the one place left to say anything
+          about a pair-less page, and whether a later, client-found pair is news worth a refresh. */}
       <GatedSection>
-        <TokenView address={id} launchedTx={launchedTx} />
+        <TokenView address={id} launchedTx={launchedTx} serverHadPair={pair !== null} />
       </GatedSection>
-      {/* Public, server-rendered, outside any gate — this is the HTML a crawler or an AI search
+      {/* Public, server-rendered, outside any gate: this is the HTML a crawler or an AI search
           engine sees regardless of wallet or Suits ownership (2026-09-28 SEO spec). Its rows now
           live inside an expandable "Token details" disclosure; `launchedTx` lets it stay silent
           while TokenView above is the one showing the post-launch wait, instead of both showing

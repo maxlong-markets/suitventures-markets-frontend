@@ -4,13 +4,16 @@ import { getBackend } from "@/lib/market/backend";
 import { priceSwap } from "@/lib/quote/price";
 import { QuoterUnavailableError, createQuoter } from "@/lib/quote/quoter";
 import type { Denom, Side } from "@/lib/types";
+import { lookupPair } from "../../../_lib/pairLookup";
 import { badRequest, failure, isAddress } from "../../../_lib/respond";
 
 /** A price is never a CDN fact: the route is dynamic and every answer is no-store. */
 export const dynamic = "force-dynamic";
 /** Two quoter simulations plus one store read, comfortably inside the platform's limit. */
 export const maxDuration = 15;
-/** Pair, quote-asset and pool-key lookups are memoised this long; pricing never is. */
+/** Quote-asset and pool-key lookups are memoised this long; pricing never is. The pair lookup's
+ *  own 30 s ttl now lives in `lookupPair` (fix round 1, finding 3), shared with the token page
+ *  and the token API, so this constant covers only the two reads still made here directly. */
 const LOOKUP_TTL_MS = 30_000;
 
 const AMOUNT = /^\d+(\.\d+)?$/;
@@ -52,9 +55,11 @@ export async function GET(req: Request, ctx: { params: Promise<{ address: string
     // These three lookups are memoised under the same keys the pair and quotes routes use, so a
     // keystroke costs at most one indexer round trip in a 30 s window, not three: this route is
     // public, and the indexer's request budget is shared with the sync. Pricing itself, below, is
-    // never memoised.
+    // never memoised. The pair read goes through `lookupPair` (fix round 1, finding 3), so a
+    // "not found" answer here, for a token still not in the store, never sits in the shared
+    // memo for the token page or the token API to inherit.
     const [pair, quoteAssets] = await Promise.all([
-      ttlCache(`pair:${id}`, LOOKUP_TTL_MS, () => backend.pair(id)),
+      lookupPair(id),
       ttlCache("quotes", LOOKUP_TTL_MS, () => backend.quotes()),
     ]);
     if (!pair) return answer({ error: "no listed pool" }, 404);

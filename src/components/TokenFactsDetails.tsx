@@ -19,39 +19,57 @@ interface Props {
  * whichever `open` the server chose, and can still read everything either way, since a closed
  * <details>'s content stays in the HTML, just visually collapsed.
  *
- * `open` for a viewer the gate admits (a holder, or anyone once the gate is off) is closed,
- * since the interactive app above already shows the same numbers; everyone else gets it open,
- * so the public page still carries its facts without a click. The server cannot read a wallet,
- * so it always renders from the gate's own on/off switch alone (`gateEnabled()`), and this
- * component's first client render matches it exactly: `useSuitsAccess` cannot answer "granted"
- * before the balance read resolves, and that read is never done synchronously, so
- * `access.status !== "granted"` is true on both the server's render and the client's very first
- * one. Only a later render, once the read actually settles, can close it for a granted viewer,
- * computed fresh during render rather than written with a state setter inside an effect
- * (react-hooks/set-state-in-effect forbids that) and never poked at the DOM by hand.
+ * Fix round 1, finding 4: `open` is true only for `idle` (disconnected, a crawler included),
+ * `denied` (turned away) and `error` (the check failed); `checking` is now closed, not open.
+ * A connected wallet, holder or not, therefore renders closed from its very first paint, on the
+ * server and on the client alike, and a holder never again sees the block open for the second or
+ * two the balance read takes before it closes. `checking` used to map to open, which meant every
+ * hard load, and every account switch (granted, then checking, then granted again), flashed the
+ * whole block open before closing it: a false-then-true-then-false toggle a hand-opened state
+ * could get lost inside. Under this rule an account switch only ever computes false, false,
+ * false, and a denied or errored wallet still expands once the check actually finishes, which is
+ * the one remaining, accepted transition (closed while checking, open once turned away).
+ *
+ * The server cannot read a wallet, so `access.status` on the server is always either "idle" (no
+ * address at all) or "checking" (a cookie-seeded address, `Providers.tsx`'s
+ * `cookieToInitialState`, with the balance read still in flight; it can never itself be
+ * "granted", "denied" or "error", since none of those can be known synchronously). Idle matches
+ * the open list, so a server render with no wallet cookie renders open exactly when the gate is
+ * on, same as before this round. Checking does not match the open list, so a server render with
+ * a wallet cookie, holder or not, now renders closed, whatever the gate setting says. This
+ * component's first client render lands on the same two cases for the same reason:
+ * `useSuitsAccess` cannot answer "granted" before the balance read resolves, and that read is
+ * never done synchronously, so the very first client render is always idle or checking too, each
+ * matching what the server just sent. Only a later render, once the read actually settles, can
+ * flip a gated viewer's default, computed fresh during render rather than written with a state
+ * setter inside an effect (react-hooks/set-state-in-effect forbids that) and never poked at the
+ * DOM by hand.
  *
  * That same rule protects a manual toggle. React only touches the DOM `open` attribute on a
- * render where this derived value itself changes; once access settles (granted stays granted,
- * denied stays denied), later re-renders keep handing <details> that same value, so React
- * leaves whatever the viewer clicked alone instead of snapping it back.
+ * render where this derived value itself changes; once access settles into a value that does not
+ * flip again (granted stays granted, denied stays denied), later re-renders keep handing
+ * <details> that same value, so React leaves whatever the viewer clicked alone instead of
+ * snapping it back.
  */
 export default function TokenFactsDetails({ ticker, name, children }: Props) {
   const { address } = useAppState();
   const access = useSuitsAccess(address);
-  const open = gateEnabled() && access.status !== "granted";
+  const open = gateEnabled() && (access.status === "idle" || access.status === "denied" || access.status === "error");
 
   return (
     <details open={open} className="group mt-[14px]">
-      <summary className="flex cursor-pointer list-none items-center gap-[8px] py-[2px] opacity-70 transition-opacity hover:opacity-100 [&::-webkit-details-marker]:hidden">
+      <summary className="flex min-h-[40px] cursor-pointer list-none items-center gap-[8px] [&::-webkit-details-marker]:hidden">
         <span
           aria-hidden
-          className="inline-block text-[13px] leading-none text-ink-40 transition-transform duration-150 group-open:rotate-45"
+          className="inline-block flex-none text-[13px] leading-none text-ink-50 transition-transform duration-150 group-open:rotate-45"
         >
           +
         </span>
-        <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-ink-40">Token details</span>
-        <span className="font-mono text-[11px] text-ink-60">{ticker}</span>
-        <span className="font-sans text-[11px] text-ink-45">{name}</span>
+        <span className="flex-none font-mono text-[10px] uppercase tracking-[0.16em] text-ink-50">
+          Token details
+        </span>
+        <span className="flex-none font-mono text-[11px] text-ink-60">{ticker}</span>
+        <span className="min-w-0 truncate font-sans text-[11px] text-ink-60">{name}</span>
       </summary>
       {children}
     </details>

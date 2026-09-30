@@ -20,12 +20,16 @@ describe("ttlCache", () => {
     vi.useRealTimers();
   });
 
-  // Amended 30 Sep 2026 (should fix 9, launch UX review): a "not found" answer must not sit in
-  // the memo the way a real one does, or a creator's own reload keeps hearing "not found" long
-  // after the token actually landed. On the old signature (no fourth argument) this option was
-  // silently dropped, `load` was called once and its `null` cached for the full ttl exactly like
-  // any other value, so the very next call answered from that stale cache instead of asking
-  // again: these three cases would have failed with `load` called once, not twice.
+  // Amended 30 Sep 2026 (should fix 9, launch UX review); corrected fix round 1 finding 12,
+  // which is what this note itself used to get wrong. A "not found" answer must not sit in the
+  // memo the way a real one does, or a creator's own reload keeps hearing "not found" long after
+  // the token actually landed. Only the first case below is the actual regression test: on the
+  // old signature (no fourth argument) that option was silently dropped, `load` was called once
+  // and its `null` cached for the full ttl exactly like any other value, so the very next call
+  // answered from that stale cache instead of asking again, `load` called once rather than the
+  // twice this case expects. The other two are guards, not regressions: the old code already
+  // deduped two concurrent calls into one load (the plain in-flight sharing every key gets, with
+  // or without this option), and already cached a found value normally, so both already passed.
   describe("skipCache", () => {
     it("still answers this call, but a later, separate call asks again rather than reusing it", async () => {
       clearTtlCache();

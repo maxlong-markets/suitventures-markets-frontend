@@ -102,7 +102,9 @@ export default function GatedSection({ children }: { children: ReactNode }): Rea
 
   const content = getContent(access, { address, openConnectModal });
   return (
-    <div className="border border-hairline px-4 py-10 text-center">
+    // Fix round 1, finding 13: no bottom border. TokenFacts (page.tsx) now sits directly under
+    // this card with its own top border; the two hairlines side by side read as one doubled line.
+    <div className="border-x border-t border-hairline px-4 py-10 text-center">
       <SuitsMark size={36} className="mx-auto opacity-80" />
       <div className="mb-[6px] mt-[18px] text-[16px]">{content.line}</div>
       <div className="text-[12.5px] text-ink-50">{content.sub}</div>

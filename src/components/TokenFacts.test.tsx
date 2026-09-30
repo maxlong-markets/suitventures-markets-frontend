@@ -121,9 +121,12 @@ describe("TokenFacts", () => {
     expect(screen.queryByText("SV")).toBeNull();
   });
 
-  it("renders its own unknown-token state when pair is null, rather than a 404 page", () => {
-    render(<TokenFacts pair={null} address={ADDRESS} />);
+  it("renders its own unknown-token state when pair is null, rather than a 404 page, as the page's one h1", () => {
+    const { container } = render(<TokenFacts pair={null} address={ADDRESS} />);
     expect(screen.getByText(/No token at/)).toBeTruthy();
+    // Fix round 1 finding 8: the page always has exactly one <h1>, even with no pair.
+    expect(container.querySelectorAll("h1").length).toBe(1);
+    expect(container.querySelector("h1")?.textContent).toContain("No token at");
   });
 
   it("keeps exactly one h1 on the page, in the server HTML", () => {
@@ -133,11 +136,21 @@ describe("TokenFacts", () => {
   });
 });
 
-describe("TokenFacts: staying silent for a fresh launch (amended 30 Sep 2026)", () => {
-  it("stays silent when the page was opened from /launch and the pair has not arrived yet", () => {
+describe("TokenFacts: staying silent for a fresh launch (amended 30 Sep 2026, corrected fix round 1 finding 8)", () => {
+  it("shows nothing visible while a fresh launch is not indexed yet, but keeps one hidden h1", () => {
     const { container } = render(<TokenFacts pair={null} address={ADDRESS} launchedTx={TX} />);
     expect(screen.queryByText(/No token at/)).toBeNull();
-    expect(container.textContent).toBe("");
+    // The page still needs exactly one <h1>; TokenView (above, not rendered here) has none of its
+    // own while it waits, so this one is server-rendered but visually hidden, on old code this
+    // whole render was `null`, so this h1 did not exist at all.
+    const h1 = container.querySelector("h1");
+    expect(h1).not.toBeNull();
+    expect(h1?.textContent).toBe("Indexing your token");
+    expect(h1?.className).toContain("sr-only");
+    expect(container.querySelectorAll("h1").length).toBe(1);
+    // Nothing else renders: the hidden heading is the only content, matching the tab title
+    // (generateMetadata, page.tsx) rather than adding a second, visible message of its own.
+    expect(container.querySelectorAll("*").length).toBe(1);
   });
 
   it("keeps the unknown-token message when there is no launch in play", () => {
@@ -163,38 +176,114 @@ describe("TokenFacts: 1h/24h change colour (amended 30 Sep 2026)", () => {
     expect(zero.className).toContain("text-ink-50");
   });
 
+  // Fix round 1 finding 11: asserts the actual neutral class, not just the absence of up/down,
+  // which also passed on the old code (no tone class of any kind on this element at all).
   it("colours a dash neutral for a missing change", () => {
     const pair = { ...BASE_PAIR, change1h: null, change24h: 5.25 };
     render(<TokenFacts pair={pair} address={ADDRESS} />);
     const dash = screen.getByText("—");
-    expect(dash.className).not.toContain("text-up");
-    expect(dash.className).not.toContain("text-down");
+    expect(dash.className).toContain("text-ink-50");
   });
 });
 
-describe("TokenFacts: the pool fee tier sentence (amended 30 Sep 2026)", () => {
+// Amended 30 Sep 2026, corrected fix round 1 findings 2 and 10, then corrected again the same
+// day: a second review pointed out the pool is open (the hook is zero), so other liquidity can
+// sit alongside the launch's own, and the launch's locked liquidity earns only its share of the
+// pool's fee, not the fee in full. The sentence for a launch on its own pool now says the pool
+// takes the tier on every trade, that the launch's locked liquidity earns that fee, and only then
+// splits what it earns between the creator's payout address and MaxLong.
+describe("TokenFacts: the pool fee tier sentence", () => {
   it("explains a launched-here pool as a split, computed from creatorShareBps", () => {
     const pair: TokenPair = {
       ...BASE_PAIR,
+      origin: "SV",
       feeTier: "1.00%",
       launch: { creatorShareBps: 7000 } as unknown as LaunchInfo,
     };
     render(<TokenFacts pair={pair} address={ADDRESS} />);
     expect(
-      screen.getByText("1.00% of every trade. 70% of it goes to the coin's creator and 30% to MaxLong."),
+      screen.getByText(
+        "1.00% of every trade. The launch's locked liquidity earns this fee, and 70% of what it earns goes to the creator's payout address and 30% to MaxLong.",
+      ),
     ).toBeTruthy();
   });
 
   it("computes the split for a creator share other than 70%", () => {
     const pair: TokenPair = {
       ...BASE_PAIR,
+      origin: "SV",
       feeTier: "0.50%",
       launch: { creatorShareBps: 6543 } as unknown as LaunchInfo,
     };
     render(<TokenFacts pair={pair} address={ADDRESS} />);
     expect(
-      screen.getByText("0.50% of every trade. 65.43% of it goes to the coin's creator and 34.57% to MaxLong."),
+      screen.getByText(
+        "0.50% of every trade. The launch's locked liquidity earns this fee, and 65.43% of what it earns goes to the creator's payout address and 34.57% to MaxLong.",
+      ),
     ).toBeTruthy();
+  });
+
+  it("reads as a plain sentence when the creator's share is 0%", () => {
+    const pair: TokenPair = {
+      ...BASE_PAIR,
+      origin: "SV",
+      feeTier: "1.00%",
+      launch: { creatorShareBps: 0 } as unknown as LaunchInfo,
+    };
+    render(<TokenFacts pair={pair} address={ADDRESS} />);
+    expect(
+      screen.getByText(
+        "1.00% of every trade. The launch's locked liquidity earns this fee, and all of what it earns goes to MaxLong.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("reads as a plain sentence when the creator's share is 100%", () => {
+    const pair: TokenPair = {
+      ...BASE_PAIR,
+      origin: "SV",
+      feeTier: "1.00%",
+      launch: { creatorShareBps: 10_000 } as unknown as LaunchInfo,
+    };
+    render(<TokenFacts pair={pair} address={ADDRESS} />);
+    expect(
+      screen.getByText(
+        "1.00% of every trade. The launch's locked liquidity earns this fee, and all of what it earns goes to the creator's payout address.",
+      ),
+    ).toBeTruthy();
+  });
+
+  // Fix round 1 finding 2: a token launched here can later be listed through a different, traded
+  // pool of another origin while still carrying its old `launch` block (dbBackend.pair's
+  // `coalesce(listed_pool_id, launch pool_id)`). That pool's own fee does not go where the
+  // launch's did, so the split must not print for it. On the old code (`if (pair.launch)` alone)
+  // both of these would have printed the launch's 70/30 split instead.
+  it("does not claim the launch's split for a launched token now listed through another origin's fixed-fee pool", () => {
+    const pair: TokenPair = {
+      ...BASE_PAIR,
+      origin: "Uniswap",
+      feeTier: "0.30%",
+      launch: { creatorShareBps: 7000 } as unknown as LaunchInfo,
+    };
+    render(<TokenFacts pair={pair} address={ADDRESS} />);
+    expect(screen.getByText("The pool charges 0.30% on every trade.")).toBeTruthy();
+    expect(screen.queryByText(/creator's payout address/)).toBeNull();
+    expect(screen.queryByText(/MaxLong/)).toBeNull();
+  });
+
+  it("does not claim the launch's split for a launched token now listed through another origin's dynamic-fee pool", () => {
+    const pair: TokenPair = {
+      ...BASE_PAIR,
+      origin: "Uniswap",
+      feeTier: "Dynamic",
+      launch: { creatorShareBps: 7000 } as unknown as LaunchInfo,
+    };
+    render(<TokenFacts pair={pair} address={ADDRESS} />);
+    expect(
+      screen.getByText("The pool's hook sets the fee on each trade, so it can differ from one trade to the next."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/creator's payout address/)).toBeNull();
+    expect(screen.queryByText(/MaxLong/)).toBeNull();
   });
 
   it("explains a dynamic fee without naming a percentage", () => {
@@ -212,10 +301,33 @@ describe("TokenFacts: the pool fee tier sentence (amended 30 Sep 2026)", () => {
   });
 });
 
-describe("TokenFacts: the details disclosure (amended 30 Sep 2026)", () => {
-  it("is open when the gate is on and the viewer is not admitted", () => {
+describe("TokenFacts: the details disclosure (amended 30 Sep 2026, corrected fix round 1 finding 4)", () => {
+  it("is open when disconnected (idle) with the gate on", () => {
+    h.gateEnabled.mockReturnValue(true);
+    h.access = { status: "idle" };
+    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
+    expect(container.querySelector("details")?.open).toBe(true);
+  });
+
+  // Fix round 1 finding 4: on the old formula (`access.status !== "granted"`) this was open,
+  // which is exactly the flash a holder saw on every hard load and every account switch.
+  it("is closed while the Suits check is still running", () => {
     h.gateEnabled.mockReturnValue(true);
     h.access = { status: "checking" };
+    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
+    expect(container.querySelector("details")?.open).toBe(false);
+  });
+
+  it("is open once a connected wallet is turned away", () => {
+    h.gateEnabled.mockReturnValue(true);
+    h.access = { status: "denied", count: 0n };
+    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
+    expect(container.querySelector("details")?.open).toBe(true);
+  });
+
+  it("is open when the check failed", () => {
+    h.gateEnabled.mockReturnValue(true);
+    h.access = { status: "error", retry: () => {} };
     const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
     expect(container.querySelector("details")?.open).toBe(true);
   });
@@ -242,9 +354,27 @@ describe("TokenFacts: the details disclosure (amended 30 Sep 2026)", () => {
     expect(summary?.textContent).toContain("Artificial Inu");
   });
 
+  // Fix round 1 finding 7: the summary had about 2.2:1 contrast (opacity-70 compounded with
+  // ink-40), a row under 24px tall, and nothing stopping "Token details" from breaking across two
+  // lines once a long name squeezed it. On the old code the opacity/transition classes below were
+  // present and `min-h-[40px]` was absent, so these fail there.
+  it("has no opacity dimming, a summary at least 40px tall, and Token details that cannot wrap", () => {
+    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
+    const summary = screen.getByText("Token details").closest("summary")!;
+    expect(summary.className).not.toContain("opacity-70");
+    expect(summary.className).not.toContain("hover:opacity-100");
+    expect(summary.className).not.toContain("transition-opacity");
+    expect(summary.className).toContain("min-h-[40px]");
+    const label = screen.getByText("Token details");
+    expect(label.className).toContain("flex-none");
+    const name = screen.getByText("Artificial Inu", { selector: "summary span" });
+    expect(name.className).toContain("min-w-0");
+    expect(name.className).toContain("truncate");
+  });
+
   it("keeps a manual toggle across a re-render that leaves access unchanged", () => {
     h.gateEnabled.mockReturnValue(true);
-    h.access = { status: "checking" };
+    h.access = { status: "denied", count: 0n };
     const { container, rerender } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
     const details = container.querySelector("details")!;
     expect(details.open).toBe(true);

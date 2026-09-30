@@ -45,10 +45,22 @@ function TokenSkeleton() {
   );
 }
 
-export default function TokenView({ address, launchedTx }: { address: string; launchedTx?: Hex }) {
+interface Props {
+  address: string;
+  launchedTx?: Hex;
+  /**
+   * Whether the server's own read (`page.tsx`'s `getPair`) already had this token, passed down
+   * so the two never print a conflicting pair of messages for the same request (fix round 1
+   * findings 1 and 5). Required, not optional, so every call site has to say which case it is in.
+   */
+  serverHadPair: boolean;
+}
+
+export default function TokenView({ address, launchedTx, serverHadPair }: Props) {
   const router = useRouter();
   const { pair, isPending, dataUpdatedAt, retryWait } = usePair(address, { launched: launchedTx !== undefined });
-  // Spec 7.3: a page opened by /launch's redirect waits for the reader for five minutes, then says what it always says.
+  // Spec 7.3: a page opened by /launch's redirect waits for the reader for five minutes, then
+  // either finds the token or, once the wait is over, says so honestly (B1b).
   // `waitAttempt` restarts the clock below on Retry (B1b): bumping it re-runs the effect, which schedules a fresh timeout.
   const [waitOver, setWaitOver] = useState(false);
   const [waitAttempt, setWaitAttempt] = useState(0);
@@ -58,22 +70,26 @@ export default function TokenView({ address, launchedTx }: { address: string; la
     return () => window.clearTimeout(id);
   }, [launchedTx, waitAttempt]);
   /**
-   * B1a, amended 30 Sep 2026: the server rendered this page's facts block and tab title before
-   * the wait above ever started, so once the wait actually finds the token those server-rendered
-   * parts must catch up without the visitor reloading. `router.refresh()` re-runs the Server
-   * Components for this route with a fresh read; it does not touch this component's own state
-   * (`pair` above keeps coming from react-query, not from the server), so refreshing does not by
-   * itself change any of this effect's dependencies and cannot loop on its own. The ref is the
-   * actual guard: it survives Strict Mode's double effect-invocation in development and a later
-   * re-render with the same pair, so this fires exactly once per token, not once per render.
+   * B1a, amended 30 Sep 2026, guarded per fix round 1 finding 5: the server rendered this page's
+   * facts block and tab title before the wait above ever started, so once the wait actually finds
+   * the token those server-rendered parts must catch up without the visitor reloading. That is
+   * only true when the server itself had no pair yet (`!serverHadPair`); a shared or reloaded
+   * `?launched=` link whose server render already found the token needs no refresh, since
+   * TokenFacts and the tab title are already right, and firing one anyway would be one needless
+   * server render on every such view. `router.refresh()` re-runs the Server Components for this
+   * route with a fresh read; it does not touch this component's own state (`pair` above keeps
+   * coming from react-query, not from the server), so refreshing does not by itself change any of
+   * this effect's dependencies and cannot loop on its own. The ref is the actual guard: it
+   * survives Strict Mode's double effect-invocation in development and a later re-render with the
+   * same pair, so this fires at most once per token, not once per render.
    */
   const refreshedForRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!launchedTx || !pair) return;
+    if (!launchedTx || !pair || serverHadPair) return;
     if (refreshedForRef.current === pair.id) return;
     refreshedForRef.current = pair.id;
     router.refresh();
-  }, [launchedTx, pair, router]);
+  }, [launchedTx, pair, serverHadPair, router]);
   /** B1b: the wait timed out with nothing found. Same countdown, asked again right now. */
   const retry = () => {
     setWaitOver(false);
@@ -104,6 +120,19 @@ export default function TokenView({ address, launchedTx }: { address: string; la
   }
 
   if (!pair) {
+    // Fix round 1 finding 1: a plain unknown address (no launch in play) that the server also
+    // could not find already gets its "No token at ..." message from TokenFacts, the
+    // server-rendered block below this one. Printing it again here duplicated that exact text
+    // for a holder, or for anyone with the gate off. When the server DID have the pair but this
+    // component's own, independent client-side read somehow does not, that is a genuinely
+    // different fact from what TokenFacts is showing, so it is still worth saying below.
+    if (!launchedTx && !serverHadPair) {
+      return (
+        <section className={GUTTER}>
+          <BackLink />
+        </section>
+      );
+    }
     const waiting = launchedTx !== undefined && !waitOver;
     // B1b, amended 30 Sep 2026: the five-minute wait running out is not the same fact as a bad
     // address, and must not read like one. This state keeps the tx link and adds Retry, which

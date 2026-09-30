@@ -295,10 +295,11 @@ Kobe asked for it moved down and made optional to read.
 **Placement.** `src/app/t/[address]/page.tsx` now renders `<GatedSection>` first and `<TokenFacts>`
 second. `TokenFacts` took a `launchedTx` prop to match: a page opened from `/launch`'s redirect has
 no pair yet either, and `TokenView` (now above it, inside `GatedSection`) already shows the one
-true message for that wait, a countdown then its own "No token" copy after five minutes.
-`TokenFacts` stays silent whenever `launchedTx` is present, rather than adding a second,
-contradictory "No token" block under a "hang on, it's coming" one. The plain unknown-token
-wording, for a page with no pair and no launch in play, is unchanged.
+true message for that wait, a countdown then, corrected in fix round 1 below, its own "on chain,
+data is late" copy with a Retry button once five minutes pass with nothing. `TokenFacts` stays
+silent whenever `launchedTx` is present, rather than adding a second, contradictory message under
+either one. The plain unknown-token wording, for a page with no pair and no launch in play, is
+unchanged.
 
 **Disclosure.** The fifteen rows now sit inside a native `<details>`, opened by a `<summary>`
 reading "Token details" plus the ticker and name. A new small Client Component,
@@ -318,3 +319,26 @@ classes as the pairs table and the token header (`toneClassOrFlat`). The Pool fe
 its value and gains one sentence under it: a token launched here states the split from its own
 `creatorShareBps`, a dynamic fee explains that the pool's hook decides it per trade, and any other
 fixed tier states the percentage without naming who receives it, since that differs by launchpad.
+
+## 10. Fix round 1, 30 Sep 2026
+
+A review of this section's own build (token-page-review.md) found five things worth changing:
+
+- **One "No token" message, not two, for a plain unknown address too.** Section 9 above only
+  covered the `?launched=` case. `page.tsx` now tells `TokenView` whether its own server read
+  already had the pair (`serverHadPair`); when it did not, and there is no launch in play,
+  `TokenView` renders only its back link, leaving the one message to `TokenFacts`.
+- **The fee split only prints for a token's own launch pool.** `feeTierNote` now checks
+  `pair.launch && pair.origin === "SV"`, not `pair.launch` alone, since a token launched here can
+  later be listed through a different, traded pool whose fee does not go where the launch's does.
+- **One shared helper for the token lookup**, `src/app/api/_lib/pairLookup.ts`, used by the token
+  page, the token API and the quote route: one key, one ttl, one rule that a miss is never
+  memoised, and a malformed address answers null with no database read at all.
+- **The details disclosure closes while the Suits check is running, not just once it answers.**
+  `open` in `TokenFactsDetails.tsx` is now true only for `idle`, `denied` or `error`; `checking`
+  closes it. A connected wallet, holder or not, now renders closed from its very first paint,
+  server and client alike, so a holder no longer sees the block open and then collapse on a hard
+  load or an account switch. Crawlers and disconnected visitors still get it open in the SSR HTML.
+- **The summary line's contrast, tap target and wrap.** The opacity that dimmed the whole summary
+  is gone; the row is at least 40px tall; "Token details" no longer breaks across two lines at a
+  phone's width.

@@ -26,11 +26,11 @@ interface Props {
   address: string;
   /**
    * The tx hash from /launch's redirect (spec 7.3), when the page was opened that way (amended
-   * 30 Sep 2026). The server has no pair yet for a token this fresh either, and TokenView (now
-   * above this section, inside GatedSection) already owns the one true message for that wait: a
-   * countdown, then its own "No token" copy if five minutes pass with nothing. This component
-   * stays silent rather than adding a second, contradictory "No token" block under a "hang on,
-   * it's coming" one.
+   * 30 Sep 2026, corrected fix round 1 finding 12). The server has no pair yet for a token this
+   * fresh either, and TokenView (now above this section, inside GatedSection) already owns the
+   * one true message for that wait: a countdown, then, once five minutes pass with nothing, its
+   * own "on chain, but the site's data is running late" copy with a Retry button. This component
+   * stays silent rather than adding a second, contradictory message under either one.
    */
   launchedTx?: Hex;
 }
@@ -60,9 +60,23 @@ function bpsToPercent(bps: number): string {
  * One plain sentence under the fee tier value, since "0.30%" or "Dynamic" means nothing to a
  * reader who has never met a Uniswap v4 pool (30 Sep 2026, the owner's request to "expound more
  * on the pool fee tier"). Three cases, checked in this order:
- *  - launched here (`pair.launch` present, `src/lib/launch/read.ts`): the tier is this pool's
- *    own cut of every trade, and `creatorShareBps` is the exact, current split of it, read from
- *    the launch rather than assumed to be the usual 70/30.
+ *  - launched here, on its own launch pool (`pair.launch` present AND `pair.origin === "SV"`,
+ *    fixed in fix round 1 finding 2): every launchpad pool is origin SV with a static 1% fee
+ *    (spec 4.3 `POOL_FEE`), and a token has exactly one launch pool, so this is the one case
+ *    `pair.launch` being present actually proves the pool on screen IS that pool. A token
+ *    launched here can later be listed through a different, traded pool of another origin
+ *    (`dbBackend.pair`'s `coalesce(listed_pool_id, launch pool_id)`) while still carrying its old
+ *    `launch` block; checking `pair.launch` alone would then claim a creator/MaxLong split for
+ *    fees that pool's own liquidity providers keep, or, for a hooked dynamic fee on that other
+ *    pool, print a fee split next to the word "Dynamic". The tier is this pool's own cut of
+ *    every trade. The pool itself is open (the hook is zero, spec 4.3), so anyone can add
+ *    liquidity to it; the sentence says no more than that the launch's own locked liquidity earns
+ *    its share of that fee, and, of what it earns, `creatorShareBps` is the exact, current split
+ *    to the creator's payout address versus MaxLong, read from the launch rather than assumed to
+ *    be the usual 70/30 (corrected again, a second review: claiming the launch's split of the
+ *    *whole pool's* fee overstated it, since the launch's liquidity is not the only liquidity a
+ *    reader could be trading against). 0 and 10000 bps get their own plain sentences rather than
+ *    an odd "0% ... and 100% ...".
  *  - a dynamic fee (`feeTier === "Dynamic"`, `envio/shape.ts`'s label for v4's dynamic-fee
  *    flag): the pool's hook decides the number per trade, so there is no fixed percentage to
  *    name.
@@ -70,11 +84,19 @@ function bpsToPercent(bps: number): string {
  *    launchpad and this pool did not launch here.
  */
 function feeTierNote(pair: TokenPair): string {
-  if (pair.launch) {
+  if (pair.launch && pair.origin === "SV") {
     const creatorBps = pair.launch.creatorShareBps;
+    const lede = `${pair.feeTier} of every trade. The launch's locked liquidity earns this fee, and `;
+    // 0 and 10000 bps get their own plain sentences rather than an odd "0% ... and 100% ...".
+    if (creatorBps === 0) {
+      return `${lede}all of what it earns goes to MaxLong.`;
+    }
+    if (creatorBps === 10_000) {
+      return `${lede}all of what it earns goes to the creator's payout address.`;
+    }
     const creatorPct = bpsToPercent(creatorBps);
     const maxlongPct = bpsToPercent(10_000 - creatorBps);
-    return `${pair.feeTier} of every trade. ${creatorPct}% of it goes to the coin's creator and ${maxlongPct}% to MaxLong.`;
+    return `${lede}${creatorPct}% of what it earns goes to the creator's payout address and ${maxlongPct}% to MaxLong.`;
   }
   if (pair.feeTier === "Dynamic") {
     return "The pool's hook sets the fee on each trade, so it can differ from one trade to the next.";
@@ -166,12 +188,17 @@ function safeJsonLd(data: unknown): string {
  */
 export default function TokenFacts({ pair, address, launchedTx }: Props) {
   if (!pair) {
-    // A page opened from a fresh launch has no pair yet either, but that is not "unknown"; see
-    // the `launchedTx` prop doc above. Keep today's wording for every other case unchanged.
-    if (launchedTx) return null;
+    // Fix round 1 finding 8: the page always has exactly one <h1>, even with no pair. A page
+    // opened from a fresh launch has no pair yet either, but that is not "unknown"; see the
+    // `launchedTx` prop doc above. TokenView (above this section) has no heading of its own while
+    // it waits, so this one is server-rendered but visually hidden, naming the same state its tab
+    // title (`generateMetadata`, page.tsx) already does, rather than repeating TokenView's own
+    // visible copy a second time.
+    if (launchedTx) return <h1 className="sr-only">Indexing your token</h1>;
+    // Keep today's wording for every other case unchanged; it is now the page's <h1>.
     return (
       <section className="border-t border-hairline px-4 py-16 text-center tablet:px-5">
-        <div className="text-[16px]">No token at {short(address)}.</div>
+        <h1 className="text-[16px]">No token at {short(address)}.</h1>
         <div className="mt-[6px] text-[12.5px] text-ink-50">
           It may not be indexed yet, or the address is wrong.
         </div>

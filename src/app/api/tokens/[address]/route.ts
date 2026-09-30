@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { ttlCache } from "@/lib/envio/cache";
-import { getBackend } from "@/lib/market/backend";
 import { withVoteCounts } from "../../_lib/counts";
+import { lookupPair } from "../../_lib/pairLookup";
 import { badRequest, cached, failure, isAddress } from "../../_lib/respond";
 
 export const dynamic = "force-dynamic";
@@ -11,13 +10,14 @@ const TTL = 30;
 export async function GET(_req: Request, ctx: { params: Promise<{ address: string }> }) {
   const { address } = await ctx.params;
   const id = address.toLowerCase();
+  // Fix round 1, finding 9: kept here (not folded into `lookupPair` alone) so a malformed
+  // address still answers the more specific 400 "bad address" rather than a 404, exactly as
+  // before; `lookupPair`'s own check is what protects the token page, which had none of its own.
   if (!isAddress(id)) return badRequest("bad address");
   try {
-    const pair = await ttlCache(`pair:${id}`, TTL * 1000, () => getBackend().pair(id), {
-      // Amended 30 Sep 2026 (should fix 9): a launch can land in the store seconds after this
-      // answers 404, so "not found" must not sit in the 30 s memo the way a real pair does.
-      skipCache: (v) => v === null,
-    });
+    // Fix round 1, finding 3: `lookupPair` is now the one place that decides the key, the ttl
+    // and the "never cache a miss" rule, shared with the token page and the quote route.
+    const pair = await lookupPair(id);
     if (!pair) {
       // A short CDN hold only, not the list's 30 s: this is the one answer that can flip from
       // true to false within seconds of a creator's own launch, and a stale 404 here reads as

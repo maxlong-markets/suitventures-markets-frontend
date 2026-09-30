@@ -50,21 +50,21 @@ describe("TokenView", () => {
     h.pair = PAIR_A;
     h.isPending = false;
     h.seenSelected.mockClear();
-    const { rerender } = render(<TokenView address={PAIR_A.id} />);
+    const { rerender } = render(<TokenView address={PAIR_A.id} serverHadPair={true} />);
     expect(h.seenSelected).toHaveBeenLastCalledWith(null);
 
     fireEvent.click(screen.getByRole("button", { name: "pick-1h" }));
     expect(h.seenSelected).toHaveBeenLastCalledWith("1h");
 
     // Re-rendering with the very same token must not disturb the explicit pick just made.
-    rerender(<TokenView address={PAIR_A.id} />);
+    rerender(<TokenView address={PAIR_A.id} serverHadPair={true} />);
     expect(h.seenSelected).toHaveBeenLastCalledWith("1h");
 
     // A client-side navigation to a different token can reuse this component instance (Next does
     // not remount just because the dynamic segment changed) — the address prop changes, but so
     // does the resolved pair, and that must reset the pick rather than carry it to the new token.
     h.pair = PAIR_B;
-    rerender(<TokenView address={PAIR_B.id} />);
+    rerender(<TokenView address={PAIR_B.id} serverHadPair={true} />);
     expect(h.seenSelected).toHaveBeenLastCalledWith(null);
   });
 });
@@ -77,16 +77,17 @@ describe("TokenView and the instant launchpad (spec 7.3)", () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  // B1b, amended 30 Sep 2026: the timeout no longer reuses "No token at ..." (that reads as a
-  // bad address, not a late indexer) and now offers Retry. On the old code this test's
-  // post-timeout assertion (`getByText(/No token at/)`) is exactly what should fix 9's B1b
-  // deliberately removes from this branch, so it fails there; Retry and its call to `retryWait`
-  // do not exist on the old code at all.
-  it("waits for a just-launched token, then offers Retry with the honest reason after five minutes, link kept", () => {
+  // B1b, amended 30 Sep 2026, extended per fix round 1 finding 6: the timeout no longer reuses
+  // "No token at ..." (that reads as a bad address, not a late indexer) and now offers Retry, and
+  // Retry must actually restart the five-minute countdown, not just swap the copy back once.
+  // Advancing 299_999 ms then 1 ms more proves the timer itself was rescheduled; the old version
+  // of this test only checked the copy right after the click, which would still have passed even
+  // if `waitAttempt` were dropped from the effect's dependency array and the timer never re-armed.
+  it("waits for a just-launched token, then offers Retry with the honest reason after five minutes, link kept, and Retry actually restarts the countdown", () => {
     vi.useFakeTimers();
     h.pair = undefined;
     h.isPending = false;
-    render(<TokenView address={PAIR_A.id} launchedTx={TX} />);
+    render(<TokenView address={PAIR_A.id} launchedTx={TX} serverHadPair={false} />);
     expect(screen.getByText("Your token is live on chain. Its page fills in within about two minutes.")).toBeTruthy();
     expect(screen.getByRole("link", { name: /View the launch transaction/ }).getAttribute("href")).toBe(txUrl(TX));
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
@@ -103,12 +104,42 @@ describe("TokenView and the instant launchpad (spec 7.3)", () => {
     // Retry restarts the same countdown: the waiting copy is back, and the timed-out one is gone.
     expect(screen.getByText("Your token is live on chain. Its page fills in within about two minutes.")).toBeTruthy();
     expect(screen.queryByText("Your token is on chain, but the site's data is running late.")).toBeNull();
+
+    // Fix round 1 finding 6: the countdown must actually be running again, not just the copy.
+    act(() => {
+      vi.advanceTimersByTime(299_999);
+    });
+    expect(screen.getByText("Your token is live on chain. Its page fills in within about two minutes.")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("Your token is on chain, but the site's data is running late.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
-  it("keeps today's text, with no link and no Retry, without a launch", () => {
+  // Fix round 1 finding 1: a plain unknown address, when the server's own read also found
+  // nothing, gets its "No token at ..." message from TokenFacts (the server-rendered block below
+  // this one), not repeated here. On the old code (no `serverHadPair` prop at all, so this case
+  // could not even be expressed) TokenView always printed its own copy, which is exactly the
+  // duplicate a holder or a gate-off visitor saw.
+  it("suppresses its own message when there is no launch and the server also had no pair", () => {
     h.pair = undefined;
     h.isPending = false;
-    render(<TokenView address={PAIR_A.id} />);
+    const { container } = render(<TokenView address={PAIR_A.id} serverHadPair={false} />);
+    expect(screen.queryByText(/No token at/)).toBeNull();
+    expect(screen.queryByRole("link", { name: /View the launch transaction/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // Only the back link: nothing else of its own, leaving the one message to TokenFacts.
+    expect(container.textContent).toBe("← Markets");
+  });
+
+  // The other half of finding 1: when the server DID have the pair but this component's own,
+  // independent client-side read still does not, that is a genuinely different fact from
+  // whatever TokenFacts is showing (which found the pair), so it is still worth saying here.
+  it("still shows its own message when the server had the pair but this client's own read does not", () => {
+    h.pair = undefined;
+    h.isPending = false;
+    render(<TokenView address={PAIR_A.id} serverHadPair={true} />);
     expect(screen.getByText(/No token at/)).toBeTruthy();
     expect(screen.queryByRole("link", { name: /View the launch transaction/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
@@ -119,11 +150,11 @@ describe("TokenView and the instant launchpad (spec 7.3)", () => {
   it("refreshes the server-rendered parts exactly once, when the wait finds the token", () => {
     h.pair = undefined;
     h.isPending = false;
-    const { rerender } = render(<TokenView address={PAIR_A.id} launchedTx={TX} />);
+    const { rerender } = render(<TokenView address={PAIR_A.id} launchedTx={TX} serverHadPair={false} />);
     expect(h.refresh).not.toHaveBeenCalled();
 
     h.pair = { ...PAIR_A, launch: null } as TokenPair;
-    rerender(<TokenView address={PAIR_A.id} launchedTx={TX} />);
+    rerender(<TokenView address={PAIR_A.id} launchedTx={TX} serverHadPair={false} />);
     expect(h.refresh).toHaveBeenCalledTimes(1);
 
     // A later re-render with a *new* object for the same token (react-query hands back a fresh
@@ -131,26 +162,39 @@ describe("TokenView and the instant launchpad (spec 7.3)", () => {
     // the same `pair.id`, and must not refresh a second time: this is what the ref guard is for,
     // not React's own effect-dependency skip, since the object reference here does change.
     h.pair = { ...PAIR_A, launch: null } as TokenPair;
-    rerender(<TokenView address={PAIR_A.id} launchedTx={TX} />);
+    rerender(<TokenView address={PAIR_A.id} launchedTx={TX} serverHadPair={false} />);
     expect(h.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  // Fix round 1 finding 5: a shared or reloaded `?launched=` link whose server render already
+  // found the token needs no refresh (TokenFacts and the tab title are already right); firing one
+  // anyway is one needless server render on every such view. On the old code (no `serverHadPair`
+  // guard) this would have refreshed once, same as the case above.
+  it("does not refresh when the server already had the pair, even as the client catches up", () => {
+    h.pair = undefined;
+    h.isPending = false;
+    const { rerender } = render(<TokenView address={PAIR_A.id} launchedTx={TX} serverHadPair={true} />);
+    h.pair = { ...PAIR_A, launch: null } as TokenPair;
+    rerender(<TokenView address={PAIR_A.id} launchedTx={TX} serverHadPair={true} />);
+    expect(h.refresh).not.toHaveBeenCalled();
   });
 
   it("never refreshes when there is no launch in play", () => {
     h.pair = undefined;
     h.isPending = false;
-    const { rerender } = render(<TokenView address={PAIR_A.id} />);
+    const { rerender } = render(<TokenView address={PAIR_A.id} serverHadPair={false} />);
     h.pair = { ...PAIR_A, launch: null } as TokenPair;
-    rerender(<TokenView address={PAIR_A.id} />);
+    rerender(<TokenView address={PAIR_A.id} serverHadPair={false} />);
     expect(h.refresh).not.toHaveBeenCalled();
   });
 
   it("shows the fee panel for a token launched here, and nothing for any other", () => {
     h.isPending = false;
     h.pair = { ...PAIR_A, launch: { creator: "0xc1" } as unknown as LaunchInfo } as TokenPair;
-    const { rerender } = render(<TokenView address={PAIR_A.id} />);
+    const { rerender } = render(<TokenView address={PAIR_A.id} serverHadPair={true} />);
     expect(screen.getByText("the fee panel")).toBeTruthy();
     h.pair = { ...PAIR_A, launch: null } as TokenPair;
-    rerender(<TokenView address={PAIR_A.id} />);
+    rerender(<TokenView address={PAIR_A.id} serverHadPair={true} />);
     expect(screen.queryByText("the fee panel")).toBeNull();
   });
 });
