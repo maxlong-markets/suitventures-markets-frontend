@@ -98,14 +98,19 @@ export default async function TokenPage({ params, searchParams }: Props) {
 
   return (
     <>
-      {/* Public, server-rendered, outside any gate — this is the HTML a crawler or an AI search
-          engine sees regardless of wallet or Suits ownership (2026-09-28 SEO spec). */}
-      <TokenFacts pair={pair} address={id} />
       {/* The interactive app stays behind the gate; GatedSection renders a compact lock card in
-          its place when the gate is on and the viewer holds no Suit. */}
+          its place when the gate is on and the viewer holds no Suit. It comes first now (amended
+          30 Sep 2026): it is what a visitor came for, and the facts block below used to push it
+          off a phone screen entirely. */}
       <GatedSection>
         <TokenView address={id} launchedTx={launchedTx} />
       </GatedSection>
+      {/* Public, server-rendered, outside any gate — this is the HTML a crawler or an AI search
+          engine sees regardless of wallet or Suits ownership (2026-09-28 SEO spec). Its rows now
+          live inside an expandable "Token details" disclosure; `launchedTx` lets it stay silent
+          while TokenView above is the one showing the post-launch wait, instead of both showing
+          their own, contradictory idea of what a pair-less page means. */}
+      <TokenFacts pair={pair} address={id} launchedTx={launchedTx} />
     </>
   );
 }

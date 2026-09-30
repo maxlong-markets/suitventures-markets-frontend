@@ -284,3 +284,37 @@ Recorded so this document matches the code rather than the plan.
 spec mandated this shape so a local checkout cannot lock out its own developer, but it means the
 address is required config for any environment meant to be gated. A build-time assertion is the
 obvious hardening if Kobe wants it.
+
+## 9. Amendment, 30 Sep 2026: TokenFacts moves below the app, and becomes a disclosure
+
+The `/t/[address]` exemption in section 4.2 gave `TokenFacts` a public, server-rendered facts
+layer, but it rendered first on the page, above `GatedSection`. On a phone its fifteen rows filled
+the whole screen before a visitor reached the chart or the price, which is what the app is for.
+Kobe asked for it moved down and made optional to read.
+
+**Placement.** `src/app/t/[address]/page.tsx` now renders `<GatedSection>` first and `<TokenFacts>`
+second. `TokenFacts` took a `launchedTx` prop to match: a page opened from `/launch`'s redirect has
+no pair yet either, and `TokenView` (now above it, inside `GatedSection`) already shows the one
+true message for that wait, a countdown then its own "No token" copy after five minutes.
+`TokenFacts` stays silent whenever `launchedTx` is present, rather than adding a second,
+contradictory "No token" block under a "hang on, it's coming" one. The plain unknown-token
+wording, for a page with no pair and no launch in play, is unchanged.
+
+**Disclosure.** The fifteen rows now sit inside a native `<details>`, opened by a `<summary>`
+reading "Token details" plus the ticker and name. A new small Client Component,
+`src/components/TokenFactsDetails.tsx`, owns the open/closed state: closed by default for a
+viewer the gate admits (a holder, or anyone once the gate is off), since the app above already
+shows the same numbers, and open by default for everyone else, so the public page still carries
+its facts without a click. The rows themselves stay `children` handed down from the Server
+Component, so they remain real text in the SSR HTML and the disclosure works with no JavaScript
+at all: a closed `<details>`'s content stays in the HTML, just visually collapsed, and a crawler
+or a no-JS browser still gets the server's own default. `open` is derived during render from
+`gateEnabled()` and `useSuitsAccess()`, never written with a state setter inside an effect and
+never poked at the DOM by hand, so the client's first render matches the server's exactly and a
+viewer's own manual toggle is never snapped back by an unrelated re-render.
+
+**Colour and the fee tier.** The 1h and 24h change rows now use the same up/down/neutral colour
+classes as the pairs table and the token header (`toneClassOrFlat`). The Pool fee tier row keeps
+its value and gains one sentence under it: a token launched here states the split from its own
+`creatorShareBps`, a dynamic fee explains that the pool's hook decides it per trade, and any other
+fixed tier states the percentage without naming who receives it, since that differs by launchpad.
