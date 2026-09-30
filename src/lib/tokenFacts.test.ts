@@ -41,11 +41,9 @@ describe("buildFactRows", () => {
 });
 
 describe("feeTierNote", () => {
-  it("names the split only for a token launched here shown through its own launch pool", () => {
+  it("says what the pool charges and nothing about who receives it, for a token launched here as for any other", () => {
     const launch = { creatorShareBps: 7000 } as unknown as LaunchInfo;
-    expect(feeTierNote({ ...PAIR, origin: "SV", feeTier: "1.00%", launch } as TokenPair)).toBe(
-      "1.00% of every trade. The launch's locked liquidity earns this fee, and 70% of what it earns goes to the creator's payout address and 30% to MaxLong.",
-    );
+    expect(feeTierNote({ ...PAIR, origin: "SV", feeTier: "1.00%", launch } as TokenPair)).toBe("The pool charges 1.00% on every trade.");
     expect(feeTierNote({ ...PAIR, origin: "Uniswap", feeTier: "0.30%", launch } as TokenPair)).toBe("The pool charges 0.30% on every trade.");
     expect(feeTierNote({ ...PAIR, feeTier: "Dynamic" } as TokenPair)).toBe(
       "The pool's hook sets the fee on each trade, so it can differ from one trade to the next.",

@@ -3,6 +3,8 @@ import type { Address, TokenPair } from "@/lib/types";
 
 export type PairRow = {
   id: string; symbol: string; name: string; address: string; decimals: number; total_supply: string; holders_count: number;
+  /** market.tokens.created_at: when the token first appeared in a pool. The age shown is measured from this. */
+  token_created_at: number;
   pool_id: string; quote_id: string; pool_origin: string; hooks: string; fee: number; pool_created_at: number;
   price_quote: number; tvl_token: string | null; tvl_quote: string | null; routable: boolean | null;
   quote_symbol: string; quote_decimals: number; usd_price: number | null; usd_updated_at: number | null; aggregator: string | null;
@@ -12,6 +14,7 @@ export type PairRow = {
 
 const PAIR_COLUMNS = `
 select t.id, t.symbol, t.name, t.address, t.decimals, t.total_supply::text as total_supply, t.holders_count,
+  t.created_at as token_created_at,
   p.id as pool_id, p.quote_id, p.origin as pool_origin, p.hooks, p.fee, p.created_at as pool_created_at,
   p.price_quote, p.tvl_token::text as tvl_token, p.tvl_quote::text as tvl_quote, p.routable,
   q.symbol as quote_symbol, q.decimals as quote_decimals, q.usd_price, q.usd_updated_at, q.aggregator`;
@@ -86,7 +89,10 @@ export function pairFromRow(row: PairRow, stats: WindowStats | undefined, nowSec
     liquidity,
     stale: q === null,
     holders: row.holders_count,
-    createdAt: row.pool_created_at * 1000,
+    // The token's own age, not the age of the pool it trades through today: a token whose liquidity moved to a
+    // newer pool is as old as its first pool (PONS, first seen 13 Jul 2026, read "22d" from a pool made on 8 Sep).
+    // The earlier of the two, so a token row that was somehow written late can never read younger than its pool.
+    createdAt: Math.min(row.token_created_at, row.pool_created_at) * 1000,
     bull: 0,
     bear: 0,
     poolId: row.pool_id as `0x${string}`,

@@ -215,7 +215,7 @@ describe("ActivityTabs: the launch rows (spec 7.3)", () => {
   const launched: TokenPair = { ...pair, ticker: "CHALK", quote: "USDG", origin: "SV", priceUsd: 0.000005, priceQuote: 0.000005, launch };
   const info = (p: TokenPair) => render(<ActivityTabs pair={p} now={NOW_MS} tab="info" onTabChange={vi.fn()} />);
 
-  it("lists creator, payout, opening valuation in USD, the gross first buy, the launch and the fee share, then the links", () => {
+  it("lists creator, payout, opening valuation in USD, the gross first buy and the launch, then the links, with no fee split", () => {
     info(launched);
     expect(screen.getByRole("link", { name: short(CREATOR) }).getAttribute("href")).toBe(addressUrl(CREATOR));
     expect(screen.getByRole("link", { name: short(PAYOUT) }).getAttribute("href")).toBe(addressUrl(PAYOUT));
@@ -223,17 +223,19 @@ describe("ActivityTabs: the launch rows (spec 7.3)", () => {
     expect(screen.getByText(`${fmtAmt(100)} USDG · ${fmtAmt(19_000_000)} CHALK`)).toBeTruthy(); // 99.5 net plus the 0.5 router fee
     const at = LAUNCHED_AT * 1000;
     expect(screen.getByRole("link", { name: `${fmtISODate(at)} · ${fmtAge(ageHours(at, NOW_MS))} ago` }).getAttribute("href")).toBe(txUrl(LAUNCH_TX));
-    expect(screen.getByText("Pool fee share")).toBeTruthy();
+    // The owner's ruling of 30 Sep 2026: the split between the creator and MaxLong is not shown anywhere.
+    expect(screen.queryByText("Pool fee share")).toBeNull();
     expect(screen.queryByText("Fee share")).toBeNull();
-    expect(screen.getByText("70 % payout · 30 % MaxLong")).toBeTruthy();
+    expect(screen.queryByText(/MaxLong/)).toBeNull();
     expect(screen.getByRole("link", { name: "https://chalk.test" }).getAttribute("href")).toBe("https://chalk.test");
     expect(screen.getByRole("link", { name: "https://x.com/chalk" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "https://t.me/chalks" })).toBeTruthy();
   });
 
-  it("reads the fee share from the launch, never a fixed 70 / 30, and says None without a first buy", () => {
+  it("says None without a first buy, and shows no split whatever the launch's fee share is", () => {
     info({ ...launched, launch: { ...launch, creatorShareBps: 6500, firstBuyIn: "0", firstBuyTokens: "0", routerFee: "0" } });
-    expect(screen.getByText("65 % payout · 35 % MaxLong")).toBeTruthy();
+    expect(screen.queryByText(/% payout/)).toBeNull();
+    expect(screen.queryByText(/MaxLong/)).toBeNull();
     expect(screen.getByText("None")).toBeTruthy();
   });
 

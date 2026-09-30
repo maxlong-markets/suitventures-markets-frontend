@@ -140,7 +140,8 @@ export function shapePairs(
       liquidity,
       stale: q === null,
       holders: t.holdersCount,
-      createdAt: p.createdAt * 1000,
+      // The token's own age, as dbShape.pairFromRow: these two must stay in step.
+      createdAt: Math.min(t.createdAt, p.createdAt) * 1000,
       bull: 0,
       bear: 0,
       poolId: p.id as `0x${string}`,

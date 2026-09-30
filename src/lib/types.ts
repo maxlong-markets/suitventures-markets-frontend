@@ -125,7 +125,7 @@ export interface TokenPair {
    */
   stale?: boolean;
   holders: number;
-  /** unix ms → age */
+  /** unix ms → age. When the token first appeared in a pool, not when the pool it trades through today was created. */
   createdAt: number;
   bull: number;
   bear: number;

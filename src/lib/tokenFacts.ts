@@ -20,41 +20,13 @@ export interface FactRows {
   more: FactRow[];
 }
 
-/** bps to a percent string with no more decimals than the value needs: 7000 -> "70", 6543 -> "65.43". */
-function bpsToPercent(bps: number): string {
-  return (bps / 100).toFixed(2).replace(/\.?0+$/, "");
-}
-
 /**
  * One plain sentence under the fee tier value, since "0.30%" or "Dynamic" means nothing to a reader who has never met
- * a Uniswap v4 pool. Three cases, checked in this order:
- *  - launched here, on its own launch pool (`pair.launch` present AND `pair.origin === "SV"`): every launchpad pool
- *    is origin SV with a static 1% fee, and a token has exactly one launch pool, so this is the one case where
- *    `pair.launch` being present proves the pool on screen IS that pool. A token launched here can later be listed
- *    through a traded pool of another origin while still carrying its `launch` block; checking `pair.launch` alone
- *    would then claim a creator and MaxLong split for fees that other pool's liquidity keeps. The pool itself is
- *    open, so anyone can add liquidity to it; the sentence says no more than that the launch's own locked liquidity
- *    earns its share of the fee, and that of what it earns `creatorShareBps` is the split to the creator's payout
- *    address versus MaxLong, read from the launch rather than assumed to be the usual 70/30.
- *  - a dynamic fee (`feeTier === "Dynamic"`): the pool's hook decides the number per trade, so there is no fixed
- *    percentage to name.
- *  - anything else: a plain fixed tier. Who receives it is not said, since that differs by launchpad.
+ * a Uniswap v4 pool. A fixed tier says what the pool charges, and that is all: who receives it is not said, for a
+ * token launched here as for any other (the owner's ruling of 30 Sep 2026: "just show 1% and its good enough"). A
+ * dynamic fee has no fixed percentage to name, because the pool's hook decides it on each trade.
  */
 export function feeTierNote(pair: TokenPair): string {
-  if (pair.launch && pair.origin === "SV") {
-    const creatorBps = pair.launch.creatorShareBps;
-    const lede = `${pair.feeTier} of every trade. The launch's locked liquidity earns this fee, and `;
-    // 0 and 10000 bps get their own plain sentences rather than an odd "0% ... and 100% ...".
-    if (creatorBps === 0) {
-      return `${lede}all of what it earns goes to MaxLong.`;
-    }
-    if (creatorBps === 10_000) {
-      return `${lede}all of what it earns goes to the creator's payout address.`;
-    }
-    const creatorPct = bpsToPercent(creatorBps);
-    const maxlongPct = bpsToPercent(10_000 - creatorBps);
-    return `${lede}${creatorPct}% of what it earns goes to the creator's payout address and ${maxlongPct}% to MaxLong.`;
-  }
   if (pair.feeTier === "Dynamic") {
     return "The pool's hook sets the fee on each trade, so it can differ from one trade to the next.";
   }

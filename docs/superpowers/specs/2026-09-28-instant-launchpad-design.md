@@ -1247,6 +1247,11 @@ creator whose fees go to another address is told which one. The "Just collected"
 transaction paid the payout address. Change payout is no longer offered on the site; the contract's `setPayout` is
 untouched. Collect fees and the owed-amount claim stay as described.
 
+Also amended 30 Sep 2026, the owner's ruling: the split between the creator and MaxLong is not shown anywhere on the
+site. The launch form, the launch page, the Info tab and the token details name the 1 % pool fee alone. The token's
+age, in the table and in its details, is measured from the token's first appearance in a pool (`tokens.created_at`),
+not from the creation of the pool it trades through today.
+
 ### 7.4 Markets table
 
 `ORIGIN_OPTIONS` in `src/lib/markets.ts:36-45` gains `{ key: "SV", label: "SV" }`; `filterPairs` already compares

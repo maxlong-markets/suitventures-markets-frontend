@@ -193,64 +193,17 @@ describe("TokenFacts: 1h/24h change colour (amended 30 Sep 2026)", () => {
 // takes the tier on every trade, that the launch's locked liquidity earns that fee, and only then
 // splits what it earns between the creator's payout address and MaxLong.
 describe("TokenFacts: the pool fee tier sentence", () => {
-  it("explains a launched-here pool as a split, computed from creatorShareBps", () => {
+  it("says only what the pool charges for a token launched here, with no split", () => {
     const pair: TokenPair = {
       ...BASE_PAIR,
       origin: "SV",
       feeTier: "1.00%",
       launch: { creatorShareBps: 7000 } as unknown as LaunchInfo,
     };
-    render(<TokenFacts pair={pair} address={ADDRESS} />);
-    expect(
-      screen.getByText(
-        "1.00% of every trade. The launch's locked liquidity earns this fee, and 70% of what it earns goes to the creator's payout address and 30% to MaxLong.",
-      ),
-    ).toBeTruthy();
-  });
-
-  it("computes the split for a creator share other than 70%", () => {
-    const pair: TokenPair = {
-      ...BASE_PAIR,
-      origin: "SV",
-      feeTier: "0.50%",
-      launch: { creatorShareBps: 6543 } as unknown as LaunchInfo,
-    };
-    render(<TokenFacts pair={pair} address={ADDRESS} />);
-    expect(
-      screen.getByText(
-        "0.50% of every trade. The launch's locked liquidity earns this fee, and 65.43% of what it earns goes to the creator's payout address and 34.57% to MaxLong.",
-      ),
-    ).toBeTruthy();
-  });
-
-  it("reads as a plain sentence when the creator's share is 0%", () => {
-    const pair: TokenPair = {
-      ...BASE_PAIR,
-      origin: "SV",
-      feeTier: "1.00%",
-      launch: { creatorShareBps: 0 } as unknown as LaunchInfo,
-    };
-    render(<TokenFacts pair={pair} address={ADDRESS} />);
-    expect(
-      screen.getByText(
-        "1.00% of every trade. The launch's locked liquidity earns this fee, and all of what it earns goes to MaxLong.",
-      ),
-    ).toBeTruthy();
-  });
-
-  it("reads as a plain sentence when the creator's share is 100%", () => {
-    const pair: TokenPair = {
-      ...BASE_PAIR,
-      origin: "SV",
-      feeTier: "1.00%",
-      launch: { creatorShareBps: 10_000 } as unknown as LaunchInfo,
-    };
-    render(<TokenFacts pair={pair} address={ADDRESS} />);
-    expect(
-      screen.getByText(
-        "1.00% of every trade. The launch's locked liquidity earns this fee, and all of what it earns goes to the creator's payout address.",
-      ),
-    ).toBeTruthy();
+    const { container } = render(<TokenFacts pair={pair} address={ADDRESS} />);
+    expect(screen.getByText("The pool charges 1.00% on every trade.")).toBeTruthy();
+    // The owner's ruling of 30 Sep 2026: no 70/30 anywhere on screen.
+    expect(container.textContent).not.toMatch(/MaxLong|70%|30%|payout address/);
   });
 
   // Fix round 1 finding 2: a token launched here can later be listed through a different, traded

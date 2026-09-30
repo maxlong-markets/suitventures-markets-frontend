@@ -12,13 +12,13 @@ export const metadata: Metadata = { title: "Launch" };
  * UX review, should fix 1: the model in three plain lines, before anyone pays, claiming no more than the contract does (fix
  * round 1, ruling 2). The launchpad places the whole supply in the pool as liquidity and never removes it, though the tokens
  * leave the pool as people buy; the launch sends the creator nothing but the first buy; other people can add liquidity to
- * the same pool, so the launch's earns only its part of the fee, which `collectFees` pays out. The no-break space keeps a
- * number with its percent sign (ruling 10).
+ * the same pool. The fee line names the pool fee alone, with no split (the owner's ruling of 30 Sep 2026). The no-break
+ * space keeps a number with its percent sign (ruling 10).
  */
 const MODEL = [
   `A fixed supply of ${fmtInt(Number(SUPPLY / 10n ** BigInt(TOKEN_DECIMALS)))} tokens goes into a Uniswap v4 pool as liquidity that nobody can withdraw.`,
   "Launching gives you no tokens. To start with some, make a first buy in the same transaction.",
-  `Every trade pays a ${POOL_FEE_PCT}\u{A0}% pool fee. The part earned by the launch's locked liquidity is paid out when anyone presses Collect on the token's page.`,
+  `Every trade pays a ${POOL_FEE_PCT}\u{A0}% pool fee. You collect your fees on the token's page.`,
 ];
 
 /** Spec 7.2: while NEXT_PUBLIC_LAUNCHPAD_ADDRESS is unset the page shows only this card, in TradePanel's card recipe. */

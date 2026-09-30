@@ -433,7 +433,6 @@ export default function LaunchForm() {
   const nameBytes = utf8Bytes(nameOnChain);
   const symbolBytes = utf8Bytes(symbolOnChain);
   const descriptionChars = [...description].length;
-  const shareBps = settings.creatorShareBps;
   /** A field's accessible wiring to its own message: invalid while the message shows, described by it. */
   const described = (field: LaunchFieldName) => {
     const note = noteFor(field);
@@ -514,13 +513,9 @@ export default function LaunchForm() {
     capLine = `Up to ${pct(capBps / 100)} of the supply${cost}.`;
   }
 
-  // UX review 2, worded in fix round 1 (ruling 2) to claim no more than the contract does: the pool takes 1 % of every
-  // trade, but other people can add liquidity to the same pool, and the launch's locked liquidity earns only its share of
-  // that fee, so the payout's cut is "up to" the share of 1 %. Both numbers come from the live share and the pool fee.
-  const feeLine =
-    shareBps !== undefined
-      ? `Your payout address gets ${pct(shareBps / 100)} of the pool fee that the launch's locked liquidity earns, up to ${pct((shareBps * POOL_FEE_PCT) / 10_000)} of every trade. It is paid in ${symbolOnChain || "your token"} and ${asset?.symbol ?? "the currency"} when anyone presses Collect on the token's page.`
-      : null;
+  // The owner's ruling of 30 Sep 2026: the pool fee is one number here, with no split. The no-break space keeps the
+  // number with its percent sign.
+  const feeLine = `Every trade of ${symbolOnChain || "your token"} pays a ${pct(POOL_FEE_PCT)} pool fee. Collect your fees on the token's page.`;
 
   // UX review 3: where the fees go, always echoed back; the payout can only be changed later by the payout address itself.
   const payoutIsWallet = payoutAddress !== undefined && address !== undefined && payoutAddress.toLowerCase() === address.toLowerCase();

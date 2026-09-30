@@ -7,6 +7,7 @@ const NOW = 1_800_000_000;
 const row: PairRow = {
   id: "0xa", symbol: "AAA", name: "AAA token", address: "0xa", decimals: 18,
   total_supply: "1000000000000000000000000000", holders_count: 10,
+  token_created_at: NOW - 1000,
   pool_id: "0xpool", quote_id: "0xquote", pool_origin: "LONG",
   hooks: "0x4E3468951D49F2EEA976ED0D6E75FFCB44A9A544", fee: 3000, pool_created_at: NOW - 1000,
   price_quote: 0.5, tvl_token: "1000000000000000000000", tvl_quote: "1000000000000000000000",
@@ -52,5 +53,19 @@ describe("pairFromRow hookAddress", () => {
   it("is the zero address for a pool with no hook", () => {
     const zero = "0x0000000000000000000000000000000000000000";
     expect(pairFromRow({ ...row, hooks: zero }, undefined, NOW).hookAddress).toBe(zero);
+  });
+});
+
+describe("pairFromRow createdAt (the age)", () => {
+  const DAY = 86_400;
+  // PONS on 30 Sep 2026: first seen on 13 Jul, trading through a pool made on 8 Sep, and the page said "22d".
+  it("measures the age from the token's creation, not from the newer pool it trades through", () => {
+    const pair = pairFromRow({ ...row, token_created_at: NOW - 79 * DAY, pool_created_at: NOW - 22 * DAY }, undefined, NOW);
+    expect(pair.createdAt).toBe((NOW - 79 * DAY) * 1000);
+  });
+
+  it("never reads younger than its pool, should the token row have been written late", () => {
+    const pair = pairFromRow({ ...row, token_created_at: NOW - 3 * DAY, pool_created_at: NOW - 9 * DAY }, undefined, NOW);
+    expect(pair.createdAt).toBe((NOW - 9 * DAY) * 1000);
   });
 });

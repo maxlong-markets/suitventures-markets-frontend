@@ -182,8 +182,8 @@ interface InfoRow {
 }
 
 /**
- * The instant launchpad's facts (spec 7.3), appended to the Info tab for a token launched here. The fee share is the
- * launch's own `creatorShareBps`, never a fixed 70 / 30; a hidden launch arrives with its links blanked, so none show.
+ * The instant launchpad's facts (spec 7.3), appended to the Info tab for a token launched here. The fee split is not
+ * shown (the owner's ruling of 30 Sep 2026); a hidden launch arrives with its links blanked, so none show.
  */
 function launchRows(pair: TokenPair, now: number, quoteUsd: number | null): InfoRow[] {
   const launch = pair.launch;
@@ -193,14 +193,12 @@ function launchRows(pair: TokenPair, now: number, quoteUsd: number | null): Info
   const gross = quote((BigInt(launch.firstBuyIn) + BigInt(launch.routerFee)).toString());
   const tokens = Number(toHuman(BigInt(launch.firstBuyTokens), 18));
   const at = launch.launchedAt * 1000;
-  const payoutPct = launch.creatorShareBps / 100;
   const rows: InfoRow[] = [
     { label: "Creator", value: short(launch.creator), href: addressUrl(launch.creator) },
     { label: "Payout", value: short(launch.payout), href: addressUrl(launch.payout) },
     { label: "Opening valuation", value: quoteUsd !== null ? fmtUsd(valuation * quoteUsd) : `${fmtAmt(valuation)} ${pair.quote}` },
     { label: "First buy", value: launch.firstBuyIn === "0" ? "None" : `${fmtAmt(gross)} ${pair.quote} · ${fmtAmt(tokens)} ${pair.ticker}` },
     { label: "Launched", value: `${fmtISODate(at)} · ${fmtAge(ageHours(at, now))} ago`, href: txUrl(launch.launchTx) },
-    { label: "Pool fee share", value: `${payoutPct} % payout · ${100 - payoutPct} % MaxLong` },
   ];
   if (launch.website) rows.push({ label: "Website", value: launch.website, href: launch.website });
   if (launch.x) rows.push({ label: "X", value: launch.x, href: launch.x });

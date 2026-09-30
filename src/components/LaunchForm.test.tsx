@@ -143,8 +143,8 @@ const press = async () => {
 /** Seen, not only laid out: fix round 1 (ruling 3) keeps some lines in place with `invisible` so nothing below them moves. */
 const shown = (el: Element) => el.closest(".invisible") === null;
 const ROUNDED = "Rounded down to the pool's nearest price step, at most about 2 % below your pick.";
-const feeLine = (share: string, cut: string, token: string) =>
-  `Your payout address gets ${share} % of the pool fee that the launch's locked liquidity earns, up to ${cut} % of every trade. It is paid in ${token} and USDG when anyone presses Collect on the token's page.`;
+/** The owner's ruling of 30 Sep 2026: the pool fee is one number, with no split. The page joins the number to its sign with a no-break space, which the text query reads as a plain one. */
+const feeLine = (token: string) => `Every trade of ${token} pays a 1 % pool fee. Collect your fees on the token's page.`;
 
 describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => {
   // Was: a disabled Launch with "Connect a wallet to launch." under it. UX review 8 makes the button itself open the
@@ -312,10 +312,11 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
 
   // The fee line read "65 % of trading fees to your payout address"; UX review 2 reworded it around the pool fee, and fix
   // round 1 (ruling 2) says "up to": other people can add liquidity to the pool, and the launch's earns only its share.
-  it("reads the fee share from the contract, never a fixed 70 %, and shows the snapped opening in USD", () => {
+  it("shows the pool fee as one number, whatever the contract's fee share is, and the snapped opening in USD", () => {
     h.settings = { ...h.settings, creatorShareBps: 6500 };
-    render(<LaunchForm />);
-    expect(screen.getByText(feeLine("65", "0.65", "your token"))).toBeTruthy();
+    const { container } = render(<LaunchForm />);
+    expect(screen.getByText(feeLine("your token"))).toBeTruthy();
+    expect(container.textContent).not.toMatch(/of the pool fee|65|MaxLong/);
     expect(["$5,000", "$10,000", "$25,000", "$100,000"].every((label) => screen.getByRole("button", { name: label }))).toBe(true);
     expect(screen.getByText("Opens at $4,995 · $0.000004995 per token")).toBeTruthy();
     expect(screen.getByText("Gas only")).toBeTruthy();
@@ -370,13 +371,14 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
 
   // UX review, should fix 2; worded in fix round 1 (ruling 2) as the share of what the launch's liquidity earns, at most
   // the share of the 1 % pool fee.
-  it("words the creator's cut from the live share and the pool fee, in the token and the currency", () => {
-    const { rerender } = render(<LaunchForm />);
+  it("names the token in the fee line once a symbol is typed, and never the split", () => {
+    const { rerender, container } = render(<LaunchForm />);
     fill();
-    expect(screen.getByText(feeLine("70", "0.7", "CHALK"))).toBeTruthy();
+    expect(screen.getByText(feeLine("CHALK"))).toBeTruthy();
     h.settings = { ...h.settings, creatorShareBps: 7050 };
     rerender(<LaunchForm />);
-    expect(screen.getByText(feeLine("70.5", "0.705", "CHALK"))).toBeTruthy();
+    expect(screen.getByText(feeLine("CHALK"))).toBeTruthy();
+    expect(container.textContent).not.toMatch(/70|of the pool fee|MaxLong/);
   });
 
   // UX review, should fix 3.

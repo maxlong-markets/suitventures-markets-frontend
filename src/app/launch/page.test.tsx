@@ -38,10 +38,10 @@ describe("/launch (instant launchpad design, section 7.2)", () => {
     const lines = [
       "A fixed supply of 1,000,000,000 tokens goes into a Uniswap v4 pool as liquidity that nobody can withdraw.",
       "Launching gives you no tokens. To start with some, make a first buy in the same transaction.",
-      "Every trade pays a 1 % pool fee. The part earned by the launch's locked liquidity is paid out when anyone presses Collect on the token's page.",
+      "Every trade pays a 1 % pool fee. You collect your fees on the token's page.",
     ];
     for (const line of lines) expect(screen.getByText(line)).toBeTruthy();
-    expect(container.textContent).toMatch(/withdraw\..*Collect on the token's page\..*the launch form/);
+    expect(container.textContent).toMatch(/withdraw\..*collect your fees on the token's page\..*the launch form/);
     // Fix round 1, ruling 10: a number never parts from its percent sign at the end of a line.
     expect(container.textContent).toMatch(/1\u{A0}%/u);
     expect(container.textContent).not.toMatch(/\d %/);

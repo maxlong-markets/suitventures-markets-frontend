@@ -169,6 +169,20 @@ describe("createDbBackend reads", () => {
     expect(out[3]).toMatchObject({ stale: true, feeTier: "Dynamic", createdAt: (NOW - 5_000_000) * 1000 });
   });
 
+  it("measures a token's age from the token, not from the newer pool it is listed through, in the list and on its own page", async () => {
+    const tokenCreated = NOW - 7_000_000; // older than its pool, which was made at NOW - 5_000_000
+    await db.query("update market.tokens set created_at = $1 where id = $2", [tokenCreated, A]);
+    try {
+      clearTtlCache();
+      const listed = (await backend().pairs("all")).find((p) => p.id === A)!;
+      expect(listed.createdAt).toBe(tokenCreated * 1000);
+      expect((await backend().pair(A))!.createdAt).toBe(tokenCreated * 1000);
+    } finally {
+      await db.query("update market.tokens set created_at = $1 where id = $2", [NOW - 5_000_000, A]);
+      clearTtlCache();
+    }
+  });
+
   it("pairs('launchpad') keeps LONG and Pons tokens, dropping the rest (this fixture has no SV row; dbBackend.launch.test.ts covers SV in the scope)", async () => {
     expect((await backend().pairs("launchpad")).map((p) => p.id)).toEqual([A, B, E]);
   });
