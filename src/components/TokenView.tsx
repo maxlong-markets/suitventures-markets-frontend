@@ -202,11 +202,9 @@ export default function TokenView({ address, launchedTx, serverHadPair }: Props)
         </div>
         <div className="order-1 w-full flex-none twocol:order-2 twocol:w-[360px]">
           <TradePanel pair={pair} />
-          {pair.launch ? (
-            <div className="mt-6">
-              <LaunchFeesPanel pair={pair} launch={pair.launch} now={dataUpdatedAt} />
-            </div>
-          ) : null}
+          {/* The panel carries its own top margin and renders nothing for anyone but the coin's owner, so no wrapper
+              is left behind as an empty gap. */}
+          {pair.launch ? <LaunchFeesPanel pair={pair} launch={pair.launch} now={dataUpdatedAt} /> : null}
         </div>
       </div>
     </section>

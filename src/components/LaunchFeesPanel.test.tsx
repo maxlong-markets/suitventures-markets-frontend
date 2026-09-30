@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, type Log } from "viem";
-import { LAUNCHPAD_EVENTS_ABI, POOL_MANAGER } from "@/lib/chain/abi";
+import { LAUNCHPAD_EVENTS_ABI } from "@/lib/chain/abi";
 import { LaunchFailedError } from "@/lib/launch";
 import type { Address, LaunchInfo, TokenPair } from "@/lib/types";
 import { act, fireEvent, queryHarness, render, screen, waitFor, within } from "@/test/dom";
@@ -10,29 +10,23 @@ import LaunchFeesPanel from "./LaunchFeesPanel";
 const TOKEN = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a" as Address;
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168" as Address;
 const PAYOUT = "0xc2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2" as Address;
+const CREATOR = "0xb3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3" as Address;
 const STRANGER = "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1" as Address;
-// Its own checksum (getAddress(RESCUE) === RESCUE): the confirm step now shows and sends the checksummed
-// form (Review round 1, finding 6), so a constant that already is one keeps every existing assertion valid.
+// Its own checksum (getAddress(RESCUE) === RESCUE), for the claim address a wallet might paste.
 const RESCUE = "0xE1E1E1e1E1E1e1e1E1E1E1e1e1e1E1E1E1E1e1e1" as Address;
-// Deliberately mixed case in its own checksum, unlike RESCUE's mostly-uppercase one, so the "shown
-// checksummed" test can tell a checksummed display apart from the raw lowercase paste.
-const LOWERCASE_TEST = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" as Address;
 const LAUNCHPAD = "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" as Address;
 const TX = `0x${"11".repeat(32)}` as Hex;
 const E18 = 10n ** 18n;
 // robinhoodChain.id (src/lib/chain.ts); hardcoded here so the mock factory below (hoisted above imports)
 // never has to reach for the real module.
 const CHAIN_ID = 4663;
-// LaunchFeesPanel.tsx's own CONFIRM_GUARD_MS: how long Confirm stays disabled after the step opens.
-const CONFIRM_GUARD_MS = 300;
 
 const h = vi.hoisted(() => ({
-  state: { address: "0xd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1" as string | undefined, isConnected: true, addToast: vi.fn(() => 7), updateToast: vi.fn() },
+  state: { address: "0xc2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2" as string | undefined, isConnected: true, addToast: vi.fn(() => 7), updateToast: vi.fn() },
   fees: {} as Record<string, unknown>,
   refetch: vi.fn(),
   collect: vi.fn(),
   claim: vi.fn(),
-  change: vi.fn(),
   chainId: 4663 as number | undefined,
   isReconnecting: false,
   walletClientData: { id: "wallet" } as { id: string } | undefined,
@@ -46,6 +40,7 @@ vi.mock("@/context/AppState", () => ({ useAppState: () => h.state }));
 vi.mock("@/hooks/useLaunchpad", () => ({ useLaunchFees: () => ({ ...h.fees, refetch: h.refetch }) }));
 vi.mock("wagmi", () => ({
   usePublicClient: () => ({ id: "public", getTransactionReceipt: h.getTransactionReceipt }),
+  // A new object on every render, as TanStack's query result is.
   useWalletClient: () => ({ data: h.walletClientData, refetch: h.walletClientRefetch }),
   useAccount: () => ({ chainId: h.chainId, isReconnecting: h.isReconnecting }),
   useSwitchChain: () => ({ switchChain: h.switchChain }),
@@ -55,7 +50,6 @@ vi.mock("@/lib/launch", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/launch")>()),
   collectLaunchFees: h.collect,
   claimOwed: h.claim,
-  changePayout: h.change,
 }));
 // A getter, like src/lib/launch.test.ts's own mock of this module: vi.mock factories are hoisted above
 // every other top-level statement, so this can only read a value that was itself created through vi.hoisted.
@@ -67,15 +61,14 @@ vi.mock("@/lib/launch/address", () => ({
 
 const pair = { id: TOKEN, ticker: "CHALK", quote: "USDG", address: TOKEN } as TokenPair;
 const launch = {
-  payout: PAYOUT, quoteAddress: USDG, quoteDecimals: 6, creatorShareBps: 7000,
+  creator: CREATOR, payout: PAYOUT, quoteAddress: USDG, quoteDecimals: 6, creatorShareBps: 7000,
   feesCollected: { tokenToPayout: String(770n * E18), tokenToPlatform: String(330n * E18), quoteToPayout: "7000000", quoteToPlatform: "3000000" },
   feesCollectedAt: 1_999_999_000,
 } as unknown as LaunchInfo;
 const NOW_MS = 2_000_000_000_000;
 const ok = () => ({ hash: TX, confirmation: Promise.resolve() });
 
-/** One FeesCollected log, built with viem so the encoding is the real one (mirrors src/lib/launch.test.ts's own
- * launchedLog for the sibling Launched event); `address` defaults to the mocked launchpad. */
+/** One FeesCollected log, built with viem so the encoding is the real one; `address` defaults to the mocked launchpad. */
 const FEES_COLLECTED_NONINDEXED = LAUNCHPAD_EVENTS_ABI[1].inputs.filter((i) => !i.indexed);
 function feesCollectedLog(
   args: { token: Address; payout: Address; tokenFees: bigint; quoteFees: bigint; tokenToPayout: bigint; quoteToPayout: bigint },
@@ -88,8 +81,7 @@ function feesCollectedLog(
     transactionHash: TX, transactionIndex: 0, removed: false,
   };
 }
-/** Matches h.fees.uncollected below: 700/300 CHALK, 7/3 USDG, so tests that don't care about the exact
- * split can reuse the same figures the panel already shows for "Uncollected fees". */
+/** Matches h.fees.uncollected below: 700 CHALK and 7 USDG to the payout address. */
 const DEFAULT_COLLECTED_LOG = feesCollectedLog({ token: TOKEN, payout: PAYOUT, tokenFees: 1000n * E18, quoteFees: 10_000_000n, tokenToPayout: 700n * E18, quoteToPayout: 7_000_000n });
 
 /**
@@ -100,6 +92,7 @@ const DEFAULT_COLLECTED_LOG = feesCollectedLog({ token: TOKEN, payout: PAYOUT, t
 async function flushMicrotasks() {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
+
 function show() {
   const { client, wrapper: QueryWrapper } = queryHarness();
   const utils = render(
@@ -112,10 +105,8 @@ function show() {
     client,
     /**
      * Re-renders the same tree inside the same QueryClientProvider, so a change to one of the `h.*` mocks
-     * (which are not themselves reactive) is picked up on the next render pass. `launch` defaults to the
-     * one this panel was first shown with; a test can pass a fresh object to stand in for what TokenView's
-     * own usePair, subscribed to the same query this panel invalidates, would pass down once the store
-     * catches up. This panel is rendered standalone here, with no such parent to do that on its own.
+     * (which are not themselves reactive) is picked up on the next render pass. A test can pass a fresh
+     * `launch` to stand in for what TokenView's own usePair would pass down once the store catches up.
      */
     rerender: (next: { launch?: LaunchInfo } = {}) =>
       utils.rerender(
@@ -127,7 +118,7 @@ function show() {
 }
 
 beforeEach(() => {
-  h.state.address = STRANGER;
+  h.state.address = PAYOUT;
   h.state.isConnected = true;
   h.state.addToast.mockClear();
   h.state.updateToast.mockClear();
@@ -140,7 +131,6 @@ beforeEach(() => {
   h.refetch.mockReset();
   h.collect.mockReset().mockImplementation(async () => ok());
   h.claim.mockReset().mockImplementation(async () => ok());
-  h.change.mockReset().mockImplementation(async () => ok());
   h.chainId = CHAIN_ID;
   h.isReconnecting = false;
   h.walletClientData = { id: "wallet" };
@@ -151,28 +141,74 @@ beforeEach(() => {
   h.launchpad = LAUNCHPAD;
 });
 
-describe("LaunchFeesPanel (spec 7.3)", () => {
-  it("shows a stranger the uncollected split, what was collected so far, and Collect; no payout change and nothing owed", () => {
+describe("LaunchFeesPanel is for the coin's owner only (30 Sep 2026)", () => {
+  it("shows nothing to a wallet that is neither the payout address nor the creator", () => {
+    h.state.address = STRANGER;
     show();
-    const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
-    expect(uncollected.getByText("700 CHALK · 7 USDG")).toBeTruthy();
-    expect(uncollected.getByText("300 CHALK · 3 USDG")).toBeTruthy();
-    const collected = within(screen.getByRole("region", { name: "Collected so far" }));
-    expect(collected.getByText("770 CHALK · 7 USDG")).toBeTruthy();
-    expect(collected.getByText("330 CHALK · 3 USDG")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Collect fees" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole("button", { name: "Change payout" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "Owed to you" })).toBeNull();
+    expect(screen.queryByText("Pool fees")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("collects for anyone, with the usual toasts, and re-reads the fees after", async () => {
+  it("shows nothing with no wallet connected", () => {
+    h.state.address = undefined;
+    h.state.isConnected = false;
+    show();
+    expect(screen.queryByText("Pool fees")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("shows the payout address its own side only: no MaxLong line and no Change payout", () => {
+    show();
+    expect(screen.getByText("Pool fees")).toBeTruthy();
+    const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
+    expect(uncollected.getByText("To you")).toBeTruthy();
+    expect(uncollected.getByText("700 CHALK · 7 USDG")).toBeTruthy();
+    const collected = within(screen.getByRole("region", { name: "Collected so far" }));
+    expect(collected.getByText("To payout")).toBeTruthy();
+    expect(collected.getByText("770 CHALK · 7 USDG")).toBeTruthy();
+    // MaxLong's share, 300 and 330 CHALK in the fixtures, is nowhere on the panel.
+    expect(screen.queryByText(/MaxLong/)).toBeNull();
+    expect(screen.queryByText(/300 CHALK/)).toBeNull();
+    expect(screen.queryByText(/330 CHALK/)).toBeNull();
+    expect(screen.queryByText(/Change payout/i)).toBeNull();
+    expect(screen.queryByLabelText("New payout address")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Owed to you" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Collect fees" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+  });
+
+  it("shows the creator the panel too, reading To payout when the fees go to another address", () => {
+    h.state.address = CREATOR;
+    show();
+    const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
+    expect(uncollected.getByText("To payout")).toBeTruthy();
+    expect(uncollected.queryByText("To you")).toBeNull();
+    expect(screen.getByRole("button", { name: "Collect fees" })).toBeTruthy();
+  });
+
+  it("matches the owner without regard to the address's case", () => {
+    h.state.address = getAddress(PAYOUT);
+    show();
+    expect(screen.getByText("Pool fees")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Uncollected fees" })).getByText("To you")).toBeTruthy();
+  });
+
+  it("titles the panel Pool fees, using the same words as the Info tab", () => {
+    show();
+    expect(screen.getByText("Pool fees")).toBeTruthy();
+    expect(screen.queryByText("Launch fees")).toBeNull();
+  });
+});
+
+describe("LaunchFeesPanel Collect", () => {
+  it("collects, with the usual toasts, and re-reads the fees after", async () => {
     show();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
     });
     expect(h.state.addToast).toHaveBeenCalledWith({ kind: "pending", message: "Collecting CHALK fees" });
     await waitFor(() => expect(h.state.updateToast).toHaveBeenCalledWith(7, { kind: "confirmed", message: "CHALK fees collected" }));
-    expect(h.collect).toHaveBeenCalledWith(TOKEN, expect.objectContaining({ publicClient: expect.objectContaining({ id: "public" }), account: STRANGER }));
+    expect(h.collect).toHaveBeenCalledWith(TOKEN, expect.objectContaining({ publicClient: expect.objectContaining({ id: "public" }), account: PAYOUT }));
     expect(h.refetch).toHaveBeenCalled();
   });
 
@@ -183,7 +219,7 @@ describe("LaunchFeesPanel (spec 7.3)", () => {
     expect(screen.getByText("Nothing to collect yet.")).toBeTruthy();
   });
 
-  it("says it could not read the uncollected fees and keeps Collect usable, never showing zeros (Review Focus 5)", () => {
+  it("says it could not read the uncollected fees and keeps Collect usable, never showing zeros", () => {
     h.fees = { ...h.fees, uncollected: undefined, uncollectedFailed: true };
     show();
     expect(screen.getByText("Could not read the uncollected fees just now.")).toBeTruthy();
@@ -191,22 +227,22 @@ describe("LaunchFeesPanel (spec 7.3)", () => {
     expect((screen.getByRole("button", { name: "Collect fees" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("shows an owed balance with a Claim per currency, to an address that defaults to the wallet and can be changed", async () => {
-    h.fees = { ...h.fees, owedToken: 5n * E18, owedQuote: 2_500_000n };
+  it("collects even while the uncollected read is still loading", async () => {
+    h.fees = { ...h.fees, uncollected: undefined, uncollectedFailed: false };
     show();
-    const owed = within(screen.getByRole("region", { name: "Owed to you" }));
-    expect(owed.getByText("5 CHALK")).toBeTruthy();
-    expect(owed.getByText("2.5 USDG")).toBeTruthy();
-    expect((owed.getByLabelText("Send to") as HTMLInputElement).value).toBe(STRANGER);
     await act(async () => {
-      fireEvent.click(owed.getByRole("button", { name: "Claim USDG" }));
+      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
     });
-    expect(h.claim).toHaveBeenLastCalledWith(USDG, STRANGER, expect.anything());
-    fireEvent.change(owed.getByLabelText("Send to"), { target: { value: RESCUE } });
+    expect(h.collect).toHaveBeenCalled();
+  });
+
+  it("collects even while the uncollected read has failed", async () => {
+    h.fees = { ...h.fees, uncollected: undefined, uncollectedFailed: true };
+    show();
     await act(async () => {
-      fireEvent.click(owed.getByRole("button", { name: "Claim CHALK" }));
+      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
     });
-    expect(h.claim).toHaveBeenLastCalledWith(TOKEN, RESCUE, expect.anything());
+    expect(h.collect).toHaveBeenCalled();
   });
 
   it("shows a refused write's own words", async () => {
@@ -217,22 +253,25 @@ describe("LaunchFeesPanel (spec 7.3)", () => {
     });
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Nothing to collect yet."));
   });
+});
 
-  it("refuses a bad or zero payout address with a plain reason, before any wallet call", async () => {
-    h.state.address = PAYOUT;
+describe("LaunchFeesPanel owed amounts", () => {
+  it("shows an owed balance with a Claim per currency, to an address that defaults to the wallet and can be changed", async () => {
+    h.fees = { ...h.fees, owedToken: 5n * E18, owedQuote: 2_500_000n };
     show();
-    const input = screen.getByLabelText("New payout address");
-    const button = () => screen.getByRole("button", { name: "Change payout" }) as HTMLButtonElement;
-    fireEvent.change(input, { target: { value: "0x0000000000000000000000000000000000000000" } });
-    expect(screen.getByText("The zero address cannot receive fees.")).toBeTruthy();
-    expect(button().disabled).toBe(true);
-    // Mixed case with a wrong checksum: viem's strict check refuses it.
-    fireEvent.change(input, { target: { value: "0xE1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1" } });
-    expect(screen.getByText("That is not a valid address.")).toBeTruthy();
+    const owed = within(screen.getByRole("region", { name: "Owed to you" }));
+    expect(owed.getByText("5 CHALK")).toBeTruthy();
+    expect(owed.getByText("2.5 USDG")).toBeTruthy();
+    expect((owed.getByLabelText("Send to") as HTMLInputElement).value).toBe(PAYOUT);
     await act(async () => {
-      fireEvent.click(button());
+      fireEvent.click(owed.getByRole("button", { name: "Claim USDG" }));
     });
-    expect(h.change).not.toHaveBeenCalled();
+    expect(h.claim).toHaveBeenLastCalledWith(USDG, PAYOUT, expect.anything());
+    fireEvent.change(owed.getByLabelText("Send to"), { target: { value: RESCUE } });
+    await act(async () => {
+      fireEvent.click(owed.getByRole("button", { name: "Claim CHALK" }));
+    });
+    expect(h.claim).toHaveBeenLastCalledWith(TOKEN, RESCUE, expect.anything());
   });
 
   it("refuses a bad or zero claim address with a plain reason, before any wallet call", async () => {
@@ -252,38 +291,9 @@ describe("LaunchFeesPanel (spec 7.3)", () => {
   });
 });
 
-describe("LaunchFeesPanel naming (Review Focus 2)", () => {
-  it("titles the panel Pool fees, using the same words as the Info tab", () => {
-    show();
-    expect(screen.getByText("Pool fees")).toBeTruthy();
-    expect(screen.queryByText("Launch fees")).toBeNull();
-  });
-});
-
-describe("LaunchFeesPanel Collect is never enabled but inert (Review round 1, finding 1)", () => {
-  it("collects even while the uncollected read is still loading", async () => {
-    h.fees = { ...h.fees, uncollected: undefined, uncollectedFailed: false };
-    show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-    });
-    expect(h.collect).toHaveBeenCalled();
-  });
-
-  it("collects even while the uncollected read has failed", async () => {
-    h.fees = { ...h.fees, uncollected: undefined, uncollectedFailed: true };
-    show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-    });
-    expect(h.collect).toHaveBeenCalled();
-  });
-});
-
-describe("LaunchFeesPanel wallet gating (Review Focus 8)", () => {
-  it("reads Connect wallet on Collect with no wallet connected, and opens the connect modal instead of collecting", () => {
+describe("LaunchFeesPanel wallet states", () => {
+  it("reads Connect wallet when the owner's wallet is known but not connected, and opens the connect modal instead of collecting", () => {
     h.state.isConnected = false;
-    h.state.address = undefined;
     show();
     const button = screen.getByRole("button", { name: "Connect wallet" });
     expect((button as HTMLButtonElement).disabled).toBe(false);
@@ -295,8 +305,7 @@ describe("LaunchFeesPanel wallet gating (Review Focus 8)", () => {
   it("reads Switch to Robinhood Chain on Collect on the wrong network, and switches instead of collecting", () => {
     h.chainId = 1;
     show();
-    const button = screen.getByRole("button", { name: "Switch to Robinhood Chain" });
-    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Switch to Robinhood Chain" }));
     expect(h.switchChain).toHaveBeenCalledWith({ chainId: CHAIN_ID }, expect.anything());
     expect(h.collect).not.toHaveBeenCalled();
   });
@@ -311,21 +320,8 @@ describe("LaunchFeesPanel wallet gating (Review Focus 8)", () => {
     expect(h.claim).not.toHaveBeenCalled();
   });
 
-  it("reads Switch to Robinhood Chain on Change payout on the wrong network, and switches instead of opening the confirm step", () => {
-    h.state.address = PAYOUT;
-    h.chainId = 1;
-    show();
-    const section = within(screen.getByRole("region", { name: "Change payout" }));
-    fireEvent.click(section.getByRole("button", { name: "Switch to Robinhood Chain" }));
-    expect(h.switchChain).toHaveBeenCalledWith({ chainId: CHAIN_ID }, expect.anything());
-    expect(section.queryByText("This is permanent.", { exact: false })).toBeNull();
-  });
-});
-
-describe("LaunchFeesPanel connecting and reconnecting (Review round 1, finding 3 and 7)", () => {
   it("shows a disabled Connecting to your wallet state while wagmi is reconnecting, never an inert Connect wallet", () => {
     h.state.isConnected = false;
-    h.state.address = undefined;
     h.isReconnecting = true;
     show();
     const button = screen.getByRole("button", { name: "Connecting to your wallet…" }) as HTMLButtonElement;
@@ -351,14 +347,6 @@ describe("LaunchFeesPanel connecting and reconnecting (Review round 1, finding 3
     expect(h.walletClientRefetch).toHaveBeenCalled();
   });
 
-  it("shows a plain message when the wallet refuses to switch", () => {
-    h.chainId = 1;
-    h.switchChain.mockImplementation((_vars, options) => options?.onError?.(new Error("rejected")));
-    show();
-    fireEvent.click(screen.getByRole("button", { name: "Switch to Robinhood Chain" }));
-    expect(screen.getByRole("alert").textContent).toBe("Your wallet did not switch. Switch to Robinhood Chain in your wallet and try again.");
-  });
-
   // The mocked query result is a new object on every render, as TanStack's is. Depending on it refetched on every
   // render on Robinhood Chain, which built a new client, re-rendered and refetched again: an endless loop for every
   // connected viewer. On that code this fails at the first assertion, since the mount itself refetched.
@@ -376,12 +364,12 @@ describe("LaunchFeesPanel connecting and reconnecting (Review round 1, finding 3
     expect(h.walletClientRefetch).toHaveBeenCalledTimes(1);
   });
 
-  it("drops the refused-switch message once the wallet is on Robinhood Chain", () => {
+  it("shows a plain message when the wallet refuses to switch, and drops it once the wallet is on Robinhood Chain", () => {
     h.chainId = 1;
     h.switchChain.mockImplementation((_vars, options) => options?.onError?.(new Error("rejected")));
     const { rerender } = show();
     fireEvent.click(screen.getByRole("button", { name: "Switch to Robinhood Chain" }));
-    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toBe("Your wallet did not switch. Switch to Robinhood Chain in your wallet and try again.");
     h.chainId = CHAIN_ID;
     rerender();
     expect(screen.queryByRole("alert")).toBeNull();
@@ -389,80 +377,26 @@ describe("LaunchFeesPanel connecting and reconnecting (Review round 1, finding 3
   });
 });
 
-describe("LaunchFeesPanel what Collect does (Review Focus 11)", () => {
-  it("says in one line what Collect sends and who pays the gas", () => {
-    show();
-    expect(
-      screen.getByText("Sends the fees gathered so far to the payout address and to MaxLong. Whoever presses this pays the gas."),
-    ).toBeTruthy();
-  });
-
-  // Review round 1, finding 4: "Collected so far" sums every payout the token has ever had, so it always
-  // reads "To payout"; only "Uncollected fees" (paid to the CURRENT payout on the next Collect) says "To you".
-  it("labels the uncollected row 'To you' for the payout address; Collected so far always reads 'To payout'", () => {
-    const { unmount } = show();
-    const uncollectedStranger = within(screen.getByRole("region", { name: "Uncollected fees" }));
-    expect(uncollectedStranger.getByText("To payout")).toBeTruthy();
-    expect(uncollectedStranger.queryByText("To you")).toBeNull();
-    const collectedStranger = within(screen.getByRole("region", { name: "Collected so far" }));
-    expect(collectedStranger.getByText("To payout")).toBeTruthy();
-    unmount();
-
-    h.state.address = PAYOUT;
-    show();
-    const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
-    expect(uncollected.getByText("To you")).toBeTruthy();
-    const collected = within(screen.getByRole("region", { name: "Collected so far" }));
-    expect(collected.getByText("To payout")).toBeTruthy();
-    expect(collected.queryByText("To you")).toBeNull();
-  });
-
-  it("gives a stranger a quiet Collect button and the payout address a loud one", () => {
-    const { unmount } = show();
-    const strangerButton = screen.getByRole("button", { name: "Collect fees" });
-    expect(strangerButton.className).toContain("border-hairline-btn");
-    expect(strangerButton.className).not.toContain("bg-chalk");
-    unmount();
-
-    h.state.address = PAYOUT;
-    show();
-    const payoutButton = screen.getByRole("button", { name: "Collect fees" });
-    expect(payoutButton.className).toContain("bg-chalk");
-  });
-});
-
-describe("LaunchFeesPanel Just collected reads the receipt (Review round 1, finding 2)", () => {
-  it("shows the real split from the transaction's own FeesCollected event, not a pre-click guess", async () => {
-    show();
+describe("LaunchFeesPanel Just collected reads the receipt", () => {
+  const collect = async () => {
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
       await flushMicrotasks();
     });
+  };
+
+  it("shows what the transaction paid the payout address, from its own FeesCollected event, and nothing about MaxLong", async () => {
+    show();
+    await collect();
     expect(h.getTransactionReceipt).toHaveBeenCalledWith({ hash: TX });
-    await waitFor(() =>
-      expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to the payout, 300 CHALK · 3 USDG to MaxLong.")).toBeTruthy(),
-    );
-  });
-
-  it("reads 'to you' when the viewer is the payout address", async () => {
-    h.state.address = PAYOUT;
-    show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
-    await waitFor(() =>
-      expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you, 300 CHALK · 3 USDG to MaxLong.")).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you.")).toBeTruthy());
+    expect(screen.queryByText(/MaxLong/)).toBeNull();
   });
 
   it("says only that the collection went through when the receipt cannot be read", async () => {
     h.getTransactionReceipt.mockReset().mockRejectedValue(new Error("network"));
     show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
+    await collect();
     await waitFor(() => expect(screen.getByText("Collected. Totals update shortly.")).toBeTruthy());
     expect(screen.queryByText(/Just collected/)).toBeNull();
   });
@@ -470,10 +404,7 @@ describe("LaunchFeesPanel Just collected reads the receipt (Review round 1, find
   it("says only that the collection went through when the receipt has no matching event", async () => {
     h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [] });
     show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
+    await collect();
     await waitFor(() => expect(screen.getByText("Collected. Totals update shortly.")).toBeTruthy());
   });
 
@@ -486,48 +417,42 @@ describe("LaunchFeesPanel Just collected reads the receipt (Review round 1, find
   const anotherTokens = () =>
     feesCollectedLog({ token: OTHER_TOKEN, payout: PAYOUT, tokenFees: 5n * E18, quoteFees: 5_000_000n, tokenToPayout: 5n * E18, quoteToPayout: 5_000_000n });
 
-  // Amounts unlike the mocked uncollected read (700 and 300), so a figure taken from anywhere but this token's own
-  // launchpad log cannot pass. Dropping either filter in readCollected shows the 9s or the 5s instead.
+  // Amounts unlike the mocked uncollected read (700 and 7), so a figure taken from anywhere but this token's own
+  // launchpad log cannot pass. Dropping either filter in readPaid shows the 9s or the 5s instead.
   it("reads this token's log from the launchpad only, past a spoofed log and another token's", async () => {
     const real = feesCollectedLog({ token: TOKEN, payout: PAYOUT, tokenFees: 200n * E18, quoteFees: 20_000_000n, tokenToPayout: 140n * E18, quoteToPayout: 14_000_000n });
     h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [spoofed(), anotherTokens(), real] });
     show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
-    await waitFor(() =>
-      expect(screen.getByText("Just collected: 140 CHALK · 14 USDG to the payout, 60 CHALK · 6 USDG to MaxLong.")).toBeTruthy(),
-    );
+    await collect();
+    await waitFor(() => expect(screen.getByText("Just collected: 140 CHALK · 14 USDG to you.")).toBeTruthy());
   });
 
   it("shows no figure when the only logs are a spoofed one and another token's", async () => {
     h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [spoofed(), anotherTokens()] });
     show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
+    await collect();
     await waitFor(() => expect(screen.getByText("Collected. Totals update shortly.")).toBeTruthy());
     expect(screen.queryByText(/Just collected/)).toBeNull();
   });
 
-  it("says 'to you' by the address the transaction paid, not by the panel's idea of the payout", async () => {
-    // The viewer is STRANGER and the store still names PAYOUT, but this collection paid STRANGER.
-    const paid = feesCollectedLog({ token: TOKEN, payout: STRANGER, tokenFees: 1000n * E18, quoteFees: 10_000_000n, tokenToPayout: 700n * E18, quoteToPayout: 7_000_000n });
-    h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [paid] });
+  it("says 'to you' by the address the transaction paid, not by who is looking", async () => {
+    // The creator presses Collect; the fees went to the payout address, which is another wallet.
+    h.state.address = CREATOR;
+    const { unmount } = show();
+    await collect();
+    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to the payout.")).toBeTruthy());
+    unmount();
+
+    // The same creator, on a collection that paid the creator's own address.
+    const paidCreator = feesCollectedLog({ token: TOKEN, payout: CREATOR, tokenFees: 1000n * E18, quoteFees: 10_000_000n, tokenToPayout: 700n * E18, quoteToPayout: 7_000_000n });
+    h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [paidCreator] });
     show();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
-    await waitFor(() =>
-      expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you, 300 CHALK · 3 USDG to MaxLong.")).toBeTruthy(),
-    );
+    await collect();
+    await waitFor(() => expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you.")).toBeTruthy());
   });
 
   // StrictMode, which the App Router turns on in development, mounts, unmounts and mounts again. A mounted flag that
-  // was only ever set to false then silenced every update after a confirmed write: no line at all on the old code.
+  // was only ever set to false then silenced every update after a confirmed write: no line at all on that code.
   it("still reports a collection under StrictMode's mount, unmount and mount again", async () => {
     const { wrapper: QueryWrapper } = queryHarness();
     render(
@@ -537,15 +462,12 @@ describe("LaunchFeesPanel Just collected reads the receipt (Review round 1, find
         </QueryWrapper>
       </StrictMode>,
     );
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
-      await flushMicrotasks();
-    });
+    await collect();
     await waitFor(() => expect(screen.getByText(/Just collected: 700 CHALK/)).toBeTruthy());
   });
 });
 
-describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)", () => {
+describe("LaunchFeesPanel post-collect refresh", () => {
   it("invalidates the pair query right after Collect confirms", async () => {
     const { client } = show();
     const spy = vi.spyOn(client, "invalidateQueries");
@@ -555,7 +477,7 @@ describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)
     await waitFor(() => expect(spy).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ["pair", TOKEN] })));
   });
 
-  it("keeps asking every 10 seconds, stays at 13 invalidates past the cap, and keeps the line up because the store never caught up (finding 8)", async () => {
+  it("keeps asking every 10 seconds, stays at 13 invalidates past the cap, and keeps the line up because the store never caught up", async () => {
     vi.useFakeTimers();
     try {
       const { client } = show();
@@ -573,9 +495,8 @@ describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)
         await vi.advanceTimersByTimeAsync(200_000); // well past the 13-tick cap
       });
       expect(spy).toHaveBeenCalledTimes(13);
-      // The cap stopped the polling (no more invalidates above), but the line's own visibility is a
-      // render-time comparison against launch.feesCollectedAt (unchanged here), not a timer: it stays up
-      // rather than vanish the way item 12 was meant to fix in the first place.
+      // The cap stopped the polling, but the line's own visibility is a render-time comparison against
+      // launch.feesCollectedAt (unchanged here), not a timer: it stays up.
       expect(screen.getByText(/Just collected/)).toBeTruthy();
     } finally {
       vi.useRealTimers();
@@ -587,8 +508,7 @@ describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)
     try {
       const { client, rerender } = show();
       // queryHarness()'s client uses gcTime 0 for test isolation; a query seeded below with no
-      // observer would otherwise be garbage-collected on the very next fake timer tick, racing this
-      // test's own setup rather than the component under test.
+      // observer would otherwise be garbage-collected on the very next fake timer tick.
       client.setDefaultOptions({ queries: { retry: false, gcTime: Infinity } });
       const spy = vi.spyOn(client, "invalidateQueries");
       await act(async () => {
@@ -608,9 +528,7 @@ describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)
       });
       expect(spy).toHaveBeenCalledTimes(stoppedAt); // no further polling once caught up
 
-      // In the real app, TokenView's own usePair (subscribed to the same query this panel just
-      // invalidated) would now re-render this panel with a fresh `launch` prop; simulated here since
-      // this test renders the panel standalone, with no such parent above it.
+      // In the real app, TokenView's own usePair would now re-render this panel with a fresh `launch` prop.
       rerender({ launch: updatedLaunch });
       expect(screen.queryByText(/Just collected/)).toBeNull();
     } finally {
@@ -633,7 +551,7 @@ describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)
     }
   });
 
-  it("leaves no timer running when the panel unmounts before the collection even confirms (finding 9)", async () => {
+  it("leaves no timer running when the panel unmounts before the collection even confirms", async () => {
     vi.useFakeTimers();
     try {
       let resolveConfirmation: () => void = () => {};
@@ -652,158 +570,6 @@ describe("LaunchFeesPanel post-collect refresh (Review round 1, finding 8 and 9)
         await flushMicrotasks();
       });
       expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("LaunchFeesPanel refuses addresses that would waste the fee stream (Review round 1, finding 6)", () => {
-  beforeEach(() => {
-    h.state.address = PAYOUT;
-  });
-
-  it("refuses the current payout address again", () => {
-    show();
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: PAYOUT } });
-    expect(screen.getByText("That is already the payout address.")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Change payout" }) as HTMLButtonElement).disabled).toBe(true);
-  });
-
-  it("refuses the token's own address", () => {
-    show();
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: TOKEN } });
-    expect(screen.getByText("Fees sent to a token contract can never be moved.")).toBeTruthy();
-  });
-
-  it("refuses the currency's own address", () => {
-    show();
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: USDG } });
-    expect(screen.getByText("Fees sent to a token contract can never be moved.")).toBeTruthy();
-  });
-
-  it("refuses the launchpad contract", () => {
-    show();
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: LAUNCHPAD } });
-    expect(screen.getByText("That is the launchpad contract. It cannot receive fees.")).toBeTruthy();
-  });
-
-  it("refuses the pool manager", () => {
-    show();
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: POOL_MANAGER } });
-    expect(screen.getByText("That is the pool manager contract. It cannot receive fees.")).toBeTruthy();
-  });
-
-  it("shows the confirm step's address checksummed, never the raw lowercase paste", () => {
-    show();
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: LOWERCASE_TEST } });
-    fireEvent.click(screen.getByRole("button", { name: "Change payout" }));
-    expect(screen.getByText(getAddress(LOWERCASE_TEST))).toBeTruthy();
-    expect(screen.queryByText(LOWERCASE_TEST)).toBeNull();
-  });
-});
-
-describe("LaunchFeesPanel change payout confirm step (Review Focus 13, round 1 findings 5 and 10)", () => {
-  beforeEach(() => {
-    h.state.address = PAYOUT;
-  });
-
-  function openConfirm() {
-    fireEvent.change(screen.getByLabelText("New payout address"), { target: { value: RESCUE } });
-    fireEvent.click(screen.getByRole("button", { name: "Change payout" }));
-  }
-
-  // Review round 1, finding 13: round 1's rewrite of this describe block, needed because one click no
-  // longer writes, dropped the only check on this line. Restored here, on the form before Change payout
-  // is even pressed.
-  it("warns before Change payout is pressed that a handover is permanent", () => {
-    show();
-    expect(screen.getByText("Once you hand the payout on, only the new address can change it.")).toBeTruthy();
-  });
-
-  it("opens a confirm step showing the full checksummed address and the word permanent, before any wallet call", () => {
-    show();
-    openConfirm();
-    expect(screen.getByText(RESCUE)).toBeTruthy();
-    expect(screen.getByText("This is permanent.", { exact: false })).toBeTruthy();
-    expect(h.change).not.toHaveBeenCalled();
-  });
-
-  it("focuses the prompt when the confirm step opens, and announces it as a labelled group with Cancel before Confirm", () => {
-    show();
-    openConfirm();
-    expect(document.activeElement?.id).toBe("payout-confirm-prompt");
-    const group = screen.getByRole("group");
-    expect(group.getAttribute("aria-labelledby")).toBe("payout-confirm-prompt");
-    const buttons = within(group).getAllByRole("button");
-    expect(buttons.map((b) => b.textContent)).toEqual(["Cancel", "Confirm"]);
-  });
-
-  it("ignores a Confirm press for a short guard window after opening, so a double click meant for Change payout cannot land on it (finding 10)", async () => {
-    vi.useFakeTimers();
-    try {
-      show();
-      openConfirm();
-      const confirmButton = screen.getByRole("button", { name: "Confirm" }) as HTMLButtonElement;
-      expect(confirmButton.disabled).toBe(true);
-      fireEvent.click(confirmButton);
-      expect(h.change).not.toHaveBeenCalled();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(CONFIRM_GUARD_MS);
-      });
-      expect(confirmButton.disabled).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("sends the write only once Confirm is pressed, after the guard window", async () => {
-    vi.useFakeTimers();
-    try {
-      show();
-      openConfirm();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(CONFIRM_GUARD_MS);
-      });
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
-        await flushMicrotasks();
-      });
-      expect(h.change).toHaveBeenCalledWith(TOKEN, RESCUE, expect.objectContaining({ account: PAYOUT }));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("cancels back to the input without ever asking the wallet, and returns focus to it", () => {
-    show();
-    openConfirm();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByText(RESCUE)).toBeNull();
-    const input = screen.getByLabelText("New payout address");
-    expect(input).toBeTruthy();
-    expect(document.activeElement).toBe(input);
-    expect(h.change).not.toHaveBeenCalled();
-  });
-
-  it("on success, stops treating the viewer as the payout at once: closes the step, clears the field, drops To you and the loud Collect button (finding 5)", async () => {
-    vi.useFakeTimers();
-    try {
-      show();
-      openConfirm();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(CONFIRM_GUARD_MS);
-      });
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
-        await flushMicrotasks();
-      });
-      expect(screen.queryByRole("group")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Change payout" })).toBeNull();
-      const uncollected = within(screen.getByRole("region", { name: "Uncollected fees" }));
-      expect(uncollected.queryByText("To you")).toBeNull();
-      const collectButton = screen.getByRole("button", { name: "Collect fees" });
-      expect(collectButton.className).not.toContain("bg-chalk");
     } finally {
       vi.useRealTimers();
     }
