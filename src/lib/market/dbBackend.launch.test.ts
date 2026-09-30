@@ -159,4 +159,26 @@ describe("the instant launchpad on the markets table and the token page (spec 5.
   it("answers an empty sv list before anyone has launched", async () => {
     expect(await backend().pairs("sv")).toEqual([]);
   });
+
+  // Fix round 1, 30 Sep 2026: the row must take the token's listed pool while it has one. A coalesce in the other
+  // order, or a join on l.pool_id alone, would answer the launch pool here and fail.
+  it("shows a launch through its listed pool when that is another pool, a traded Uniswap pool, not its launch pool", async () => {
+    const ELSEWHERE = addr("f"), P_ELSE_LAUNCH = poolId("e"), P_ELSE_LISTED = poolId("d");
+    // The Uniswap pool is the token's primary, sane and traded, so the listing takes it over the unswapped launch pool.
+    await upsertTokens(db, [tokenRec(ELSEWHERE, "ELSE", "SV", P_ELSE_LISTED)], NOW);
+    await upsertPools(db, [
+      poolRec(P_ELSE_LAUNCH, ELSEWHERE, {}),
+      poolRec(P_ELSE_LISTED, ELSEWHERE, { origin: "Uniswap", swapCount: 3, lastSwapAt: NOW - 50, tvlQuote: "5000000" }),
+    ], NOW);
+    await recomputeListedPools(db, "all", NOW);
+    await insertLaunches(db, [
+      launchRow({ tokenId: ELSEWHERE, poolId: P_ELSE_LAUNCH, name: "Elsewhere", symbol: "ELSE", block: 95, txHash: poolId("8"), timestamp: NOW - 60 }),
+    ], NOW);
+    const listed = await db.query<{ listed_pool_id: string | null }>("select listed_pool_id from market.tokens where id = $1", [ELSEWHERE]);
+    expect(listed[0]?.listed_pool_id).toBe(P_ELSE_LISTED);
+
+    const sv = await backend().pairs("sv");
+    expect(sv.map((p) => p.id)).toEqual([ELSEWHERE]);
+    expect(sv[0]).toMatchObject({ poolId: P_ELSE_LISTED, origin: "Uniswap", launchCreator: CREATOR });
+  });
 });

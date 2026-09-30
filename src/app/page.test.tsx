@@ -120,4 +120,12 @@ describe("MarketsPage and the Suits tab (amended 30 Sep 2026)", () => {
     fireEvent.click(suitsChip());
     await waitFor(() => expect(screen.getByText("No pairs on SUITS match All.")).toBeTruthy());
   });
+
+  // Fix round 1: only SV changed its word. Every other origin reads in the sentence as it always did.
+  it("keeps every other origin's own name in the sentence: Pons, not PONS", async () => {
+    show();
+    await waitFor(() => expect(screen.getByText("TRADED")).toBeTruthy());
+    fireEvent.click(originChip("PONS"));
+    await waitFor(() => expect(screen.getByText("No pairs on Pons match All.")).toBeTruthy());
+  });
 });

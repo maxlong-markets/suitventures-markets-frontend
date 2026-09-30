@@ -694,6 +694,30 @@ describe("AppStateProvider refused writes", () => {
     }
   });
 
+  // Fix round 1, 30 Sep 2026: the Suits tab reads its own list, and a refused vote leaves that list as it found it.
+  it("paints a vote into the cached Suits list at once, and takes it back out when the write is refused", async () => {
+    h.ds.vote.mockRejectedValue(new Error("/api/me/votes: 503"));
+    h.ds.pairs.mockResolvedValue([pairRow(3, 1)]);
+    const unhandled = watchUnhandled();
+    try {
+      const { client } = show();
+      await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+      await waitFor(() => expect(client.getQueryData(keys.votes)).toEqual({}));
+      // Held as the markets page holds it while the SUITS chip is on; the harness would collect it otherwise.
+      client.setQueryDefaults(keys.pairsSv, { gcTime: Infinity });
+      client.setQueryData(keys.pairsSv, [pairRow(3, 1)]);
+
+      fireEvent.click(screen.getByText("vote"));
+      expect(client.getQueryData<TokenPair[]>(keys.pairsSv)?.[0]).toMatchObject({ bull: 4, bear: 1 });
+
+      await waitFor(() => expect(screen.getByTestId("toasts").textContent).toBe(FAILED_TOAST));
+      expect(client.getQueryData<TokenPair[]>(keys.pairsSv)?.[0]).toMatchObject({ bull: 3, bear: 1 });
+      await flush();
+      expect(unhandled.seen).toEqual([]);
+    } finally {
+      unhandled.stop();
+    }
+  });
 });
 
 /**
@@ -931,5 +955,23 @@ describe("AppStateProvider votes", () => {
 
     expect(client.getQueryData<TokenPair>(keys.pair(TOKEN))).toMatchObject({ bull: 4, bear: 1 });
     expect(client.getQueryData<TokenPair[]>(keys.pairs)?.[0]).toMatchObject({ bull: 4, bear: 1 });
+  });
+
+  // Fix round 1, 30 Sep 2026: the Suits tab's list is patched like the default one, first by the estimate, then by the answer.
+  it("writes the vote into the cached Suits list, at once and then with the server's counts", async () => {
+    fakeVotes({ bull: 3, bear: 1 });
+    const { client } = show();
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    client.setQueryDefaults(keys.pairsSv, { gcTime: Infinity });
+    // An older snapshot than the default list's, so the estimate and the server's answer differ.
+    client.setQueryData(keys.pairsSv, [pairRow(2, 1)]);
+
+    fireEvent.click(screen.getByText("vote"));
+    expect(client.getQueryData<TokenPair[]>(keys.pairsSv)?.[0]).toMatchObject({ bull: 3, bear: 1 });
+    await waitFor(() => expect(h.ds.vote).toHaveBeenCalledWith(TOKEN, "bull"));
+    await act(async () => {
+      await flush();
+    });
+    expect(client.getQueryData<TokenPair[]>(keys.pairsSv)?.[0]).toMatchObject({ bull: 4, bear: 1 });
   });
 });

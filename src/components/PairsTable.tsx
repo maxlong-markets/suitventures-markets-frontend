@@ -148,7 +148,7 @@ const PairRow = memo(function PairRow({
   const router = useRouter();
   const href = `/t/${pair.id}`;
   const age = fmtAge(ageHours(pair.createdAt, now));
-  const pad = originLabel(pair.origin);
+  const pad = originLabel(pair.origin).toUpperCase();
 
   const open = () => {
     // Phone rows expand in place; larger screens go straight to the token.

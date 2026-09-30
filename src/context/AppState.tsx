@@ -456,6 +456,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         // is declared out here and filled in there.
         let prevBook: Record<string, VoteDir> | undefined;
         let prevPairs: TokenPair[] | undefined;
+        let prevPairsSv: TokenPair[] | undefined;
         let prevPair: TokenPair | null | undefined;
         try {
           // Before the optimistic write, never after: a read of one of these three that is already
@@ -469,16 +470,20 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           // nothing to clobber and a page to deliver. The book has no such exemption — an empty
           // book is a book, and the optimistic write replaces it outright.
           void qc.cancelQueries({ queryKey: keys.votes });
+          // A prefix match, so this also cancels the Suits list, `keys.pairsSv`, which is patched and restored below too.
           void qc.cancelQueries({ queryKey: keys.pairs, predicate: loaded });
           void qc.cancelQueries({ queryKey: keys.pair(id), predicate: loaded });
 
           prevBook = qc.getQueryData<Record<string, VoteDir>>(keys.votes);
           prevPairs = qc.getQueryData<TokenPair[]>(keys.pairs);
+          prevPairsSv = qc.getQueryData<TokenPair[]>(keys.pairsSv);
           prevPair = qc.getQueryData<TokenPair | null>(keys.pair(id));
 
-          // A token is listed, deep-linked, or both; the counts live under whichever key holds it.
+          // A token is listed, deep-linked, a launch on the Suits list, or several of these; the counts live under
+          // whichever key holds it. The Suits list joined on 30 Sep 2026, when the SUITS chip got its own list.
           const eachRow = (fn: (row: TokenPair) => TokenPair) => {
             qc.setQueryData<TokenPair[]>(keys.pairs, (old) => old?.map((p) => (p.id === id ? fn(p) : p)));
+            qc.setQueryData<TokenPair[]>(keys.pairsSv, (old) => old?.map((p) => (p.id === id ? fn(p) : p)));
             qc.setQueryData<TokenPair | null>(keys.pair(id), (old) => (old ? fn(old) : old));
           };
 
@@ -517,11 +522,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           // `?? {}` is load-bearing: `setQueryData` ignores an `undefined` value, so restoring a
           // book that had not loaded yet would restore nothing and leave the refused vote
           // highlighted until the settle refetch. An empty book is also exactly what the screen
-          // showed while the read was still out, since `votes` below reads `data ?? {}`. The two
-          // count rows need no such fallback: the write above patches rows it finds and writes
+          // showed while the read was still out, since `votes` below reads `data ?? {}`. The three
+          // count entries need no such fallback: the write above patches rows it finds and writes
           // nothing where there are none, so an absent snapshot means nothing was changed.
           qc.setQueryData(keys.votes, prevBook ?? {});
           qc.setQueryData(keys.pairs, prevPairs);
+          qc.setQueryData(keys.pairsSv, prevPairsSv);
           qc.setQueryData(keys.pair(id), prevPair);
           addToast({ kind: "failed", message: WRITE_FAILED });
         } finally {

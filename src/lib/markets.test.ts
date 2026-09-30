@@ -43,16 +43,17 @@ describe("origin labels (amended 30 Sep 2026)", () => {
     ]);
   });
 
-  it("names a token launched here SUITS, and every other origin by its own name in capitals", () => {
+  // Fix round 1: only SV changes its word. Every other origin keeps its stored name, so sentences still read "Pons".
+  it("names a token launched here SUITS, and leaves every other origin as stored", () => {
     expect(originLabel("SV")).toBe("SUITS");
     expect(originLabel("LONG")).toBe("LONG");
-    expect(originLabel("Pons")).toBe("PONS");
-    expect(originLabel("Uniswap")).toBe("UNISWAP");
-    expect(originLabel("Other")).toBe("OTHER");
+    expect(originLabel("Pons")).toBe("Pons");
+    expect(originLabel("Uniswap")).toBe("Uniswap");
+    expect(originLabel("Other")).toBe("Other");
     expect(originLabel("SUIT")).toBe("SUIT");
   });
 
-  it("gives every chip the same word the row badge prints", () => {
-    for (const o of ORIGIN_OPTIONS) if (o.key !== "all") expect(o.label).toBe(originLabel(o.key));
+  it("gives every chip the word the row badge prints, the helper's word in capitals", () => {
+    for (const o of ORIGIN_OPTIONS) if (o.key !== "all") expect(o.label).toBe(originLabel(o.key).toUpperCase());
   });
 });

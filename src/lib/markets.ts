@@ -35,10 +35,11 @@ export const PRESETS: readonly Preset[] = [
 
 /**
  * The word every chip, badge and sentence prints for an origin (amended 30 Sep 2026): SUITS for a token launched here,
- * whose stored origin stays SV, and the origin's own name in capitals for every other one.
+ * whose stored origin stays SV, and the stored name for every other one, so a sentence still reads "Pons". The chips
+ * and the badges put it in capitals themselves.
  */
 export function originLabel(origin: Origin): string {
-  return origin === "SV" ? "SUITS" : origin.toUpperCase();
+  return origin === "SV" ? "SUITS" : origin;
 }
 
 /** SUITS sits right after All. With it on, the markets page reads its rows from their own list, every launch. */
@@ -47,7 +48,7 @@ export const ORIGIN_OPTIONS: ReadonlyArray<{
   label: string;
 }> = [
   { key: "all", label: "All" },
-  ...(["SV", "LONG", "Pons", "Uniswap", "Other"] as const).map((key) => ({ key, label: originLabel(key) })),
+  ...(["SV", "LONG", "Pons", "Uniswap", "Other"] as const).map((key) => ({ key, label: originLabel(key).toUpperCase() })),
 ];
 
 export interface MarketFilters {
