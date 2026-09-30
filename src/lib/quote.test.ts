@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { localQuote } from "./quote";
+import { localQuote, poolFeePctFor } from "./quote";
 import type { TokenPair } from "./types";
 
 const pair = {
@@ -7,6 +7,19 @@ const pair = {
   priceUsd: 0.1943, priceQuote: 0.000866, change1h: 0, change24h: 0, vol24h: 0, mcap: 0, fdv: 0, liquidity: 5_141_337,
   holders: 0, createdAt: 0, bull: 0, bear: 0, poolId: "0x1", hook: "", hookAddress: "0x0", feeTier: "",
 } as TokenPair;
+
+describe("poolFeePctFor", () => {
+  it("reads a fixed tier from the pool itself, so a token launched here shows its 1 % and not the estimate", () => {
+    expect(poolFeePctFor({ ...pair, origin: "SV", feeTier: "1.00%" })).toBe(1);
+    expect(poolFeePctFor({ ...pair, origin: "Uniswap", feeTier: "0.05%" })).toBe(0.05);
+    expect(poolFeePctFor({ ...pair, origin: "Pons", feeTier: "0.30%" })).toBe(0.3);
+  });
+  it("falls back to the estimate by origin for a dynamic fee or an unknown tier", () => {
+    expect(poolFeePctFor({ ...pair, origin: "Pons", feeTier: "Dynamic" })).toBe(1);
+    expect(poolFeePctFor({ ...pair, origin: "LONG", feeTier: "Dynamic" })).toBe(0.3);
+    expect(poolFeePctFor({ ...pair, origin: "LONG", feeTier: "" })).toBe(0.3);
+  });
+});
 
 describe("localQuote", () => {
   it("buys tokens with quote and applies fees", () => {

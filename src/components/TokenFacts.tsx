@@ -234,7 +234,7 @@ export default function TokenFacts({ pair, address, launchedTx }: Props) {
       {/* TokenFactsDetails is the only client-rendered piece here: a native <details> around
           these server-rendered rows, closed by default once the gate admits the viewer, and also
           while the Suits check for a connected wallet is still running (fix round 1 finding 4). */}
-      <TokenFactsDetails ticker={pair.ticker} name={pair.name}>
+      <TokenFactsDetails>
         <dl className="mt-[14px] grid grid-cols-1 gap-x-8 tablet:grid-cols-2">
           {rows.map(({ label, value, href, toneClass, note }) => (
             <div

@@ -1,6 +1,13 @@
 import type { Denom, Quote, Side, TokenPair } from "./types";
 
+/**
+ * The pool fee in percent, for display and the local estimate. A pool with a fixed tier says what it charges
+ * (`feeTier` reads "1.00%"), so a token launched here shows its real 1 % before any amount is typed. Only a dynamic
+ * fee, which the pool's hook sets on each trade, falls back to the estimate by origin.
+ */
 export function poolFeePctFor(pair: TokenPair): number {
+  const fixed = /^(\d+(?:\.\d+)?)\s*%$/.exec(pair.feeTier ?? "");
+  if (fixed) return Number(fixed[1]);
   return pair.origin === "Pons" ? 1.0 : 0.3;
 }
 

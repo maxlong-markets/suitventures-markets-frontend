@@ -59,8 +59,7 @@ beforeEach(() => {
 describe("TokenFacts", () => {
   it("renders every fact with its value", () => {
     render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    // The ticker and the name each appear more than once by design: the heading, the summary
-    // line, and their own fact row.
+    // The ticker and the name each appear twice by design: the heading, and their own fact row.
     expect(screen.getAllByText("AI").length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText("Artificial Inu").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(ADDRESS)).toBeTruthy();
@@ -348,12 +347,16 @@ describe("TokenFacts: the details disclosure (amended 30 Sep 2026, corrected fix
     expect(container.querySelector("details")?.open).toBe(false);
   });
 
-  it("carries the ticker and name and reads Token details in the summary", () => {
+  it("reads only Token details in the summary, since the heading above it already names the token", () => {
     render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(screen.getByText("Token details")).toBeTruthy();
     const summary = screen.getByText("Token details").closest("summary");
-    expect(summary?.textContent).toContain("AI");
-    expect(summary?.textContent).toContain("Artificial Inu");
+    expect(summary?.textContent).toContain("Token details");
+    expect(summary?.textContent).not.toContain("AI");
+    expect(summary?.textContent).not.toContain("Artificial Inu");
+    // The one heading still carries both.
+    const heading = document.querySelector("h1");
+    expect(heading?.textContent).toContain("AI");
+    expect(heading?.textContent).toContain("Artificial Inu");
   });
 
   // Fix round 1 finding 7: the summary had about 2.2:1 contrast (opacity-70 compounded with
@@ -369,9 +372,6 @@ describe("TokenFacts: the details disclosure (amended 30 Sep 2026, corrected fix
     expect(summary.className).toContain("min-h-[40px]");
     const label = screen.getByText("Token details");
     expect(label.className).toContain("flex-none");
-    const name = screen.getByText("Artificial Inu", { selector: "summary span" });
-    expect(name.className).toContain("min-w-0");
-    expect(name.className).toContain("truncate");
   });
 
   // Re-review finding 3: ink-50 (about 4.2:1) was still just under AA's 4.5:1 for 10px text; the
@@ -382,16 +382,12 @@ describe("TokenFacts: the details disclosure (amended 30 Sep 2026, corrected fix
     expect(screen.getByText("Token details").className).toContain("text-ink-55");
   });
 
-  // Re-review finding 4: a ticker from an origin other than the launchpad has no length cap, and
-  // with `flex-none` on both the label and the ticker, nothing but a long ticker itself gave way,
-  // pushing the row past a phone's width. On the round-1 code (`flex-none` on the ticker) this
-  // fails, since a `flex-none` element never gets `min-w-0` or `truncate`.
-  it("lets a long ticker truncate rather than pushing the summary past the page edge", () => {
-    render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    const ticker = screen.getByText("AI", { selector: "summary span" });
-    expect(ticker.className).toContain("min-w-0");
-    expect(ticker.className).toContain("truncate");
-    expect(ticker.className).not.toContain("flex-none");
+  // A long ticker cannot push the summary past the page edge, because the summary no longer
+  // carries the ticker or the name at all: the heading above it does.
+  it("keeps the summary to its own short label, whatever the ticker's length", () => {
+    render(<TokenFacts pair={{ ...BASE_PAIR, ticker: "AVERYLONGTICKERWITHNOLENGTHCAPATALL" }} address={ADDRESS} />);
+    const summary = screen.getByText("Token details").closest("summary")!;
+    expect(summary.textContent).not.toContain("AVERYLONGTICKER");
   });
 
   it("keeps a manual toggle across a re-render that leaves access unchanged", () => {
