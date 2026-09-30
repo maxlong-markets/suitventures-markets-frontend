@@ -7,10 +7,11 @@ import { useAppState } from "@/context/AppState";
 import { MagnifierIcon, SuitsMark } from "./ui";
 import WalletButton from "./WalletButton";
 
+// No Traders tab since 30 Sep 2026: the board showed nothing while its data is not available. TradersBoard and
+// /api/traders stay parked behind TRADERS_BOARD, so bringing the tab back is this one entry and a page.
 const NAV = [
   { href: "/", label: "Markets" },
   { href: "/watchlist", label: "Watchlist" },
-  { href: "/traders", label: "Traders" },
   { href: "/launch", label: "Launch" },
 ] as const;
 

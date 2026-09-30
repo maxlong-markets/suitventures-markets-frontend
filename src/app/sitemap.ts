@@ -24,12 +24,14 @@ const TOKEN_PAGE_LIMIT = 300;
  * Only the homepage. `/t/[address]` is added per listed pair below — there is no static entry
  * that could stand in for a token address.
  *
- * `/traders` and `/watchlist` are deliberately NOT here, though they are real routes. Both are
- * still gated, so a crawler asking for either gets the lock screen — byte for byte the same page
+ * `/watchlist` and `/launch` are deliberately NOT here, though they are real routes. Both are
+ * still gated, so a crawler asking for either gets the lock screen, byte for byte the same page
  * `/` returns. Submitting three URLs that render identical content asks Google to index
  * duplicates and invites it to judge the site thin, and it spends crawl budget the token pages
  * actually need. `/` earns its place because it is the homepage and that lock screen is the
  * brand's public face for now. The other two belong here the day the gate lifts, not before.
+ * `/traders` is not a route at all since 30 Sep 2026: its tab and page were removed, and the
+ * board behind them is parked.
  */
 const STATIC_ROUTES: MetadataRoute.Sitemap = [
   { url: SITE_URL, changeFrequency: "daily", priority: 1 },

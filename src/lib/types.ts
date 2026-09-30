@@ -264,8 +264,8 @@ export interface MarketsDataSource {
 /**
  * One row of the top-traders board (M4 spec section 4): a wallet's last-24h volume in USD, its trade
  * count and the number of distinct tokens it traded. It lives here rather than in
- * `src/lib/social/store.ts`, which is `server-only`, because the `/traders` page renders these rows in
- * a client component.
+ * `src/lib/social/store.ts`, which is `server-only`, because `TradersBoard` renders these rows in a
+ * client component. The board is parked since 30 Sep 2026, with no tab and no `/traders` page.
  *
  * This is the **only** declaration of the type in the plan (Ruling 5): Task 5 adds `TradersBy` beside
  * it and the `traders` method to `MarketsDataSource`, and re-declares nothing.

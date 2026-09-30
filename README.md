@@ -653,7 +653,7 @@ listed or not) — see the comments in `types.ts`.
 | Wallet balances | `src/hooks/useTokenBalance.ts` | **Done (M2)** — batched ERC-20 `balanceOf` reads for the quote asset and the pair token |
 | Suit holder check | `src/lib/suits.ts` | **Done (M2)** — live `balanceOf` when `NEXT_PUBLIC_SUITS_NFT_ADDRESS` is set; the mock flag now defaults to "not a holder" |
 | Watchlist / votes persistence | `src/lib/social/store.ts`, `/api/me/*` | **Done (M4)** — Sign-In with Ethereum opens an HttpOnly session cookie; the watchlist and the votes live in the market store, so one wallet sees the same lists on every device. The demo source still keeps them in `localStorage` |
-| Top traders board | `src/app/traders`, `/api/traders` | **Done (M4)** — the last 24 hours of `market.swaps` ranked by USD volume or by trade count, 50 wallets, cached a minute |
+| Top traders board | `src/components/TradersBoard.tsx`, `/api/traders` | **Parked, 30 Sep 2026.** The Traders tab and the `/traders` page were removed: the board showed nothing, and its data is not available yet. The API, its store query and the board component stay dormant behind `TRADERS_BOARD`, so the tab can come back. Built in M4: the last 24 hours of `market.swaps` ranked by USD volume or by trade count, 50 wallets, cached a minute |
 | Launchpad links for untradeable pools | `src/lib/chain.ts` | M3 — Bags dapp URL |
 
 Execution is off until `NEXT_PUBLIC_SVROUTER_ADDRESS` names a deployed router; the quote route

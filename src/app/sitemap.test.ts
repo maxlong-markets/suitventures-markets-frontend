@@ -24,9 +24,10 @@ describe("sitemap", () => {
     expect(urls).toContain(`https://www.maxlong.markets/t/${T1}`);
   });
 
-  // /traders and /watchlist are still gated, so both return the same lock screen `/` does.
-  // Listing them would submit three URLs of identical content — duplicate, thin, and a waste of
-  // the crawl budget the token pages need. They come back the day the gate lifts.
+  // /watchlist is still gated, so it returns the same lock screen `/` does. Listing it would
+  // submit URLs of identical content: duplicate, thin, and a waste of the crawl budget the token
+  // pages need. It comes back the day the gate lifts. /traders is no route since 30 Sep 2026 and
+  // must not be listed either.
   it("leaves the still-gated routes out, so no two submitted URLs render the same page", async () => {
     pairs.mockResolvedValue([pair(T1)]);
     const urls = (await sitemap()).map((e) => e.url);

@@ -40,10 +40,11 @@ export default function TokenGate({ children }: { children: ReactNode }) {
   const access = useSuitsAccess(address);
   const pathname = usePathname();
 
-  // The trailing slash is load-bearing: `pathname.startsWith("/t")` would also swallow
-  // `/traders`, which has no public layer of its own and must stay fully gated. `/t/[address]`
-  // always has a segment after the slash, so this cannot be fooled by a route that merely starts
-  // with the same two letters. Mirrors the identical check already in `TopBar.tsx`.
+  // The trailing slash is load-bearing: `pathname.startsWith("/t")` would also swallow any other
+  // path that starts with those two letters, such as `/traders` if the parked board's page ever
+  // comes back, and every such path must stay fully gated. `/t/[address]` always has a segment
+  // after the slash, so this cannot be fooled by a route that merely starts with the same two
+  // letters. Mirrors the identical check already in `TopBar.tsx`.
   const isTokenPage = pathname.startsWith("/t/");
 
   if (!gateEnabled()) return <>{children}</>;

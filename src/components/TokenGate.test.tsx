@@ -124,8 +124,9 @@ describe("TokenGate", () => {
     expect(screen.queryByTestId("lock-screen")).toBeNull();
   });
 
-  // The prefix trap: "/traders" starts with the same two letters as "/t/" but has no public
-  // layer of its own, so it must stay fully gated — a naive `startsWith("/t")` would exempt it.
+  // The prefix trap: "/traders" starts with the same two letters as "/t/". Its page is gone since
+  // 30 Sep 2026, but any path like it must stay fully gated, and a naive `startsWith("/t")` would
+  // exempt it.
   it("still renders the lock screen on /traders when denied", () => {
     h.pathname = "/traders";
     h.access = { status: "denied", count: 0n };
