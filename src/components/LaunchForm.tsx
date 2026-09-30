@@ -3,14 +3,15 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useConnectModal } from "@rainbow-me/rainbowkit";
 import { isAddress, type Hex } from "viem";
-import { useAccount, usePublicClient, useWalletClient } from "wagmi";
+import { useAccount, usePublicClient, useSwitchChain, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
 import { useCurrencyConfig, useLaunchSettings, useOpening, useTokenBalanceOf } from "@/hooks/useLaunchpad";
 import { useQuotes } from "@/hooks/useMarketsData";
 import { robinhoodChain, txUrl } from "@/lib/chain";
 import { USDG, ZERO_ADDRESS } from "@/lib/chain/math/constants";
-import { fmtAmt, fmtInt, fmtPrice } from "@/lib/format";
+import { fmtAmt, fmtInt, fmtPrice, short } from "@/lib/format";
 import {
   LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, executeLaunch, type LaunchStep,
 } from "@/lib/launch";
@@ -53,12 +54,33 @@ const PENDING =
   "mt-[14px] flex h-11 w-full cursor-wait items-center justify-center gap-[10px] bg-[rgba(244,238,218,0.55)] font-mono text-[11px] uppercase tracking-[0.22em] text-onlight";
 /** TokenView's transaction link recipe, with room to tap. */
 const LINK = "inline-block py-[6px] font-mono text-[10px] uppercase tracking-[0.2em] text-ink-60 hover:text-ink";
+/** A text control that reads as a link (UX review 3), in the label row's type. */
+const TEXT_LINK = "py-1 font-mono text-[11px] normal-case tracking-[0.04em] text-ink-70 underline underline-offset-2 hover:text-ink";
+
+/**
+ * The launch pools' LP fee in percent: `POOL_FEE = 10_000` pips in SVLaunchpad.sol, a constant with no getter, since the
+ * pool key is read only for a launched token. The creator's share of it is read live (`creatorShareBps`).
+ */
+const POOL_FEE_PCT = 1;
+/** Up to four decimals, no trailing zeros: 70, 70.5, 0.7, 0.705. */
+const pct = (n: number) => String(Number(n.toFixed(4)));
+/** The reasons the button itself answers (UX review 8): the line under it does not repeat them. */
+const CONNECT_REASON = "Connect a wallet to launch.";
+const NETWORK_REASON = "Switch your wallet to Robinhood Chain.";
 
 /**
  * Why the form stays locked with no redirect (UX review B3): a launch that was sent but could not be confirmed, or a token
  * already live at the predicted address. Pressing Launch again would reuse the salt and deploy onto a live token.
  */
 type Lock = { why: "unconfirmed"; token: Address; hash?: Hex } | { why: "live"; token: Address };
+/**
+ * The one submit button's look and what a press does, in each state; one element throughout, so keyboard focus never drops.
+ * Plain data: the press is dispatched from the JSX handler, so nothing here runs during render.
+ */
+type ButtonState = {
+  label: string; className: string; spinner: boolean; ariaDisabled: boolean; disabled: boolean;
+  action: "launch" | "connect" | "switch" | "none";
+};
 
 /** A typed amount in raw units, 0 for a half-typed or empty field. Display and gating only. */
 function parseAmount(text: string, decimals: number): bigint {
@@ -105,8 +127,10 @@ export default function LaunchForm() {
   const { address, isConnected, signed, withSignIn, dropSession, addToast, updateToast } = useAppState();
   const publicClient = usePublicClient({ chainId: robinhoodChain.id });
   const { data: walletClient } = useWalletClient({ chainId: robinhoodChain.id });
-  // On another network wagmi gives no wallet client for Robinhood Chain; the button names the network instead of doing nothing.
+  // On another network wagmi gives no wallet client for Robinhood Chain; the button asks the wallet to switch instead.
   const { chainId } = useAccount();
+  const { openConnectModal } = useConnectModal();
+  const { mutate: switchChain, isPending: switching } = useSwitchChain();
   const quotesQuery = useQuotes();
   const currencies = useMemo(() => orderCurrencies(quotesQuery.data ?? []), [quotesQuery.data]);
 
@@ -133,8 +157,8 @@ export default function LaunchForm() {
   // Set once the launch is confirmed: the form stays locked until the token page opens, so no enabled Launch flashes.
   const [done, setDone] = useState(false);
   const [lock, setLock] = useState<Lock | null>(null);
-  // Fields the creator has left once: their messages show from then on, never while first typing into them.
-  const [left, setLeft] = useState<ReadonlySet<LaunchFieldName>>(() => new Set());
+  // A switch the wallet refused or could not make, tied to the network it was asked from.
+  const [switchNote, setSwitchNote] = useState<{ from: number; text: string } | null>(null);
   const inFlight = useRef(false);
   const resumeAfterSignIn = useRef(false);
   const uploadCache = useRef<{ key: string; answer: UploadAnswer; at: number } | null>(null);
@@ -185,12 +209,17 @@ export default function LaunchForm() {
   // One set of rules with the upload route (fields.ts): the stored fields when all pass, and each field's own issue.
   const checked = validateFields(rawFields);
   const issues = fieldIssues(rawFields);
+  /**
+   * A field's message shows while its value breaks a rule, not on leaving the field: a message that appeared on blur
+   * pushed what sits below it down between pointerdown and click, so the click missed. An empty field says nothing: the
+   * button's reason asks for the name and symbol, and the links are optional.
+   */
   const noteFor = (field: LaunchFieldName): string | null => {
     const issue = issues[field];
-    return issue !== undefined && left.has(field) ? fieldMessage(field, issue) : null;
+    return issue !== undefined && rawFields[field] !== "" ? fieldMessage(field, issue) : null;
   };
-  const leave = (field: LaunchFieldName) => () => setLeft((s) => (s.has(field) ? s : new Set(s).add(field)));
   const payoutAddress = (payoutOpen && payout !== "" ? payout : address) as Address | undefined;
+  const wrongNetwork = chainId !== undefined && chainId !== robinhoodChain.id;
 
   /** Whole dollars when the currency has a USD price, else the currency's own units. */
   const money = (raw: bigint) => {
@@ -207,7 +236,7 @@ export default function LaunchForm() {
   };
 
   function reasonText(): string | null {
-    if (!isConnected || !address) return "Connect a wallet to launch.";
+    if (!isConnected || !address) return CONNECT_REASON;
     if (settings.allowed === undefined) return "Checking your wallet.";
     if (!settings.allowed) return "Launching is open to Suits holders.";
     if (!settingsRead) return "Reading the launchpad's settings.";
@@ -225,7 +254,7 @@ export default function LaunchForm() {
     if (balance !== undefined && total > balance) return "The first buy is more than your balance.";
     if (firstBuyRaw > 0n && capBps !== undefined && estimate > capTokens(capBps)) return "The first buy is above the cap.";
     if (payoutOpen && payout !== "" && !isAddress(payout)) return "Enter a valid payout address.";
-    if (chainId !== undefined && chainId !== robinhoodChain.id) return "Switch your wallet to Robinhood Chain.";
+    if (wrongNetwork) return NETWORK_REASON;
     if (!walletClient || !publicClient) return "Connecting to your wallet.";
     // The opening read lags the valuation by a 300 ms debounce; a click in that window would use the old snapped value.
     if (!snapped || opening.pending) return "Working out the opening price.";
@@ -370,11 +399,72 @@ export default function LaunchForm() {
   /** A field's accessible wiring to its own message: invalid while the message shows, described by it. */
   const described = (field: LaunchFieldName) => {
     const note = noteFor(field);
-    return { "aria-invalid": note !== null, "aria-describedby": note !== null ? `launch-${field}-note` : undefined, onBlur: leave(field) };
+    return { "aria-invalid": note !== null, "aria-describedby": note !== null ? `launch-${field}-note` : undefined };
   };
   const onAmount = (setter: (v: string) => void) => (raw: string) => {
     if (AMOUNT_RE.test(raw)) setter(raw);
   };
+
+  // UX review 8: with no wallet the button opens the connect modal; on another network it asks the wallet to switch.
+  const onSwitch = () => {
+    const from = chainId;
+    setSwitchNote(null);
+    switchChain(
+      { chainId: robinhoodChain.id },
+      {
+        onError: () => {
+          if (from !== undefined) setSwitchNote({ from, text: "The wallet did not switch. Pick Robinhood Chain in your wallet." });
+        },
+      },
+    );
+  };
+  // While busy or locked a press still goes to submit, whose guard ignores it (the button is only aria-disabled then).
+  let button: ButtonState;
+  if (busy) {
+    const label = done ? "Launched" : current ? STEP_LABELS[current] : "Launch";
+    button = { label, className: PENDING, spinner: true, ariaDisabled: true, disabled: false, action: "launch" };
+  } else if (lock) {
+    button = { label: lock.why === "live" ? "Already live" : "Sent", className: DISABLED, spinner: false, ariaDisabled: true, disabled: false, action: "launch" };
+  } else if (reason === CONNECT_REASON) {
+    button = { label: "Connect wallet", className: PRIMARY, spinner: false, ariaDisabled: false, disabled: false, action: "connect" };
+  } else if (wrongNetwork) {
+    button = switching
+      ? { label: "Confirm in wallet", className: PENDING, spinner: true, ariaDisabled: true, disabled: false, action: "none" }
+      : { label: "Switch to Robinhood Chain", className: PRIMARY, spinner: false, ariaDisabled: false, disabled: false, action: "switch" };
+  } else {
+    const blocked = reason !== null;
+    button = { label: "Launch", className: blocked ? DISABLED : PRIMARY, spinner: false, ariaDisabled: blocked, disabled: blocked, action: "launch" };
+  }
+  // The button itself answers "connect" and "switch"; any other reason shows under it.
+  const statusLine = busy || lock || reason === CONNECT_REASON || reason === NETWORK_REASON ? "" : (reason ?? "");
+
+  // UX review 18: say why the opening price is blank instead of leaving the slot empty.
+  let openingLine = "";
+  if (snapped) openingLine = `Opens at ${money(snapped)} · ${perToken(snapped)} per token`;
+  else if (inRange && (nameOnChain === "" || symbolOnChain === "")) openingLine = "Enter a name and symbol to see the opening price.";
+  else if (inRange && !address) openingLine = "Connect a wallet to see the opening price.";
+  else if (inRange && opening.pending) openingLine = "Working out the opening price…";
+  // UX review 5: the contract opens at or below the pick, within one 1.0001^200 step of it (about 2 %).
+  const roundedDown = snapped !== undefined && requested !== null && !opening.pending && snapped !== requested;
+
+  // UX review 4: the cap is on tokens received; the cost is the gross first buy that reaches it at this opening.
+  let capLine: string | null = null;
+  if (capBps === 0) capLine = "First buys are closed for now.";
+  else if (capBps !== undefined && capBps < 10_000) {
+    const cost = capGross !== null && snapped ? `, about ${money(capGross)} at this valuation` : "";
+    capLine = `Up to ${pct(capBps / 100)} % of the supply${cost}.`;
+  }
+
+  // UX review 2: the creator's cut of the pool fee, from the live share, in the words the rest of the app uses.
+  const feeLine =
+    shareBps !== undefined
+      ? `Your payout address gets ${pct(shareBps / 100)} % of the ${POOL_FEE_PCT} % pool fee, so ${pct((shareBps * POOL_FEE_PCT) / 10_000)} % of every trade, in ${symbolOnChain || "your token"} and ${asset?.symbol ?? "the currency"}. It is paid out when anyone presses Collect on the token's page.`
+      : null;
+
+  // UX review 3: where the fees go, always echoed back; the payout can only be changed later by the payout address itself.
+  const payoutInvalid = payoutOpen && payout !== "" && !isAddress(payout);
+  const payoutIsWallet = payoutAddress !== undefined && address !== undefined && payoutAddress.toLowerCase() === address.toLowerCase();
+  const payoutText = payoutAddress ? `${short(payoutAddress)}${payoutIsWallet ? " (this wallet)" : ""}` : "Your wallet";
 
   return (
     <div className="mt-5 flex flex-col gap-6 twocol:flex-row twocol:items-start twocol:gap-8">
@@ -510,8 +600,13 @@ export default function LaunchForm() {
           </div>
         ) : null}
         <div className="mt-2 font-mono text-[11px] text-ink-60" aria-live="polite">
-          {snapped ? `Opens at ${money(snapped)} · ${perToken(snapped)} per token` : opening.pending && inRange ? "Working out the opening price…" : ""}
+          {openingLine}
         </div>
+        {roundedDown ? (
+          <div className="mt-1 font-mono text-[10.5px] leading-[1.5] text-ink-45">
+            Rounded down to the pool&apos;s nearest price step, at most about 2 % below your pick.
+          </div>
+        ) : null}
 
         <label className={`${LABEL} mt-5`} htmlFor="launch-first-buy">
           <span>First buy</span>
@@ -538,18 +633,36 @@ export default function LaunchForm() {
           </button>
           <span className="pr-3 font-mono text-[11px] text-ink-45">{asset?.symbol}</span>
         </div>
+        {capLine ? <div className="mt-2 font-mono text-[10.5px] leading-[1.5] text-ink-45">{capLine}</div> : null}
         {firstBuyRaw > 0n && snapped ? (
           <div className="mt-2 font-mono text-[11px] text-ink-60">
             About {fmtAmt(rawToNumber(estimate, 18), 0)} tokens, {shareOfSupplyPct(estimate).toFixed(2)} % of supply
           </div>
         ) : null}
 
-        <button type="button" onClick={() => setPayoutOpen((o) => !o)} aria-expanded={payoutOpen} className={`${LABEL} mt-5 w-full bg-transparent p-0`}>
+        <div className={`${LABEL} mt-5`}>
           <span>Fee payout</span>
-          <span className="normal-case tracking-[0.04em]">{payoutOpen ? "Another address" : "Your wallet"}</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setPayoutOpen((o) => !o)}
+            aria-expanded={payoutOpen}
+            aria-controls={payoutOpen ? "launch-payout" : undefined}
+            className={TEXT_LINK}
+          >
+            {payoutOpen ? "Use this wallet" : "Pay another address"}
+          </button>
+        </div>
         {payoutOpen ? (
-          <input aria-label="Payout address" placeholder="0x…" value={payout} onChange={(e) => setPayout(e.target.value.trim())} className={INPUT} autoComplete="off" spellCheck={false} />
+          <input
+            id="launch-payout"
+            aria-label="Payout address"
+            placeholder="Leave empty to use this wallet"
+            value={payout}
+            onChange={(e) => setPayout(e.target.value.trim())}
+            className={INPUT}
+            autoComplete="off"
+            spellCheck={false}
+          />
         ) : null}
       </div>
 
@@ -565,8 +678,9 @@ export default function LaunchForm() {
           ) : null}
           <Row label="Creation fee">{creationFee === 0n ? "Free" : units(creationFee)}</Row>
           <Row label="You pay">{total === 0n ? "Gas only" : units(total)}</Row>
+          <Row label="Fee payout">{payoutInvalid ? <span className="text-down">Not a valid address</span> : payoutText}</Row>
           <div className="mt-3 border-t border-hairline-soft pt-3 text-[11px] leading-[1.5] text-ink-60">
-            {shareBps !== undefined ? <div>{`${shareBps / 100} % of trading fees to your payout address`}</div> : null}
+            {feeLine ? <div>{feeLine}</div> : null}
             {settings.dailyLimit !== undefined && settings.launchesToday !== undefined ? (
               <div className="mt-1">{`${Math.max(0, settings.dailyLimit - settings.launchesToday)} of ${settings.dailyLimit} left today. The count resets at 00:00 UTC.`}</div>
             ) : null}
@@ -579,16 +693,20 @@ export default function LaunchForm() {
           */}
           <button
             type="button"
-            disabled={reason !== null && !busy && !lock}
-            aria-disabled={busy || lock !== null || reason !== null}
-            onClick={() => void submit(Date.now())}
-            className={busy ? PENDING : lock === null && reason === null ? PRIMARY : DISABLED}
+            disabled={button.disabled}
+            aria-disabled={button.ariaDisabled}
+            onClick={() => {
+              if (button.action === "connect") openConnectModal?.();
+              else if (button.action === "switch") onSwitch();
+              else if (button.action === "launch") void submit(Date.now());
+            }}
+            className={button.className}
           >
-            {busy ? <Spinner dark /> : null}
-            {done ? "Launched" : lock ? (lock.why === "live" ? "Already live" : "Sent") : pending && current ? STEP_LABELS[current] : "Launch"}
+            {button.spinner ? <Spinner dark /> : null}
+            {button.label}
           </button>
           <div role="status" aria-live="polite" className="mt-2 text-center text-[10.5px] text-ink-50 empty:hidden">
-            {reason !== null && !busy && !lock ? reason : ""}
+            {statusLine}
           </div>
           {lock ? (
             <>
@@ -612,6 +730,11 @@ export default function LaunchForm() {
           ) : error ? (
             <div role="alert" className="mt-2 text-center text-[10.5px] text-down">
               {error}
+            </div>
+          ) : null}
+          {wrongNetwork && switchNote !== null && switchNote.from === chainId ? (
+            <div role="alert" className="mt-2 text-center text-[10.5px] text-down">
+              {switchNote.text}
             </div>
           ) : null}
           <div role="status" aria-live="polite" aria-label="Launch steps">

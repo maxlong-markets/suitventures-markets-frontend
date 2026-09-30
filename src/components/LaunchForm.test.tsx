@@ -3,8 +3,9 @@ import { robinhoodChain, txUrl } from "@/lib/chain";
 import {
   LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, messageForRevert,
 } from "@/lib/launch";
+import { fmtInt } from "@/lib/format";
 import { UPLOAD_MESSAGES, UploadError } from "@/lib/launch/client";
-import { estimateFirstBuyTokens, minFirstBuyTokens } from "@/lib/launch/math";
+import { estimateFirstBuyTokens, firstBuyCapGross, minFirstBuyTokens, rawToNumber } from "@/lib/launch/math";
 import type { Address, QuoteAsset } from "@/lib/types";
 import { act, fireEvent, render, screen, waitFor, within } from "@/test/dom";
 import LaunchForm from "./LaunchForm";
@@ -37,7 +38,12 @@ const h = vi.hoisted(() => ({
   },
   settings: {} as Record<string, unknown>,
   bounds: {} as Record<string, { min: bigint; max: bigint; creationFee: bigint }>,
-  opening: { token: "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a", openTick: -398_400, snapped: 4_995_430_000n as bigint | undefined, pending: false },
+  opening: {
+    token: "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a" as string | undefined,
+    openTick: -398_400 as number | undefined,
+    snapped: 4_995_430_000n as bigint | undefined,
+    pending: false,
+  },
   /** What the form last asked the preview for: the name and symbol predictToken sees. */
   openingInput: null as null | { name: string; symbol: string },
   balance: 1_000_000_000n as bigint | undefined,
@@ -48,6 +54,9 @@ const h = vi.hoisted(() => ({
   refetch: vi.fn(),
   chainId: 46630 as number | undefined,
   wallet: { id: "wallet" } as unknown,
+  openConnect: vi.fn(),
+  switchChain: vi.fn(),
+  switching: false,
 }));
 
 vi.mock("@/context/AppState", () => ({ useAppState: () => h.state }));
@@ -68,7 +77,9 @@ vi.mock("wagmi", () => ({
   useAccount: () => ({ chainId: h.chainId }),
   usePublicClient: () => ({ id: "public" }),
   useWalletClient: () => ({ data: h.wallet }),
+  useSwitchChain: () => ({ mutate: h.switchChain, isPending: h.switching }),
 }));
+vi.mock("@rainbow-me/rainbowkit", () => ({ useConnectModal: () => ({ openConnectModal: h.openConnect }) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: h.push }) }));
 vi.mock("@/lib/launch/client", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/launch/client")>()), uploadLaunchAssets: h.upload }));
 vi.mock("@/lib/launch", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/launch")>()), executeLaunch: h.execute }));
@@ -102,6 +113,9 @@ beforeEach(() => {
   h.refetch.mockReset();
   h.chainId = robinhoodChain.id;
   h.wallet = { id: "wallet" };
+  h.openConnect.mockReset();
+  h.switchChain.mockReset();
+  h.switching = false;
 });
 
 function fill(o: { name?: string; symbol?: string } = {}) {
@@ -117,16 +131,24 @@ const press = async () => {
 };
 
 describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => {
-  it("asks for a wallet, then a Suit, then a launch left today, then the fields", () => {
+  // Was: a disabled Launch with "Connect a wallet to launch." under it. UX review 8 makes the button itself open the
+  // connect modal, so the line under it no longer repeats that.
+  it("offers the connect modal instead of a dead button, then asks for a Suit, a launch left today, then the fields", () => {
     h.state.isConnected = false;
     h.state.address = undefined;
     const { rerender } = render(<LaunchForm />);
-    expect(screen.getByText("Connect a wallet to launch.")).toBeTruthy();
-    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+    const connect = screen.getByRole("button", { name: "Connect wallet" });
+    expect((connect as HTMLButtonElement).disabled).toBe(false);
+    expect(connect.getAttribute("aria-disabled")).toBe("false");
+    expect(screen.queryByText("Connect a wallet to launch.")).toBeNull();
+    fireEvent.click(connect);
+    expect(h.openConnect).toHaveBeenCalledTimes(1);
+    expect(h.upload).not.toHaveBeenCalled();
     h.state.isConnected = true;
     h.state.address = WALLET;
     h.settings = { ...h.settings, allowed: false };
     rerender(<LaunchForm />);
+    expect(launch()).toBe(connect); // the same element, so keyboard focus stays on it
     expect(screen.getByText("Launching is open to Suits holders.")).toBeTruthy();
     h.settings = { ...h.settings, allowed: true, launchesToday: 5 };
     rerender(<LaunchForm />);
@@ -180,18 +202,19 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect((launch() as HTMLButtonElement).disabled).toBe(true);
   });
 
-  // UX review, should fix 6.
-  it("shows the name's own message under it once the field is left, and turns the byte counter red while over", () => {
+  // UX review, should fix 6. The message shows as soon as the value breaks a rule, not on leaving the field: a message that
+  // appeared on blur pushed the next field down between pointerdown and click, and swallowed the click (seen at 320 px).
+  it("shows the name's own message under it as soon as it is over, and turns the byte counter red while over", () => {
     render(<LaunchForm />);
     fill({ name: "🚀".repeat(9) });
     expect(screen.getByText("36/32 bytes").className).toContain("text-down");
     const message = "Shorten the name to 32 bytes. An emoji takes 4 bytes, an accented letter 2.";
-    expect(screen.queryByText(message)).toBeNull(); // not while the creator is still typing in it
     const input = screen.getByLabelText("Name");
-    fireEvent.blur(input);
     const note = screen.getByText(message);
     expect(input.getAttribute("aria-invalid")).toBe("true");
     expect(input.getAttribute("aria-describedby")).toBe(note.id);
+    fireEvent.blur(input);
+    expect(screen.getByText(message)).toBe(note); // leaving the field changes nothing, so nothing below it moves
     fireEvent.change(input, { target: { value: "🚀".repeat(8) } });
     expect(screen.queryByText(message)).toBeNull(); // gone the moment it fits
     expect(screen.getByText("32/32 bytes").className).not.toContain("text-down");
@@ -200,8 +223,8 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
 
   it("says under each field what to change: a joined emoji, a tab, a website without https://, an X share link, a Telegram invite", () => {
     render(<LaunchForm />);
+    expect(document.querySelectorAll("[id$='-note']")).toHaveLength(0); // nothing on an untouched form
     fill({ name: "Dev \u{1F468}\u{200D}\u{1F4BB}" });
-    fireEvent.blur(screen.getByLabelText("Name"));
     expect(screen.getByText("Joined emoji such as \u{1F468}\u{200D}\u{1F4BB} cannot go in the name. Use single emoji.")).toBeTruthy();
     const cases: ReadonlyArray<[string, string, string]> = [
       ["Symbol", "CH\tK", "The symbol holds a hidden character, such as a tab or line break. Type it again by hand."],
@@ -213,11 +236,19 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     for (const [label, value, message] of cases) {
       const input = screen.getByLabelText(label);
       fireEvent.change(input, { target: { value } });
-      fireEvent.blur(input);
       expect(input.getAttribute("aria-describedby")).toBe(screen.getByText(message).id);
     }
     expect(screen.getByText("Check the name.")).toBeTruthy(); // the first field in form order
     expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("says nothing under an empty name, which the button's reason covers, but names a name of spaces", () => {
+    render(<LaunchForm />);
+    fill({ name: "" });
+    expect(screen.queryByText("Enter a name.")).toBeNull();
+    expect(screen.getByText("Add an image, a name and a symbol.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "   " } });
+    expect(screen.getByText("Enter a name.")).toBeTruthy();
   });
 
   it("turns the description counter red over 500 characters", () => {
@@ -258,10 +289,15 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("The first buy is above the cap.")).toBeTruthy();
   });
 
+  // The fee line read "65 % of trading fees to your payout address"; UX review 2 rewords it around the pool fee.
   it("reads the fee share from the contract, never a fixed 70 %, and shows the snapped opening in USD", () => {
     h.settings = { ...h.settings, creatorShareBps: 6500 };
     render(<LaunchForm />);
-    expect(screen.getByText("65 % of trading fees to your payout address")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Your payout address gets 65 % of the 1 % pool fee, so 0.65 % of every trade, in your token and USDG. It is paid out when anyone presses Collect on the token's page.",
+      ),
+    ).toBeTruthy();
     expect(["$5,000", "$10,000", "$25,000", "$100,000"].every((label) => screen.getByRole("button", { name: label }))).toBe(true);
     expect(screen.getByText("Opens at $4,995 · $0.000004995 per token")).toBeTruthy();
     expect(screen.getByText("Gas only")).toBeTruthy();
@@ -284,13 +320,122 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("Pick a valuation between 50 AMC and 100,000 AMC.")).toBeTruthy();
   });
 
-  it("names the wrong network instead of an enabled button that does nothing", () => {
+  // Was: a disabled Launch with "Switch your wallet to Robinhood Chain." under it. UX review 8 makes the button ask the
+  // wallet to switch; the other reasons still show under it.
+  it("turns the button into a network switch on another network, and says so when the wallet does not switch", () => {
     h.chainId = 1;
     h.wallet = undefined;
     render(<LaunchForm />);
+    const button = screen.getByRole("button", { name: "Switch to Robinhood Chain" });
+    expect(screen.getByText("Add an image, a name and a symbol.")).toBeTruthy(); // what else is missing still shows
     fill();
-    expect(screen.getByText("Switch your wallet to Robinhood Chain.")).toBeTruthy();
-    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("Switch your wallet to Robinhood Chain.")).toBeNull(); // not repeated under the button
+    fireEvent.click(button);
+    expect(h.switchChain).toHaveBeenCalledWith({ chainId: robinhoodChain.id }, expect.anything());
+    expect(h.upload).not.toHaveBeenCalled();
+    const options = h.switchChain.mock.calls[0]![1] as { onError(e: Error): void };
+    act(() => options.onError(new Error("User rejected the request.")));
+    expect(screen.getByRole("alert").textContent).toBe("The wallet did not switch. Pick Robinhood Chain in your wallet.");
+  });
+
+  it("waits on the wallet while it switches", () => {
+    h.chainId = 1;
+    h.wallet = undefined;
+    h.switching = true;
+    render(<LaunchForm />);
+    const button = screen.getByRole("button", { name: "Confirm in wallet" });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(button);
+    expect(h.switchChain).not.toHaveBeenCalled();
+  });
+
+  // UX review, should fix 2.
+  it("words the creator's cut from the live share and the pool fee, in the token and the currency", () => {
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    const line = (share: string, cut: string) =>
+      `Your payout address gets ${share} % of the 1 % pool fee, so ${cut} % of every trade, in CHALK and USDG. It is paid out when anyone presses Collect on the token's page.`;
+    expect(screen.getByText(line("70", "0.7"))).toBeTruthy();
+    h.settings = { ...h.settings, creatorShareBps: 7050 };
+    rerender(<LaunchForm />);
+    expect(screen.getByText(line("70.5", "0.705"))).toBeTruthy();
+  });
+
+  // UX review, should fix 3.
+  it("always shows where the fees go, with a link-style control to change it and a placeholder that says empty means this wallet", async () => {
+    render(<LaunchForm />);
+    fill();
+    expect(screen.getByText("0x1111…1111 (this wallet)")).toBeTruthy();
+    const toggle = screen.getByRole("button", { name: "Pay another address" });
+    expect(toggle.className).toContain("underline");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.textContent).toBe("Use this wallet");
+    const field = screen.getByLabelText("Payout address") as HTMLInputElement;
+    expect(field.placeholder).toBe("Leave empty to use this wallet");
+    expect(screen.getByText("0x1111…1111 (this wallet)")).toBeTruthy(); // left empty, it still pays this wallet
+    fireEvent.change(field, { target: { value: "0x12" } });
+    expect(screen.getByText("Not a valid address")).toBeTruthy();
+    expect(screen.getByText("Enter a valid payout address.")).toBeTruthy();
+    fireEvent.change(field, { target: { value: OTHER_WALLET } });
+    expect(screen.getByText("0x2222…2222")).toBeTruthy();
+    await press();
+    await waitFor(() => expect(h.execute).toHaveBeenCalled());
+    expect(h.execute.mock.calls[0]![0].payout).toBe(OTHER_WALLET);
+  });
+
+  // UX review, should fix 4.
+  it("states the first buy's cap from the live setting, with its rough cost at this valuation", () => {
+    const usd = (raw: bigint) => `$${fmtInt(rawToNumber(raw, 6))}`;
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    expect(screen.getByText(`Up to 20 % of the supply, about ${usd(firstBuyCapGross(SNAPPED, 2000, 50)!)} at this valuation.`)).toBeTruthy();
+    h.settings = { ...h.settings, firstBuyCapBps: 1500 };
+    rerender(<LaunchForm />);
+    expect(screen.getByText(`Up to 15 % of the supply, about ${usd(firstBuyCapGross(SNAPPED, 1500, 50)!)} at this valuation.`)).toBeTruthy();
+    h.opening = { ...h.opening, snapped: undefined };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("Up to 15 % of the supply.")).toBeTruthy();
+    h.settings = { ...h.settings, firstBuyCapBps: 0 };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("First buys are closed for now.")).toBeTruthy();
+  });
+
+  // UX review, should fix 5: the contract opens at or below the pick, within one 1.0001^200 step.
+  it("says when the opening valuation was rounded down to the pool's price step", () => {
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    const note = "Rounded down to the pool's nearest price step, at most about 2 % below your pick.";
+    expect(screen.getByText(note)).toBeTruthy(); // $5,000 picked, $4,995.43 snapped
+    h.opening = { ...h.opening, pending: true };
+    rerender(<LaunchForm />);
+    expect(screen.queryByText(note)).toBeNull(); // not while a new pick is being worked out
+    h.opening = { ...h.opening, pending: false, snapped: 5_000_000_000n }; // exactly on a step
+    rerender(<LaunchForm />);
+    expect(screen.queryByText(note)).toBeNull();
+  });
+
+  // UX review, should fix 18.
+  it("says why the opening price is blank: no name and symbol yet, or no wallet", () => {
+    h.opening = { token: undefined, openTick: undefined, snapped: undefined, pending: false }; // the hook without both
+    const { rerender } = render(<LaunchForm />);
+    const hint = "Enter a name and symbol to see the opening price.";
+    expect(screen.getByText(hint)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Tailor's Chalk" } });
+    expect(screen.getByText(hint)).toBeTruthy(); // the symbol is still missing
+    fireEvent.change(screen.getByLabelText("Symbol"), { target: { value: "  " } });
+    expect(screen.getByText(hint)).toBeTruthy(); // spaces are no symbol
+    fireEvent.change(screen.getByLabelText("Symbol"), { target: { value: "CHALK" } });
+    expect(screen.queryByText(hint)).toBeNull();
+    h.opening = { token: TOKEN, openTick: -398_400, snapped: SNAPPED, pending: false };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("Opens at $4,995 · $0.000004995 per token")).toBeTruthy();
+    h.state.isConnected = false;
+    h.state.address = undefined;
+    h.opening = { token: undefined, openTick: undefined, snapped: undefined, pending: false };
+    rerender(<LaunchForm />);
+    expect(screen.getByText("Connect a wallet to see the opening price.")).toBeTruthy();
   });
 
   it("waits for the wallet client on the right network", () => {

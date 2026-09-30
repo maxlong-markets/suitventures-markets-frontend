@@ -28,4 +28,23 @@ describe("/launch (instant launchpad design, section 7.2)", () => {
     expect(screen.queryByText("Launching is not live yet")).toBeNull();
     expect(container.textContent).toMatch(/the launch form.*your launches/);
   });
+
+  // UX review, should fix 1: a creator expecting a team allocation or automatic payouts found out only after paying.
+  it("explains the model in three plain lines above the form: a fixed supply locked in the pool, tokens only through the first buy, fees paid on Collect", () => {
+    h.live = true;
+    const { container } = render(<LaunchPage />);
+    const lines = [
+      "A fixed supply of 1,000,000,000 tokens goes into a Uniswap v4 pool and stays locked there for good.",
+      "You get tokens only through a first buy when you launch.",
+      "The pool fee builds up with every trade and is paid out when anyone presses Collect on the token's page.",
+    ];
+    for (const line of lines) expect(screen.getByText(line)).toBeTruthy();
+    expect(container.textContent).toMatch(/for good\..*Collect on the token's page\..*the launch form/);
+  });
+
+  it("keeps the lines off the not-live card", () => {
+    h.live = false;
+    render(<LaunchPage />);
+    expect(screen.queryByText(/stays locked there for good/)).toBeNull();
+  });
 });
