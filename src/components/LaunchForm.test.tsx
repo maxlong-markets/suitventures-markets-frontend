@@ -140,6 +140,11 @@ const press = async () => {
     fireEvent.click(launch());
   });
 };
+/** Seen, not only laid out: fix round 1 (ruling 3) keeps some lines in place with `invisible` so nothing below them moves. */
+const shown = (el: Element) => el.closest(".invisible") === null;
+const ROUNDED = "Rounded down to the pool's nearest price step, at most about 2 % below your pick.";
+const feeLine = (share: string, cut: string, token: string) =>
+  `Your payout address gets ${share} % of the pool fee that the launch's locked liquidity earns, up to ${cut} % of every trade. It is paid in ${token} and USDG when anyone presses Collect on the token's page.`;
 
 describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => {
   // Was: a disabled Launch with "Connect a wallet to launch." under it. UX review 8 makes the button itself open the
@@ -219,7 +224,9 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     render(<LaunchForm />);
     fill({ name: "🚀".repeat(9) });
     expect(screen.getByText("36/32 bytes").className).toContain("text-down");
-    const message = "Shorten the name to 32 bytes. An emoji takes 4 bytes, an accented letter 2.";
+    // Fix round 1, ruling 11: the byte costs name Chinese, Japanese and Korean characters too.
+    const message =
+      "Shorten the name to 32 bytes. A plain letter takes 1, an accented letter 2, a Chinese, Japanese or Korean character 3, an emoji 4.";
     const input = screen.getByLabelText("Name");
     const note = screen.getByText(message);
     expect(input.getAttribute("aria-invalid")).toBe("true");
@@ -234,7 +241,10 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
 
   it("says under each field what to change: a joined emoji, a tab, a website without https://, an X share link, a Telegram invite", () => {
     render(<LaunchForm />);
-    expect(document.querySelectorAll("[id$='-note']")).toHaveLength(0); // nothing on an untouched form
+    // Nothing said on an untouched form. The regions themselves are always there since fix round 1 (ruling 8), empty.
+    const regions = [...document.querySelectorAll("[id$='-note']")];
+    expect(regions.length).toBeGreaterThan(0);
+    for (const region of regions) expect(region.textContent).toBe("");
     fill({ name: "Dev \u{1F468}\u{200D}\u{1F4BB}" });
     expect(screen.getByText("Joined emoji such as \u{1F468}\u{200D}\u{1F4BB} cannot go in the name. Use single emoji.")).toBeTruthy();
     const cases: ReadonlyArray<[string, string, string]> = [
@@ -300,15 +310,12 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("The first buy is above the cap.")).toBeTruthy();
   });
 
-  // The fee line read "65 % of trading fees to your payout address"; UX review 2 rewords it around the pool fee.
+  // The fee line read "65 % of trading fees to your payout address"; UX review 2 reworded it around the pool fee, and fix
+  // round 1 (ruling 2) says "up to": other people can add liquidity to the pool, and the launch's earns only its share.
   it("reads the fee share from the contract, never a fixed 70 %, and shows the snapped opening in USD", () => {
     h.settings = { ...h.settings, creatorShareBps: 6500 };
     render(<LaunchForm />);
-    expect(
-      screen.getByText(
-        "Your payout address gets 65 % of the 1 % pool fee, so 0.65 % of every trade, in your token and USDG. It is paid out when anyone presses Collect on the token's page.",
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText(feeLine("65", "0.65", "your token"))).toBeTruthy();
     expect(["$5,000", "$10,000", "$25,000", "$100,000"].every((label) => screen.getByRole("button", { name: label }))).toBe(true);
     expect(screen.getByText("Opens at $4,995 · $0.000004995 per token")).toBeTruthy();
     expect(screen.getByText("Gas only")).toBeTruthy();
@@ -361,16 +368,15 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(h.switchChain).not.toHaveBeenCalled();
   });
 
-  // UX review, should fix 2.
+  // UX review, should fix 2; worded in fix round 1 (ruling 2) as the share of what the launch's liquidity earns, at most
+  // the share of the 1 % pool fee.
   it("words the creator's cut from the live share and the pool fee, in the token and the currency", () => {
     const { rerender } = render(<LaunchForm />);
     fill();
-    const line = (share: string, cut: string) =>
-      `Your payout address gets ${share} % of the 1 % pool fee, so ${cut} % of every trade, in CHALK and USDG. It is paid out when anyone presses Collect on the token's page.`;
-    expect(screen.getByText(line("70", "0.7"))).toBeTruthy();
+    expect(screen.getByText(feeLine("70", "0.7", "CHALK"))).toBeTruthy();
     h.settings = { ...h.settings, creatorShareBps: 7050 };
     rerender(<LaunchForm />);
-    expect(screen.getByText(line("70.5", "0.705"))).toBeTruthy();
+    expect(screen.getByText(feeLine("70.5", "0.705", "CHALK"))).toBeTruthy();
   });
 
   // UX review, should fix 3.
@@ -433,18 +439,80 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("First buys are closed for now.")).toBeTruthy();
   });
 
-  // UX review, should fix 5: the contract opens at or below the pick, within one 1.0001^200 step.
+  // UX review, should fix 5: the contract opens at or below the pick, within one 1.0001^200 step. Since fix round 1 (ruling
+  // 3) the note is always laid out and hidden with `invisible` rather than removed, so nothing below it moves.
   it("says when the opening valuation was rounded down to the pool's price step", () => {
     const { rerender } = render(<LaunchForm />);
     fill();
-    const note = "Rounded down to the pool's nearest price step, at most about 2 % below your pick.";
-    expect(screen.getByText(note)).toBeTruthy(); // $5,000 picked, $4,995.43 snapped
+    const note = screen.getByText(ROUNDED);
+    expect(shown(note)).toBe(true); // $5,000 picked, $4,995.43 snapped
     h.opening = { ...h.opening, pending: true };
     rerender(<LaunchForm />);
-    expect(screen.queryByText(note)).toBeNull(); // not while a new pick is being worked out
+    expect(screen.getByText(ROUNDED)).toBe(note);
+    expect(shown(note)).toBe(false); // not while a new pick is being worked out
     h.opening = { ...h.opening, pending: false, snapped: 5_000_000_000n }; // exactly on a step
     rerender(<LaunchForm />);
-    expect(screen.queryByText(note)).toBeNull();
+    expect(shown(note)).toBe(false);
+  });
+
+  // Fix round 1, ruling 3: a tap on First buy, Max or the payout link must never miss because a line came or went while the
+  // price re-read. The lines between them keep their place: hidden, reserved or held, never removed.
+  it("keeps every line below the valuation in place while the price re-reads", () => {
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    fireEvent.change(screen.getByLabelText("First buy"), { target: { value: "100" } });
+    const note = screen.getByText(ROUNDED);
+    const opens = screen.getByText("Opens at $4,995 · $0.000004995 per token");
+    const cap = screen.getByText(/^Up to 20 % of the supply, about/);
+    const estimate = screen.getByText(/^About [\d,]+ tokens/);
+    expect(cap.className).toContain("min-h-[3em]"); // two lines held, the most it needs at 320 px
+    expect([note, opens, estimate].every(shown)).toBe(true);
+    // A new pick: the settled read is gone and the new one is out.
+    h.opening = { token: undefined, openTick: undefined, snapped: undefined, pending: true };
+    rerender(<LaunchForm />);
+    for (const el of [note, opens, cap, estimate]) expect(el.isConnected).toBe(true); // the same elements, still laid out
+    expect(shown(note)).toBe(false);
+    expect(shown(opens)).toBe(false);
+    expect(shown(estimate)).toBe(false);
+    expect(cap.textContent).toBe("Up to 20\u{A0}% of the supply."); // shorter text in the same two-line box
+    expect(shown(screen.getByText("Working out the opening price…"))).toBe(true); // stacked over the preview, same height
+  });
+
+  // Fix round 1, ruling 4: iOS capitalised "https://" and "x.com", and the messages then described the wrong problem.
+  it("keeps a phone from capitalising, correcting or spell-checking the links, and offers the URL keyboard for the website", () => {
+    render(<LaunchForm />);
+    for (const label of ["Website", "X", "Telegram"]) {
+      const input = screen.getByLabelText(label);
+      expect(input.getAttribute("autocapitalize")).toBe("none");
+      expect(input.getAttribute("autocorrect")).toBe("off");
+      expect(input.getAttribute("spellcheck")).toBe("false");
+    }
+    expect(screen.getByLabelText("Website").getAttribute("inputmode")).toBe("url");
+  });
+
+  // Fix round 1, ruling 8: a message that appears while typing is spoken, once, from a region that was already there.
+  it("announces a field's message politely from a region that is always there, and not again while it stays the same", () => {
+    render(<LaunchForm />);
+    const region = document.getElementById("launch-website-note")!;
+    expect(region.getAttribute("aria-live")).toBe("polite");
+    expect(region.textContent).toBe("");
+    fireEvent.change(screen.getByLabelText("Website"), { target: { value: "m" } });
+    expect(document.getElementById("launch-website-note")).toBe(region); // filled in place, not mounted with its text
+    expect(region.textContent).toBe("The website must start with https://, as in https://example.com.");
+    const spoken = region.firstChild;
+    fireEvent.change(screen.getByLabelText("Website"), { target: { value: "my" } });
+    expect(region.firstChild).toBe(spoken); // the same text node: nothing new to announce on this keystroke
+    fireEvent.change(screen.getByLabelText("Website"), { target: { value: "https://mysite.com" } });
+    expect(region.textContent).toBe("");
+  });
+
+  // Fix round 1, ruling 10: "1 %" broke across lines at 320 px.
+  it("never lets a number part from its percent sign", () => {
+    const { container } = render(<LaunchForm />);
+    fill();
+    fireEvent.change(screen.getByLabelText("First buy"), { target: { value: "100" } });
+    expect(container.textContent).toMatch(/\d\u{A0}%/u);
+    expect(container.textContent).not.toMatch(/\d %/);
   });
 
   // UX review, should fix 18.

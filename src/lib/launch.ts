@@ -27,6 +27,13 @@ import type { Address } from "./types";
 /** The permit's and the launch's deadline: 20 minutes, which the nightly clean-up also allows for (spec 6). */
 export const LAUNCH_DEADLINE_SEC = 1_200;
 
+/**
+ * The launch pools' LP fee in percent: `POOL_FEE = 10_000` pips in SVLaunchpad.sol, a constant with no getter, since the
+ * pool key is read only for a launched token. The creator's share of what the launch's liquidity earns is read live
+ * (`creatorShareBps`). Shared by the form and the /launch page.
+ */
+export const POOL_FEE_PCT = 1;
+
 export type LaunchDeps = { wallet: WalletClient; publicClient: PublicClient; account: Address };
 /**
  * `token` is not sent: it is the address `predictToken` gives for this creator, salt, name and symbol, where the launch

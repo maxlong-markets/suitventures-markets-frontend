@@ -21,15 +21,16 @@ export type FieldCheck = { ok: true; fields: LaunchFields } | { ok: false; field
  * - "joined-emoji": emoji joined into one picture by a zero-width joiner, such as the technologist or the rainbow flag.
  * - "hidden": a control character, line break, bidi control or zero-width character.
  * - "control": in the description, a tab, a bare carriage return or another control character (a newline is fine).
- * - "query": an X or Telegram link with a ? or # part, such as X's share links (?s=21).
+ * - "spaces" and "link-spaces": spaces in a handle or name, or in a pasted link, so the message names the right one.
+ * - "query": an X or Telegram link with a ? part, such as X's share links (?s=21); "fragment": one with a # part.
  * - "post-link": a link to a post rather than to the profile, group or channel.
  * - "invite-link": a Telegram invite link, t.me/+… or t.me/joinchat/….
  * - "bad-handle": an X handle or Telegram name of the wrong length or characters.
  * - "wrong-site": neither a handle nor a link to the right site.
  */
 export type FieldIssue =
-  | "empty" | "too-long" | "joined-emoji" | "hidden" | "control" | "not-https" | "bad-url" | "spaces" | "query" | "post-link"
-  | "invite-link" | "bad-handle" | "wrong-site";
+  | "empty" | "too-long" | "joined-emoji" | "hidden" | "control" | "not-https" | "bad-url" | "spaces" | "link-spaces" | "query"
+  | "fragment" | "post-link" | "invite-link" | "bad-handle" | "wrong-site";
 export type FieldIssues = Partial<Record<LaunchFieldName, FieldIssue>>;
 
 const encoder = new TextEncoder();
@@ -58,13 +59,18 @@ const SPOOFING = /[\x00-\x1F\x7F-\x9F\u061C\u200B-\u200F\u2028\u2029\u202A-\u202
 /** An emoji joined to the next by a zero-width joiner, after an optional variation selector or skin tone: a SPOOFING case. */
 const JOINED_EMOJI = /\p{Extended_Pictographic}[\u{FE0F}\u{1F3FB}-\u{1F3FF}]?\u{200D}/u;
 const X_HANDLE = /^@?([A-Za-z0-9_]{1,15})$/;
-const X_URL = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/?$/;
+/**
+ * A link's scheme and host match in any letter case (fix round 1, ruling 4): a phone capitalises the first letter of a
+ * plain input. The handle's own class already takes both cases, and the stored link is rebuilt in lower case.
+ */
+const X_URL = /^https:\/\/(?:www\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/?$/i;
 const TG_NAME = /^@?([A-Za-z0-9_]{5,32})$/;
-const TG_URL = /^https:\/\/(?:www\.)?t\.me\/([A-Za-z0-9_]{5,32})\/?$/;
+const TG_URL = /^https:\/\/(?:www\.)?t\.me\/([A-Za-z0-9_]{5,32})\/?$/i;
+const HTTPS = /^https:\/\//i;
 /** Any spelling of an X or Telegram link (scheme, path, then a ? or # part), only to name what is wrong with a refused one. */
-const X_LINK = /^(https?:\/\/)?(?:www\.)?(?:x|twitter)\.com\/([^?#]*)([?#].*)?$/;
-const TG_LINK = /^(https?:\/\/)?(?:www\.)?t\.me\/([^?#]*)([?#].*)?$/;
-const TG_INVITE = /^(?:\+|joinchat\/)/;
+const X_LINK = /^(https?:\/\/)?(?:www\.)?(?:x|twitter)\.com\/([^?#]*)([?#].*)?$/i;
+const TG_LINK = /^(https?:\/\/)?(?:www\.)?t\.me\/([^?#]*)([?#].*)?$/i;
+const TG_INVITE = /^(?:\+|joinchat\/)/i;
 const HANDLE_CHARS = /^@?\w+$/;
 
 type Checked = { ok: true; value: string } | { ok: false; issue: FieldIssue };
@@ -95,7 +101,7 @@ function description(raw: string): Checked {
 function website(raw: string): Checked {
   if (raw === "") return pass("");
   if (SPOOFING.test(raw)) return fail("hidden");
-  if (!raw.startsWith("https://")) return fail("not-https");
+  if (!HTTPS.test(raw)) return fail("not-https");
   if (raw.length > WEBSITE_MAX_CHARS) return fail("too-long");
   try {
     const url = new URL(raw);
@@ -121,14 +127,15 @@ function telegram(raw: string): Checked {
 /** Which rule a refused X or Telegram entry broke, checked in the order a fix would go. */
 function linkIssue(raw: string, link: RegExp, telegramInvites: boolean): FieldIssue {
   if (SPOOFING.test(raw)) return "hidden";
-  if (/\s/.test(raw)) return "spaces";
+  // A slash or a dot means a pasted link rather than a handle, so the message says "link".
+  if (/\s/.test(raw)) return /[/.]/.test(raw) ? "link-spaces" : "spaces";
   const m = link.exec(raw);
   if (!m) return HANDLE_CHARS.test(raw) ? "bad-handle" : "wrong-site";
   const [, scheme, path = "", tail] = m;
   if (telegramInvites && TG_INVITE.test(path)) return "invite-link";
   if (path.replace(/\/$/, "").includes("/")) return "post-link";
-  if (tail !== undefined) return "query";
-  return scheme === "https://" ? "bad-handle" : "not-https";
+  if (tail !== undefined) return tail.startsWith("#") ? "fragment" : "query";
+  return scheme?.toLowerCase() === "https://" ? "bad-handle" : "not-https";
 }
 
 const FIELD_ORDER: readonly LaunchFieldName[] = ["name", "symbol", "description", "website", "x", "telegram"];
@@ -184,7 +191,7 @@ export function fieldMessage(field: LaunchFieldName, issue: FieldIssue): string 
     case "too-long":
       if (field === "name" || field === "symbol") {
         const max = field === "name" ? NAME_MAX_BYTES : SYMBOL_MAX_BYTES;
-        return `Shorten the ${label} to ${max} bytes. An emoji takes 4 bytes, an accented letter 2.`;
+        return `Shorten the ${label} to ${max} bytes. A plain letter takes 1, an accented letter 2, a Chinese, Japanese or Korean character 3, an emoji 4.`;
       }
       return field === "description"
         ? `Shorten the description to ${DESCRIPTION_MAX_CHARS} characters.`
@@ -202,8 +209,12 @@ export function fieldMessage(field: LaunchFieldName, issue: FieldIssue): string 
       return "That website link is not valid. Check it for typos.";
     case "spaces":
       return onX ? "Remove the spaces from the X handle." : "Remove the spaces from the Telegram name.";
+    case "link-spaces":
+      return `Remove the spaces from the ${label}.`;
     case "query":
       return `Remove the ? and everything after it from the ${label}.`;
+    case "fragment":
+      return `Remove the # and everything after it from the ${label}.`;
     case "post-link":
       return onX
         ? "Use the profile link, like https://x.com/name, not a link to a post."

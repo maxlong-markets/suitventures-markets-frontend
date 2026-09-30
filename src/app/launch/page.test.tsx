@@ -30,21 +30,26 @@ describe("/launch (instant launchpad design, section 7.2)", () => {
   });
 
   // UX review, should fix 1: a creator expecting a team allocation or automatic payouts found out only after paying.
-  it("explains the model in three plain lines above the form: a fixed supply locked in the pool, tokens only through the first buy, fees paid on Collect", () => {
+  // Reworded in fix round 1 (ruling 2) to claim no more than the contract does: the tokens leave the pool as people buy,
+  // only the liquidity is locked; the creator can also buy later; other people can add liquidity and share the fee.
+  it("explains the model in three plain lines above the form, claiming no more than the contract does", () => {
     h.live = true;
     const { container } = render(<LaunchPage />);
     const lines = [
-      "A fixed supply of 1,000,000,000 tokens goes into a Uniswap v4 pool and stays locked there for good.",
-      "You get tokens only through a first buy when you launch.",
-      "The pool fee builds up with every trade and is paid out when anyone presses Collect on the token's page.",
+      "A fixed supply of 1,000,000,000 tokens goes into a Uniswap v4 pool as liquidity that nobody can withdraw.",
+      "Launching gives you no tokens. To start with some, make a first buy in the same transaction.",
+      "Every trade pays a 1 % pool fee. The part earned by the launch's locked liquidity is paid out when anyone presses Collect on the token's page.",
     ];
     for (const line of lines) expect(screen.getByText(line)).toBeTruthy();
-    expect(container.textContent).toMatch(/for good\..*Collect on the token's page\..*the launch form/);
+    expect(container.textContent).toMatch(/withdraw\..*Collect on the token's page\..*the launch form/);
+    // Fix round 1, ruling 10: a number never parts from its percent sign at the end of a line.
+    expect(container.textContent).toMatch(/1\u{A0}%/u);
+    expect(container.textContent).not.toMatch(/\d %/);
   });
 
   it("keeps the lines off the not-live card", () => {
     h.live = false;
     render(<LaunchPage />);
-    expect(screen.queryByText(/stays locked there for good/)).toBeNull();
+    expect(screen.queryByText(/nobody can withdraw/)).toBeNull();
   });
 });

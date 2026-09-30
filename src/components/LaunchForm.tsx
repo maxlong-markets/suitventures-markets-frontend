@@ -13,7 +13,8 @@ import { robinhoodChain, txUrl } from "@/lib/chain";
 import { USDG, ZERO_ADDRESS } from "@/lib/chain/math/constants";
 import { fmtAmt, fmtInt, fmtPrice, short } from "@/lib/format";
 import {
-  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, executeLaunch, type LaunchStep,
+  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, POOL_FEE_PCT, executeLaunch,
+  type LaunchStep,
 } from "@/lib/launch";
 import {
   UPLOAD_REUSE_MS, UploadError, forgetUnsettled, parseUnsettled, readUnsettled, rememberUnsettled, subscribeUnsettled, uploadKey,
@@ -61,12 +62,16 @@ const LINK = "inline-block py-[6px] font-mono text-[10px] uppercase tracking-[0.
 const TEXT_LINK = "py-1 font-mono text-[11px] normal-case tracking-[0.04em] text-ink-70 underline underline-offset-2 hover:text-ink";
 
 /**
- * The launch pools' LP fee in percent: `POOL_FEE = 10_000` pips in SVLaunchpad.sol, a constant with no getter, since the
- * pool key is read only for a launched token. The creator's share of it is read live (`creatorShareBps`).
+ * A percentage with up to four decimals and no trailing zeros (70, 70.5, 0.7, 0.705), joined to its sign by a no-break
+ * space, so a number never ends one line with its "%" starting the next (fix round 1, ruling 10).
  */
-const POOL_FEE_PCT = 1;
-/** Up to four decimals, no trailing zeros: 70, 70.5, 0.7, 0.705. */
-const pct = (n: number) => String(Number(n.toFixed(4)));
+const pct = (n: number) => `${Number(n.toFixed(4))}\u{A0}%`;
+/** The same join for a percentage the code already formats. */
+const PCT = "\u{A0}%";
+/** The rule of thumb lives in math.ts with plain spaces; shown here, each number keeps its percent sign. */
+const RULE_OF_THUMB_SHOWN = RULE_OF_THUMB.replace(/(\d) %/g, `$1${PCT}`);
+/** Shown under the preview when the contract opened below the pick (UX review 5). */
+const ROUNDED_NOTE = `Rounded down to the pool's nearest price step, at most about 2${PCT} below your pick.`;
 /** The locked card once the token turns up at its predicted address. */
 const WENT_THROUGH = "It went through: your token is live.";
 
@@ -117,13 +122,17 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** A field's own message, in the image note's recipe, right under the field (UX review 6). */
+/**
+ * A field's own message, in the image note's recipe, right under the field (UX review 6). The region is always there and
+ * polite, and only its text changes (fix round 1, ruling 8): a message that appears while typing is announced, and a
+ * keystroke that leaves the same message leaves the same text, so nothing is announced again. Empty, it takes no room.
+ */
 function FieldNote({ id, text }: { id: string; text: string | null }) {
-  return text ? (
-    <div id={id} className="mt-2 font-mono text-[10.5px] leading-[1.5] text-down">
+  return (
+    <div id={id} aria-live="polite" className={text ? "mt-2 font-mono text-[10.5px] leading-[1.5] text-down" : undefined}>
       {text}
     </div>
-  ) : null;
+  );
 }
 
 /** A counter in the label row, in the down colour while over its limit. */
@@ -485,12 +494,15 @@ export default function LaunchForm() {
   else if (held) heldText = held.hash ? LAUNCH_MESSAGES.unconfirmed : LAUNCH_MESSAGES.maybeSent;
   const heldHash = held?.why === "unsettled" ? held.hash : undefined;
 
-  // UX review 18: say why the opening price is blank instead of leaving the slot empty.
-  let openingLine = "";
-  if (snapped) openingLine = `Opens at ${money(snapped)} · ${perToken(snapped)} per token`;
-  else if (inRange && (nameOnChain === "" || symbolOnChain === "")) openingLine = "Enter a name and symbol to see the opening price.";
-  else if (inRange && !address) openingLine = "Connect a wallet to see the opening price.";
-  else if (inRange && opening.pending) openingLine = "Working out the opening price…";
+  // The preview and the reason it is blank (UX review 18) share one slot of one height (see the markup), so nothing below
+  // the valuation moves while the price is read (fix round 1, ruling 3).
+  const previewText = snapped ? `Opens at ${money(snapped)} · ${perToken(snapped)} per token` : "";
+  let hintText = "";
+  if (!snapped && inRange) {
+    if (nameOnChain === "" || symbolOnChain === "") hintText = "Enter a name and symbol to see the opening price.";
+    else if (!address) hintText = "Connect a wallet to see the opening price.";
+    else if (opening.pending) hintText = "Working out the opening price…";
+  }
   // UX review 5: the contract opens at or below the pick, within one 1.0001^200 step of it (about 2 %).
   const roundedDown = snapped !== undefined && requested !== null && !opening.pending && snapped !== requested;
 
@@ -499,13 +511,15 @@ export default function LaunchForm() {
   if (capBps === 0) capLine = "First buys are closed for now.";
   else if (capBps !== undefined && capBps < 10_000) {
     const cost = capGross !== null && snapped ? `, about ${money(capGross)} at this valuation` : "";
-    capLine = `Up to ${pct(capBps / 100)} % of the supply${cost}.`;
+    capLine = `Up to ${pct(capBps / 100)} of the supply${cost}.`;
   }
 
-  // UX review 2: the creator's cut of the pool fee, from the live share, in the words the rest of the app uses.
+  // UX review 2, worded in fix round 1 (ruling 2) to claim no more than the contract does: the pool takes 1 % of every
+  // trade, but other people can add liquidity to the same pool, and the launch's locked liquidity earns only its share of
+  // that fee, so the payout's cut is "up to" the share of 1 %. Both numbers come from the live share and the pool fee.
   const feeLine =
     shareBps !== undefined
-      ? `Your payout address gets ${pct(shareBps / 100)} % of the ${POOL_FEE_PCT} % pool fee, so ${pct((shareBps * POOL_FEE_PCT) / 10_000)} % of every trade, in ${symbolOnChain || "your token"} and ${asset?.symbol ?? "the currency"}. It is paid out when anyone presses Collect on the token's page.`
+      ? `Your payout address gets ${pct(shareBps / 100)} of the pool fee that the launch's locked liquidity earns, up to ${pct((shareBps * POOL_FEE_PCT) / 10_000)} of every trade. It is paid in ${symbolOnChain || "your token"} and ${asset?.symbol ?? "the currency"} when anyone presses Collect on the token's page.`
       : null;
 
   // UX review 3: where the fees go, always echoed back; the payout can only be changed later by the payout address itself.
@@ -573,6 +587,7 @@ export default function LaunchForm() {
               <span>{label}</span>
               <span className="normal-case tracking-[0.04em]">optional</span>
             </label>
+            {/* A phone must not capitalise, correct or spell-check a link (fix round 1, ruling 4). */}
             <input
               id={`launch-${label}`}
               aria-label={label}
@@ -582,6 +597,10 @@ export default function LaunchForm() {
               {...described(field)}
               className={INPUT}
               autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              inputMode={field === "website" ? "url" : undefined}
             />
             <FieldNote id={`launch-${field}-note`} text={noteFor(field)} />
           </div>
@@ -645,14 +664,24 @@ export default function LaunchForm() {
             <span className="pr-3 font-mono text-[11px] text-ink-45">{usd !== null ? "USD" : asset?.symbol}</span>
           </div>
         ) : null}
-        <div className="mt-2 font-mono text-[11px] text-ink-60" aria-live="polite">
-          {openingLine}
-        </div>
-        {roundedDown ? (
-          <div className="mt-1 font-mono text-[10.5px] leading-[1.5] text-ink-45">
-            Rounded down to the pool&apos;s nearest price step, at most about 2 % below your pick.
+        {/*
+          The preview keeps one height in every state (no name yet, reading, read, rounded down or not), so First buy, Max and
+          the payout link never move under a tap while the price is read (fix round 1, ruling 3). Two layers share one grid
+          cell: the preview (one line, then the rounding note) is always laid out and only hidden, and the hint sits over it.
+        */}
+        <div className="mt-2 grid font-mono" aria-live="polite">
+          <div className={`col-start-1 row-start-1${snapped ? "" : " invisible"}`} aria-hidden={!snapped}>
+            <div className={`truncate text-[11px] leading-[1.5] ${opening.pending ? "text-ink-40" : "text-ink-60"}`} title={previewText || undefined}>
+              {previewText || "\u{A0}"}
+            </div>
+            <div className={`mt-1 text-[10.5px] leading-[1.5] text-ink-45${roundedDown ? "" : " invisible"}`} aria-hidden={!roundedDown}>
+              {ROUNDED_NOTE}
+            </div>
           </div>
-        ) : null}
+          <div className={`col-start-1 row-start-1 text-[11px] leading-[1.5] text-ink-60${snapped ? " invisible" : ""}`} aria-hidden={Boolean(snapped)}>
+            {hintText}
+          </div>
+        </div>
 
         <label className={`${LABEL} mt-5`} htmlFor="launch-first-buy">
           <span>First buy</span>
@@ -679,10 +708,14 @@ export default function LaunchForm() {
           </button>
           <span className="pr-3 font-mono text-[11px] text-ink-45">{asset?.symbol}</span>
         </div>
-        {capLine ? <div className="mt-2 font-mono text-[10.5px] leading-[1.5] text-ink-45">{capLine}</div> : null}
-        {firstBuyRaw > 0n && snapped ? (
-          <div className="mt-2 font-mono text-[11px] text-ink-60">
-            About {fmtAmt(rawToNumber(estimate, 18), 0)} tokens, {shareOfSupplyPct(estimate).toFixed(2)} % of supply
+        {/*
+          Fix round 1, ruling 3: the cap line holds two lines, the most its sentence takes at 320 px, while its cost is read
+          again; the estimate stays in place, hidden, while the price is read. Nothing below them moves under a tap.
+        */}
+        <div className="mt-2 min-h-[3em] font-mono text-[10.5px] leading-[1.5] text-ink-45">{capLine ?? ""}</div>
+        {firstBuyRaw > 0n ? (
+          <div className={`mt-1 min-h-[1.5em] font-mono text-[10.5px] leading-[1.5] text-ink-60${snapped ? "" : " invisible"}`} aria-hidden={!snapped}>
+            {snapped ? `About ${fmtAmt(rawToNumber(estimate, 18), 0)} tokens, ${shareOfSupplyPct(estimate).toFixed(2)}${PCT} of supply` : "\u{A0}"}
           </div>
         ) : null}
 
@@ -710,6 +743,8 @@ export default function LaunchForm() {
               aria-describedby={payoutProblem !== null ? "launch-payout-note" : undefined}
               className={INPUT}
               autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
               spellCheck={false}
             />
             <FieldNote id="launch-payout-note" text={payoutProblem} />
@@ -724,7 +759,8 @@ export default function LaunchForm() {
           <Row label="First buy">{firstBuyRaw > 0n ? units(firstBuyRaw) : "None"}</Row>
           {firstBuyRaw > 0n && routerFeeBps !== undefined ? (
             <div className="pb-1 text-right text-[10.5px] text-ink-45">
-              of which router fee {units(routerFeeOf(firstBuyRaw, routerFeeBps))} at {(routerFeeBps / 100).toFixed(2)} %
+              of which router fee {units(routerFeeOf(firstBuyRaw, routerFeeBps))} at {(routerFeeBps / 100).toFixed(2)}
+              {PCT}
             </div>
           ) : null}
           <Row label="Creation fee">{creationFee === 0n ? "Free" : units(creationFee)}</Row>
@@ -735,7 +771,7 @@ export default function LaunchForm() {
             {settings.dailyLimit !== undefined && settings.launchesToday !== undefined ? (
               <div className="mt-1">{`${Math.max(0, settings.dailyLimit - settings.launchesToday)} of ${settings.dailyLimit} left today. The count resets at 00:00 UTC.`}</div>
             ) : null}
-            <div className="mt-1">{RULE_OF_THUMB}</div>
+            <div className="mt-1">{RULE_OF_THUMB_SHOWN}</div>
           </div>
 
           {/*

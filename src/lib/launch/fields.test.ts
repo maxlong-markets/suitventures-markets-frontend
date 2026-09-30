@@ -150,8 +150,14 @@ describe("fieldIssues and fieldMessage (UX review, should fix 6): one sentence p
     expect(issues({ name: "Cha\tlk" }).name).toBe("hidden");
     expect(issues({ name: "Cha\u{200B}lk" }).name).toBe("hidden");
     expect(issues({ symbol: " " }).symbol).toBe("empty");
-    expect(fieldMessage("name", "too-long")).toBe("Shorten the name to 32 bytes. An emoji takes 4 bytes, an accented letter 2.");
-    expect(fieldMessage("symbol", "too-long")).toBe("Shorten the symbol to 11 bytes. An emoji takes 4 bytes, an accented letter 2.");
+    // Fix round 1, ruling 11: the byte costs now include Chinese, Japanese and Korean characters (3 each).
+    expect(fieldMessage("name", "too-long")).toBe(
+      "Shorten the name to 32 bytes. A plain letter takes 1, an accented letter 2, a Chinese, Japanese or Korean character 3, an emoji 4.",
+    );
+    expect(fieldMessage("symbol", "too-long")).toBe(
+      "Shorten the symbol to 11 bytes. A plain letter takes 1, an accented letter 2, a Chinese, Japanese or Korean character 3, an emoji 4.",
+    );
+    expect(utf8Bytes("\u{6F22}")).toBe(3); // the claim above, for a CJK character
     expect(fieldMessage("name", "joined-emoji")).toBe(`Joined emoji such as ${JOINED[0]} cannot go in the name. Use single emoji.`);
     expect(fieldMessage("name", "hidden")).toBe("The name holds a hidden character, such as a tab or line break. Type it again by hand.");
     expect(fieldMessage("symbol", "empty")).toBe("Enter a symbol.");
@@ -194,14 +200,43 @@ describe("fieldIssues and fieldMessage (UX review, should fix 6): one sentence p
     expect(fieldMessage("telegram", "bad-handle")).toBe("A Telegram name is 5 to 32 letters, digits or underscores.");
   });
 
+  // Fix round 1, ruling 4: a phone capitalises the first letter of a plain input, so "https://" arrived as "Https://" and
+  // was refused as if it did not start with https://. Scheme and host match without regard to case, here and in the route.
+  it("takes a link's scheme and host in any letter case, and stores them in lower case", () => {
+    expect(check({ website: "Https://MySite.com/About" })).toMatchObject({ ok: true, fields: { website: "https://mysite.com/About" } });
+    expect(check({ x: "Https://X.com/Chalk_1" })).toMatchObject({ ok: true, fields: { x: "https://x.com/Chalk_1" } });
+    expect(check({ x: "HTTPS://WWW.TWITTER.COM/chalk" })).toMatchObject({ ok: true, fields: { x: "https://x.com/chalk" } });
+    expect(check({ telegram: "Https://T.me/chalk_group" })).toMatchObject({ ok: true, fields: { telegram: "https://t.me/chalk_group" } });
+    // Without a scheme the rule still refuses them, and now says why rather than calling them another site.
+    expect(issues({ x: "X.com/chalk" }).x).toBe("not-https");
+    expect(issues({ telegram: "T.me/chalk_group" }).telegram).toBe("not-https");
+    expect(issues({ website: "Http://mysite.com" }).website).toBe("not-https");
+    expect(issues({ telegram: "HTTPS://T.ME/+invite" }).telegram).toBe("invite-link");
+    expect(issues({ telegram: "https://t.me/JoinChat/AbCdE" }).telegram).toBe("invite-link");
+  });
+
+  // Fix round 1, ruling 11.
+  it("names a # part apart from a ? part, and says 'link' for spaces in a pasted link", () => {
+    expect(issues({ x: "https://x.com/chalk#top" }).x).toBe("fragment");
+    expect(fieldMessage("x", "fragment")).toBe("Remove the # and everything after it from the X link.");
+    expect(issues({ telegram: "https://t.me/chalk_group#about" }).telegram).toBe("fragment");
+    expect(issues({ x: "https://x.com/chalk?s=21#top" }).x).toBe("query"); // removing from the ? takes the # part too
+    expect(issues({ x: "https://x.com/ chalk" }).x).toBe("link-spaces");
+    expect(fieldMessage("x", "link-spaces")).toBe("Remove the spaces from the X link.");
+    expect(issues({ telegram: "t.me/chalk group" }).telegram).toBe("link-spaces");
+    expect(fieldMessage("telegram", "link-spaces")).toBe("Remove the spaces from the Telegram link.");
+    expect(issues({ x: "@chalk " }).x).toBe("spaces"); // a handle stays a handle
+    expect(fieldMessage("x", "spaces")).toBe("Remove the spaces from the X handle.");
+  });
+
   it("has a sentence of its own for every issue each field can report", () => {
     const table: Record<LaunchFieldName, FieldIssue[]> = {
       name: ["empty", "too-long", "joined-emoji", "hidden"],
       symbol: ["empty", "too-long", "joined-emoji", "hidden"],
       description: ["too-long", "control"],
       website: ["hidden", "not-https", "too-long", "bad-url"],
-      x: ["hidden", "spaces", "query", "post-link", "not-https", "bad-handle", "wrong-site"],
-      telegram: ["hidden", "spaces", "invite-link", "query", "post-link", "not-https", "bad-handle", "wrong-site"],
+      x: ["hidden", "spaces", "link-spaces", "query", "fragment", "post-link", "not-https", "bad-handle", "wrong-site"],
+      telegram: ["hidden", "spaces", "link-spaces", "invite-link", "query", "fragment", "post-link", "not-https", "bad-handle", "wrong-site"],
     };
     for (const [field, list] of Object.entries(table) as [LaunchFieldName, FieldIssue[]][]) {
       for (const issue of list) expect(fieldMessage(field, issue)).toMatch(/^(?!Check the )[A-Z].*\.$/);
