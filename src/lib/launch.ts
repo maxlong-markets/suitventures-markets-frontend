@@ -28,9 +28,13 @@ import type { Address } from "./types";
 export const LAUNCH_DEADLINE_SEC = 1_200;
 
 export type LaunchDeps = { wallet: WalletClient; publicClient: PublicClient; account: Address };
+/**
+ * `token` is not sent: it is the address `predictToken` gives for this creator, salt, name and symbol, where the launch
+ * will deploy. It is checked for code before anything is sent.
+ */
 export type LaunchInput = {
   name: string; symbol: string; metadataUri: string; quote: Address; valuation: bigint; firstBuy: bigint;
-  minFirstBuyTokens: bigint; payout: Address; salt: Hex; creationFee: bigint;
+  minFirstBuyTokens: bigint; payout: Address; salt: Hex; creationFee: bigint; token: Address;
 };
 export type LaunchStep = "approve" | "sign" | "confirm" | "launching";
 export interface LaunchHandle {
@@ -64,11 +68,24 @@ export class LaunchUnconfirmedError extends Error {
     this.name = "LaunchUnconfirmedError";
   }
 }
+/**
+ * The predicted address already holds a token. The creator is part of the CREATE2 salt (spec 4.1), so it can only be
+ * this creator's own launch with the same salt, name and symbol: an earlier press went through. Nothing was sent.
+ */
+export class LaunchExistsError extends Error {
+  readonly token: Address;
+  constructor(message: string, token: Address) {
+    super(message);
+    this.name = "LaunchExistsError";
+    this.token = token;
+  }
+}
 
 export const LAUNCH_MESSAGES = {
   rejected: "Cancelled in wallet. Nothing was spent.",
   rejectedAfterApprove: "Cancelled in wallet. Nothing was spent except gas.",
   unconfirmed: "Sent, but we could not confirm it. Check the transaction before trying again.",
+  alreadyLive: "This token is already live: an earlier press of Launch went through. Nothing more was sent.",
   notLive: "Launching is not live yet.",
   wrongChain: "Switch your wallet to Robinhood Chain and try again. Nothing was sent.",
   approveFailed: "Could not approve the currency. Nothing was spent except gas.",
@@ -122,7 +139,11 @@ export function revertNameOf(err: unknown): string | null {
 }
 
 export function mapLaunchError(err: unknown, fallback: string = LAUNCH_MESSAGES.launchFallback): Error {
-  if (err instanceof LaunchFailedError || err instanceof LaunchRejectedError || err instanceof LaunchUnconfirmedError) return err;
+  if (
+    err instanceof LaunchFailedError || err instanceof LaunchRejectedError || err instanceof LaunchUnconfirmedError || err instanceof LaunchExistsError
+  ) {
+    return err;
+  }
   if (err instanceof BaseError && err.walk((e) => e instanceof UserRejectedRequestError)) return new LaunchRejectedError(LAUNCH_MESSAGES.rejected);
   const name = revertNameOf(err);
   return new LaunchFailedError(messageForRevert(name, fallback), name);
@@ -164,7 +185,10 @@ async function receiptOf(deps: LaunchDeps, hash: Hex, fallback: string) {
   return receipt;
 }
 
-/** The token from this creator's `Launched`, filtered by the launchpad's address first: topic0 is not proof of provenance. */
+/**
+ * The token from this creator's `Launched`, filtered by the launchpad's address first: topic0 is not proof of provenance.
+ * A successful receipt without that log is "could not confirm", never "failed": the transaction was mined and paid for.
+ */
 async function confirmLaunch(deps: LaunchDeps, launchpad: Address, hash: Hex): Promise<{ token: Address }> {
   const receipt = await receiptOf(deps, hash, LAUNCH_MESSAGES.launchFallback);
   const ours = parseEventLogs({
@@ -172,14 +196,21 @@ async function confirmLaunch(deps: LaunchDeps, launchpad: Address, hash: Hex): P
     eventName: "Launched",
     logs: receipt.logs.filter((log) => isAddressEqual(log.address, launchpad)),
   }).find((event) => isAddressEqual(event.args.creator, deps.account));
-  if (!ours) throw new LaunchFailedError(LAUNCH_MESSAGES.launchFallback);
+  if (!ours) throw new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed);
   return { token: ours.args.token.toLowerCase() as Address };
+}
+
+/** Code at the predicted address: the launch already happened (see LaunchExistsError). viem answers undefined for none. */
+async function alreadyDeployed(deps: LaunchDeps, token: Address): Promise<boolean> {
+  const code = await deps.publicClient.getCode({ address: token });
+  return code !== undefined && code !== "0x";
 }
 
 /**
  * Spec 7.2, submit steps 3 to 6: approve Permit2 when the total is above zero and the allowance is short; sign exactly
  * `firstBuy + creationFee` to the launchpad; simulate; send; wait. A zero total sends a zeroed permit and an empty
- * signature, and needs no approval at all.
+ * signature, and needs no approval at all. Before any of it, a token already at the predicted address stops the launch
+ * with LaunchExistsError (UX review B3: a retry after "could not confirm" would otherwise deploy onto it and revert).
  */
 export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep: (step: LaunchStep) => void = () => {}): Promise<LaunchHandle> {
   const launchpad = requireLaunchpad();
@@ -195,6 +226,7 @@ export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep
   let approvalSent = false;
   try {
     await requireRobinhood(deps);
+    if (await alreadyDeployed(deps, input.token)) throw new LaunchExistsError(LAUNCH_MESSAGES.alreadyLive, input.token);
     if (total > 0n) {
       const allowance = await deps.publicClient.readContract({
         address: input.quote, abi: erc20Abi, functionName: "allowance", args: [deps.account, PERMIT2_ADDRESS],

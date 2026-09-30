@@ -94,6 +94,11 @@ export interface AppState {
   withSignIn(kind: ActionKind, run: () => void, onCancel?: () => void): void;
   completeSign(sign: SignMessage, address: Address): Promise<void>;
   cancelSign(): void;
+  /**
+   * Forgets the session held in memory, so `signed` turns false and the next gated action asks for the signature again.
+   * For a server that answered 401: the cookie is gone (its 7 days ran out, or the secret rotated). It asks nothing itself.
+   */
+  dropSession(): void;
 
   toasts: Toast[];
   addToast(t: Omit<Toast, "id">): number;
@@ -393,6 +398,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     pending?.onCancel?.();
   }, []);
 
+  const dropSession = useCallback(() => setSession(null), []);
+
   // --- watchlist -------------------------------------------------------
   const watchlistQuery = useWatchlist(signed);
   const stars = useMemo(
@@ -569,6 +576,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       withSignIn,
       completeSign,
       cancelSign,
+      dropSession,
       toasts,
       addToast,
       updateToast,
@@ -599,6 +607,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       withSignIn,
       completeSign,
       cancelSign,
+      dropSession,
       toasts,
       addToast,
       updateToast,

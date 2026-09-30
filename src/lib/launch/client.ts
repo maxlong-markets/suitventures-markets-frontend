@@ -1,3 +1,4 @@
+import type { Address } from "@/lib/types";
 import type { LaunchFields } from "./fields";
 
 /**
@@ -19,7 +20,8 @@ export class UploadError extends Error {
 export const UPLOAD_REUSE_MS = 12 * 60 * 60 * 1000;
 
 export const UPLOAD_MESSAGES = {
-  signIn: "Sign in again, then press Launch.",
+  // The form drops the session on this code, so the next press of Launch asks for the signature (UX review B2).
+  signIn: "Your sign-in has expired. Press Launch to sign in again.",
   limit: "You have uploaded too many images for now. Try again later.",
   notAllowed: "Launching is open to Suits holders.",
   notLive: "Launching is not live yet.",
@@ -32,9 +34,15 @@ const FIELD_LABELS: Readonly<Record<string, string>> = {
   image: "image", name: "name", symbol: "symbol", description: "description", website: "website", x: "X", telegram: "Telegram",
 };
 
-/** What a cached answer is valid for: exactly these fields and this file. */
-export function uploadKey(fields: LaunchFields, image: File): string {
-  return JSON.stringify([fields.name, fields.symbol, fields.description, fields.website, fields.x, fields.telegram, image.name, image.size, image.type, image.lastModified]);
+/**
+ * What a cached answer is valid for: exactly these fields, this file and this wallet. The store links an upload to a
+ * launch only when the same wallet made both, so another wallet's answer would launch the coin with no image or links.
+ */
+export function uploadKey(fields: LaunchFields, image: File, wallet: Address): string {
+  return JSON.stringify([
+    wallet.toLowerCase(), fields.name, fields.symbol, fields.description, fields.website, fields.x, fields.telegram,
+    image.name, image.size, image.type, image.lastModified,
+  ]);
 }
 
 export async function uploadLaunchAssets(fields: LaunchFields, image: Blob, fetchImpl: typeof fetch = fetch): Promise<UploadAnswer> {

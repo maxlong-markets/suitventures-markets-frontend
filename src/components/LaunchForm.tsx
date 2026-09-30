@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { isAddress, type Hex } from "viem";
@@ -7,10 +8,12 @@ import { useAccount, usePublicClient, useWalletClient } from "wagmi";
 import { useAppState } from "@/context/AppState";
 import { useCurrencyConfig, useLaunchSettings, useOpening, useTokenBalanceOf } from "@/hooks/useLaunchpad";
 import { useQuotes } from "@/hooks/useMarketsData";
-import { robinhoodChain } from "@/lib/chain";
+import { robinhoodChain, txUrl } from "@/lib/chain";
 import { USDG, ZERO_ADDRESS } from "@/lib/chain/math/constants";
 import { fmtAmt, fmtInt, fmtPrice } from "@/lib/format";
-import { LAUNCH_MESSAGES, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, executeLaunch, type LaunchStep } from "@/lib/launch";
+import {
+  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, executeLaunch, type LaunchStep,
+} from "@/lib/launch";
 import { UPLOAD_REUSE_MS, UploadError, uploadKey, uploadLaunchAssets, type UploadAnswer } from "@/lib/launch/client";
 import {
   DESCRIPTION_MAX_CHARS, IMAGE_MAX_BYTES, NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8Bytes, validateFields, type LaunchFields,
@@ -47,6 +50,14 @@ const DISABLED =
   "mt-[14px] h-11 w-full cursor-not-allowed border border-hairline-mid bg-[rgba(244,238,218,0.06)] font-mono text-[11px] uppercase tracking-[0.22em] text-ink-34";
 const PENDING =
   "mt-[14px] flex h-11 w-full cursor-wait items-center justify-center gap-[10px] bg-[rgba(244,238,218,0.55)] font-mono text-[11px] uppercase tracking-[0.22em] text-onlight";
+/** TokenView's transaction link recipe, with room to tap. */
+const LINK = "inline-block py-[6px] font-mono text-[10px] uppercase tracking-[0.2em] text-ink-60 hover:text-ink";
+
+/**
+ * Why the form stays locked with no redirect (UX review B3): a launch that was sent but could not be confirmed, or a token
+ * already live at the predicted address. Pressing Launch again would reuse the salt and deploy onto a live token.
+ */
+type Lock = { why: "unconfirmed"; token: Address; hash?: Hex } | { why: "live"; token: Address };
 
 /** A typed amount in raw units, 0 for a half-typed or empty field. Display and gating only. */
 function parseAmount(text: string, decimals: number): bigint {
@@ -78,7 +89,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 export default function LaunchForm() {
   const router = useRouter();
-  const { address, isConnected, signed, withSignIn, addToast, updateToast } = useAppState();
+  const { address, isConnected, signed, withSignIn, dropSession, addToast, updateToast } = useAppState();
   const publicClient = usePublicClient({ chainId: robinhoodChain.id });
   const { data: walletClient } = useWalletClient({ chainId: robinhoodChain.id });
   // On another network wagmi gives no wallet client for Robinhood Chain; the button names the network instead of doing nothing.
@@ -108,6 +119,7 @@ export default function LaunchForm() {
   const [error, setError] = useState<string | null>(null);
   // Set once the launch is confirmed: the form stays locked until the token page opens, so no enabled Launch flashes.
   const [done, setDone] = useState(false);
+  const [lock, setLock] = useState<Lock | null>(null);
   const inFlight = useRef(false);
   const resumeAfterSignIn = useRef(false);
   const uploadCache = useRef<{ key: string; answer: UploadAnswer; at: number } | null>(null);
@@ -213,11 +225,11 @@ export default function LaunchForm() {
   };
 
   /**
-   * Step 2: the answer is kept for this image and these fields, refreshed after 12 hours (spec 7.2). `now` comes from the
-   * click (or the resume effect), never read here: the component body stays free of clock reads.
+   * Step 2: the answer is kept for this image, these fields and this wallet, refreshed after 12 hours (spec 7.2). `now`
+   * comes from the click (or the resume effect), never read here: the component body stays free of clock reads.
    */
-  async function uploadOnce(fields: LaunchFields, file: File, now: number): Promise<UploadAnswer> {
-    const key = uploadKey(fields, file);
+  async function uploadOnce(fields: LaunchFields, file: File, wallet: Address, now: number): Promise<UploadAnswer> {
+    const key = uploadKey(fields, file, wallet);
     const cached = uploadCache.current;
     if (cached && cached.key === key && now - cached.at < UPLOAD_REUSE_MS) return cached.answer;
     const answer = await uploadLaunchAssets(fields, file);
@@ -226,9 +238,14 @@ export default function LaunchForm() {
   }
 
   const submit = async (now: number) => {
-    // A launch in flight, a confirmed one, or one already waiting for its signature: nothing more to queue.
-    if (inFlight.current || done || resumeAfterSignIn.current) return;
-    if (reason !== null || !address || !walletClient || !publicClient || !quote || !image || !snapped || requested === null || !payoutAddress) {
+    // A launch in flight, a confirmed or locked one, or one already waiting for its signature: nothing more to queue.
+    if (inFlight.current || done || lock !== null || resumeAfterSignIn.current) return;
+    // The predicted token is taken here, from the settled preview: the wallet code checks it for code before sending.
+    const token = opening.token;
+    if (
+      reason !== null || !address || !walletClient || !publicClient || !quote || !image || !snapped || requested === null ||
+      !payoutAddress || !token
+    ) {
       // A resumed submit that can no longer go ahead leaves no step spinning.
       setPlan([]);
       setCurrent(null);
@@ -266,30 +283,40 @@ export default function LaunchForm() {
     setPending(true);
     setPlan((p) => (p[0] === "sign-in" ? ["sign-in", ...walletSteps] : walletSteps));
     let toastId: number | null = null;
+    let hash: Hex | undefined;
     try {
       setCurrent("upload");
-      const answer = await uploadOnce(rawFields, image, now);
+      const answer = await uploadOnce(rawFields, image, address, now);
       const handle = await executeLaunch(
         {
           name, symbol, metadataUri: answer.metadataUri, quote, valuation: requested, firstBuy: firstBuyRaw,
-          minFirstBuyTokens: firstBuyRaw > 0n ? minFirstBuyTokens(estimate) : 0n, payout: payoutAddress, salt, creationFee,
+          minFirstBuyTokens: firstBuyRaw > 0n ? minFirstBuyTokens(estimate) : 0n, payout: payoutAddress, salt, creationFee, token,
         },
         { wallet: walletClient, publicClient, account: address },
         onStep,
       );
+      hash = handle.hash;
       toastId = addToast({ kind: "pending", message: `Launching ${symbol}`, hash: handle.hash });
-      const { token } = await handle.confirmation;
+      const confirmed = await handle.confirmation;
       updateToast(toastId, { kind: "confirmed", message: `Launched ${symbol}` });
       setDone(true);
-      router.push(`/t/${token}?launched=${handle.hash}`);
+      router.push(`/t/${confirmed.token}?launched=${handle.hash}`);
     } catch (err) {
-      const known = err instanceof UploadError || err instanceof LaunchFailedError || err instanceof LaunchRejectedError || err instanceof LaunchUnconfirmedError;
+      const known =
+        err instanceof UploadError || err instanceof LaunchFailedError || err instanceof LaunchRejectedError ||
+        err instanceof LaunchUnconfirmedError || err instanceof LaunchExistsError;
       const message = known ? (err as Error).message : LAUNCH_MESSAGES.launchFallback;
+      // The cookie is gone while memory still says signed (UX review B2): forget the session, so the next press of Launch
+      // takes the sign-in step and resumes by itself, instead of uploading into the same 401 again.
+      if (err instanceof UploadError && err.code === "not-signed-in") dropSession();
       // Someone initialised this token's pool key first (spec 4.10): a new salt is a new address and a new key.
       if (err instanceof LaunchFailedError && err.revert === "PoolAlreadyInitialized") setSalt(randomSalt());
       // The owner changed this currency's creation fee under the open form: re-read it before the creator reviews.
       if (err instanceof LaunchFailedError && err.revert === "PermitMismatch") bounds?.refetch();
-      setError(message);
+      // It may have landed, or it did: the form stays locked and links the transaction and the token page (UX review B3).
+      if (err instanceof LaunchUnconfirmedError) setLock({ why: "unconfirmed", token, hash });
+      else if (err instanceof LaunchExistsError) setLock({ why: "live", token: err.token });
+      else setError(message);
       if (toastId !== null) updateToast(toastId, { kind: err instanceof LaunchUnconfirmedError ? "unconfirmed" : "failed", message });
     } finally {
       inFlight.current = false;
@@ -507,18 +534,37 @@ export default function LaunchForm() {
           */}
           <button
             type="button"
-            disabled={reason !== null && !busy}
-            aria-disabled={busy || reason !== null}
+            disabled={reason !== null && !busy && !lock}
+            aria-disabled={busy || lock !== null || reason !== null}
             onClick={() => void submit(Date.now())}
-            className={busy ? PENDING : reason === null ? PRIMARY : DISABLED}
+            className={busy ? PENDING : lock === null && reason === null ? PRIMARY : DISABLED}
           >
             {busy ? <Spinner dark /> : null}
-            {done ? "Launched" : pending && current ? STEP_LABELS[current] : "Launch"}
+            {done ? "Launched" : lock ? (lock.why === "live" ? "Already live" : "Sent") : pending && current ? STEP_LABELS[current] : "Launch"}
           </button>
           <div role="status" aria-live="polite" className="mt-2 text-center text-[10.5px] text-ink-50 empty:hidden">
-            {reason !== null && !busy ? reason : ""}
+            {reason !== null && !busy && !lock ? reason : ""}
           </div>
-          {error ? (
+          {lock ? (
+            <>
+              <div role="alert" className="mt-2 text-center text-[10.5px] leading-[1.5] text-ink-70">
+                {lock.why === "live" ? LAUNCH_MESSAGES.alreadyLive : LAUNCH_MESSAGES.unconfirmed}
+              </div>
+              <div className="mt-1 flex flex-wrap justify-center gap-x-5">
+                {lock.why === "unconfirmed" && lock.hash ? (
+                  <a href={txUrl(lock.hash)} target="_blank" rel="noreferrer" className={LINK}>
+                    View the transaction ↗
+                  </a>
+                ) : null}
+                <Link
+                  href={`/t/${lock.token.toLowerCase()}${lock.why === "unconfirmed" && lock.hash ? `?launched=${lock.hash}` : ""}`}
+                  className={LINK}
+                >
+                  Open the token page
+                </Link>
+              </div>
+            </>
+          ) : error ? (
             <div role="alert" className="mt-2 text-center text-[10.5px] text-down">
               {error}
             </div>

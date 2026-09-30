@@ -1,12 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { robinhoodChain } from "@/lib/chain";
-import { LAUNCH_MESSAGES, LaunchFailedError, messageForRevert } from "@/lib/launch";
+import { robinhoodChain, txUrl } from "@/lib/chain";
+import {
+  LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, messageForRevert,
+} from "@/lib/launch";
+import { UPLOAD_MESSAGES, UploadError } from "@/lib/launch/client";
 import { estimateFirstBuyTokens, minFirstBuyTokens } from "@/lib/launch/math";
 import type { Address, QuoteAsset } from "@/lib/types";
 import { act, fireEvent, render, screen, waitFor, within } from "@/test/dom";
 import LaunchForm from "./LaunchForm";
 
 const WALLET = "0x1111111111111111111111111111111111111111" as Address;
+const OTHER_WALLET = "0x2222222222222222222222222222222222222222" as Address;
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168" as Address;
 const AMC = "0x05a3d1cd21d0c88145e82600e62e7e496e0f222b" as Address;
 const NVDA = "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec" as Address;
@@ -27,6 +31,7 @@ const h = vi.hoisted(() => ({
     isConnected: true,
     signed: true,
     withSignIn: vi.fn(),
+    dropSession: vi.fn(),
     addToast: vi.fn(() => 1),
     updateToast: vi.fn(),
   },
@@ -68,6 +73,7 @@ beforeEach(() => {
   h.state.isConnected = true;
   h.state.signed = true;
   h.state.withSignIn.mockReset();
+  h.state.dropSession.mockReset();
   h.state.addToast.mockClear();
   h.state.updateToast.mockClear();
   h.settings = {
@@ -284,6 +290,7 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     expect(h.execute.mock.calls[0]![0]).toMatchObject({
       name: "Tailor's Chalk", symbol: "CHALK", metadataUri: "ipfs://bafymeta", quote: USDG, valuation: 5_000_000_000n,
       firstBuy: 0n, minFirstBuyTokens: 0n, payout: WALLET, creationFee: 0n,
+      token: TOKEN, // the preview's predicted address, which the wallet code checks for code before sending
     });
     expect(h.state.addToast).toHaveBeenCalledWith({ kind: "pending", message: "Launching CHALK", hash: TX });
     expect(h.state.updateToast).toHaveBeenCalledWith(1, { kind: "confirmed", message: "Launched CHALK" });
@@ -465,6 +472,97 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
       fireEvent.click(locked);
     });
     expect(h.execute).toHaveBeenCalledTimes(1);
+  });
+
+  // UX review, blocker B2.
+  it("drops the expired session when the upload answers 401, and the next Launch signs in again and carries on by itself", async () => {
+    h.upload.mockRejectedValueOnce(new UploadError(UPLOAD_MESSAGES.signIn, "not-signed-in"));
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Your sign-in has expired. Press Launch to sign in again."));
+    expect(h.state.dropSession).toHaveBeenCalledTimes(1);
+    expect(h.execute).not.toHaveBeenCalled();
+    h.state.signed = false; // what AppState reports once the session is dropped
+    rerender(<LaunchForm />);
+    expect(launch().getAttribute("aria-disabled")).toBe("false");
+    await press();
+    expect(h.state.withSignIn).toHaveBeenCalledWith("launch", expect.any(Function), expect.any(Function));
+    expect(screen.getByText("Sign in")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull(); // the old line goes once the new attempt starts
+    h.state.signed = true; // the signature landed
+    await act(async () => {
+      rerender(<LaunchForm />);
+    });
+    await waitFor(() => expect(h.push).toHaveBeenCalledWith(`/t/${TOKEN}?launched=${TX}`));
+    expect(h.upload).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the session on any other upload refusal", async () => {
+    h.upload.mockRejectedValueOnce(new UploadError(UPLOAD_MESSAGES.limit, "upload-limit"));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(UPLOAD_MESSAGES.limit));
+    expect(h.state.dropSession).not.toHaveBeenCalled();
+  });
+
+  // UX review, blocker B3: the same salt again would deploy onto a live token, revert, and read "Launch failed".
+  it("stays locked after a launch it could not confirm, with the transaction and the token page one tap away", async () => {
+    h.execute.mockImplementationOnce(async () => {
+      const confirmation = Promise.reject(new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed));
+      confirmation.catch(() => {});
+      return { hash: TX, confirmation };
+    });
+    render(<LaunchForm />);
+    fill();
+    const button = launch();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.unconfirmed));
+    expect(screen.getByRole("link", { name: "View the transaction ↗" }).getAttribute("href")).toBe(txUrl(TX));
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}?launched=${TX}`);
+    expect(h.state.updateToast).toHaveBeenLastCalledWith(1, { kind: "unconfirmed", message: LAUNCH_MESSAGES.unconfirmed });
+    const locked = screen.getByRole("button", { name: "Sent" });
+    expect(locked).toBe(button); // the same element, so keyboard focus is never lost
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.queryByRole("button", { name: "Launch" })).toBeNull();
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it("points to the token page instead of launching again when the predicted address is already live", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchExistsError(LAUNCH_MESSAGES.alreadyLive, TOKEN));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.alreadyLive));
+    expect(h.execute.mock.calls[0]![0].token).toBe(TOKEN);
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}`);
+    expect(screen.queryByRole("link", { name: /transaction/ })).toBeNull(); // no hash is known for an earlier press
+    const locked = screen.getByRole("button", { name: "Already live" });
+    expect(locked.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  });
+
+  // UX review, should fix 15.
+  it("never reuses an upload made while another wallet was connected", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchRejectedError(LAUNCH_MESSAGES.rejected));
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.rejected));
+    h.state.address = OTHER_WALLET;
+    rerender(<LaunchForm />);
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.upload).toHaveBeenCalledTimes(2);
+    expect(h.execute.mock.calls[1]![1]).toMatchObject({ account: OTHER_WALLET });
   });
 
   it("lists Approve only when the wallet code reports it", async () => {
