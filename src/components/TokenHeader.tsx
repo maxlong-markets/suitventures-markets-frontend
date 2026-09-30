@@ -57,7 +57,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             <span className="text-ink-65">
               {pair.ticker} / {pair.quote}
             </span>
-            <Badge>{originLabel(pair.origin)}</Badge>
+            <Badge>{originLabel(pair.origin).toUpperCase()}</Badge>
             {pair.launch ? <Badge>LAUNCHED HERE</Badge> : null}
             <span>{short(pair.address)}</span>
             <button

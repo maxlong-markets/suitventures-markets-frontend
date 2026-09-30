@@ -11,7 +11,10 @@ export type VoteCount = { bull: number; bear: number };
  * thirty-second cache, which is up to thirty seconds behind the write that just happened.
  */
 export type VoteWrite = { dir: VoteDir | null; counts: VoteCount };
-/** The board's row type is declared in `types.ts` (the page is a client component); the name still lives beside the query that fills it. */
+/**
+ * The board's row type is declared in `types.ts` because `TradersBoard`, a client component, renders it; the name still
+ * lives beside the query that fills it. Corrected 30 Sep 2026: the board is parked, with no tab and no /traders page.
+ */
 export type { TraderRow } from "@/lib/types";
 
 /** The public counts route's cap, and the most ids one grouped query is ever asked for. */

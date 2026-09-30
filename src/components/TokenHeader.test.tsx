@@ -26,4 +26,8 @@ describe("TokenHeader (spec 7.3)", () => {
     render(<TokenHeader pair={{ ...pair, origin: "LONG", launch: null }} />);
     expect(screen.queryByText("LAUNCHED HERE")).toBeNull();
   });
+  it("prints every other origin's badge in capitals", () => {
+    render(<TokenHeader pair={{ ...pair, origin: "Pons", launch: null }} />);
+    expect(screen.getByText("PONS")).toBeTruthy();
+  });
 });

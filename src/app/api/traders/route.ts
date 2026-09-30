@@ -13,6 +13,7 @@ export const dynamic = "force-dynamic";
  * the BRIN on `ts` prunes nothing and the 24-hour slice is a full scan. Until the table is
  * reordered by time or the board reads a rollup, `TRADERS_BOARD=off` keeps the page behind the
  * honest "needs the market store" answer (see `boardOff`) instead of a 30-second failure.
+ * Corrected 30 Sep 2026: no page calls this route any more; the tab and /traders are removed and the route is parked.
  */
 export const maxDuration = 30;
 

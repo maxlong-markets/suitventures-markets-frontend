@@ -1121,11 +1121,13 @@ group, the hairline panel, the centred card, key/value rows, `Badge`, `Avatar`, 
 
 `NAV` in `src/components/TopBar.tsx:10-14` gains `{ href: "/launch", label: "Launch" }` after Traders. Both the
 desktop and the phone rows map over it, so nothing else changes.
+Amended 30 Sep 2026: the Traders tab was removed, so Launch now follows Watchlist.
 
 ### 7.2 `/launch`
 
 `src/app/launch/page.tsx` is a server page exporting `metadata = { title: "Launch" }` that renders one client
 component, `LaunchForm`, the pattern of `/traders`.
+Amended 30 Sep 2026: `/traders` no longer exists, and `YourLaunches` renders under the form once the launchpad is live (7.4).
 
 **Not live.** While `LAUNCHPAD_ADDRESS` is unset the page shows only the centred card: kicker "Launch", title
 "Launching is not live yet", body "Token launches open here once the launchpad contract is deployed."
@@ -1248,9 +1250,10 @@ With it on, the table's rows no longer come from the default 500-row list: the p
 which lists every launch newest first, whether or not it traded and whether or not its listing window has closed (5.4).
 The quote chips, the presets, the search and the sort apply to those rows as usual, and loading and errors follow that
 list. Every row there is a launch, so a launch whose listed pool belongs to another origin still shows. One label
-helper, `originLabel` in `src/lib/markets.ts`, prints `SUITS` for SV and every other origin in capitals, and the chips,
-the row badge, the token page's badge and facts row, and the table's empty-state sentence all go through it; the stored
-origin stays `SV`. `/launch` shows a "Your launches" card under the form, `src/components/YourLaunches.tsx`: the
+helper, `originLabel` in `src/lib/markets.ts`, names SV `SUITS` and leaves every other origin as stored. The chips, the
+row badge and the token page's badge put its word in capitals. The facts row and the table's empty-state sentence print
+it as it is, so they still read "Pons", and "SUITS" for SV. The stored origin stays `SV`. `/launch` shows a "Your
+launches" card under the form, `src/components/YourLaunches.tsx`: the
 connected wallet's own launches from the same list, matched on the launch's creator, newest first, each linking to
 its token page with its age and, above zero, its market cap. It renders nothing without a wallet, while the list
 loads, when the wallet has no launch, and while the launchpad is not live. The default list's listing rule in 5.4 is
