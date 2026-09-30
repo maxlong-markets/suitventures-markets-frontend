@@ -109,6 +109,12 @@ describe("ActivityTabs", () => {
     expect(screen.getByText(short(pair.poolId)).closest("a")).toBeNull();
   });
 
+  it("names the pool's own rate 'Pool fee', not 'Fee tier' (Review Focus 2: one name for one thing)", () => {
+    show("info");
+    expect(screen.getByText("Pool fee")).toBeTruthy();
+    expect(screen.queryByText("Fee tier")).toBeNull();
+  });
+
   it("renders the hook label unlinked when the pool has no hook (the zero address)", () => {
     render(
       <ActivityTabs
@@ -217,6 +223,8 @@ describe("ActivityTabs: the launch rows (spec 7.3)", () => {
     expect(screen.getByText(`${fmtAmt(100)} USDG · ${fmtAmt(19_000_000)} CHALK`)).toBeTruthy(); // 99.5 net plus the 0.5 router fee
     const at = LAUNCHED_AT * 1000;
     expect(screen.getByRole("link", { name: `${fmtISODate(at)} · ${fmtAge(ageHours(at, NOW_MS))} ago` }).getAttribute("href")).toBe(txUrl(LAUNCH_TX));
+    expect(screen.getByText("Pool fee share")).toBeTruthy();
+    expect(screen.queryByText("Fee share")).toBeNull();
     expect(screen.getByText("70 % payout · 30 % MaxLong")).toBeTruthy();
     expect(screen.getByRole("link", { name: "https://chalk.test" }).getAttribute("href")).toBe("https://chalk.test");
     expect(screen.getByRole("link", { name: "https://x.com/chalk" })).toBeTruthy();

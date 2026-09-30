@@ -114,11 +114,27 @@ describe("MarketsPage and the Suits tab (amended 30 Sep 2026)", () => {
     expect(screen.queryByText("Couldn't load pairs.")).toBeNull();
   });
 
-  it("names the origin with the chip's word when nothing matches", async () => {
+  // Review Focus 16: before the first launch, the generic "no pairs match" sentence read as broken.
+  it("says 'No launches yet' with a link to /launch when the Suits list itself is empty", async () => {
     h.ds.pairs.mockImplementation(async (scope) => (scope === "sv" ? [] : [TRADED]));
     show();
     fireEvent.click(suitsChip());
-    await waitFor(() => expect(screen.getByText("No pairs on SUITS match All.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("No launches yet.")).toBeTruthy());
+    expect(screen.queryByText("No pairs on SUITS match All.")).toBeNull();
+    expect(screen.getByRole("link", { name: "Launch a token" }).getAttribute("href")).toBe("/launch");
+  });
+
+  // The Suits list is not empty here (DELISTED exists); only the "New" preset filters it to zero
+  // rows, so the usual reset-minded sentence must stay: launches exist, they just do not match today.
+  it("keeps the usual empty sentence, with a reset, when a preset filters an existing Suits list to zero", async () => {
+    h.ds.pairs.mockImplementation(async (scope) => (scope === "sv" ? [DELISTED] : [TRADED]));
+    show();
+    fireEvent.click(suitsChip());
+    await waitFor(() => expect(screen.getByText("DELISTED")).toBeTruthy());
+    fireEvent.click(within(screen.getByRole("group", { name: "Preset" })).getByRole("button", { name: "New" }));
+    await waitFor(() => expect(screen.getByText("No pairs on SUITS match New.")).toBeTruthy());
+    expect(screen.queryByText("No launches yet.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Show all pairs" })).toBeTruthy();
   });
 
   // Fix round 1: only SV changed its word. Every other origin reads in the sentence as it always did.

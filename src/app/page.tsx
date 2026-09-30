@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import Link from "next/link";
 import QuoteChips from "@/components/QuoteChips";
 import MarketsToolbar from "@/components/MarketsToolbar";
 import PairsTable from "@/components/PairsTable";
@@ -35,6 +36,12 @@ export default function MarketsPage() {
     : `No ${filters.quotes.length ? filters.quotes.join(" / ") + " " : ""}pairs${
         filters.origin !== "all" ? ` on ${originLabel(filters.origin)}` : ""
       } match ${presetLabel(filters.preset)}.`;
+  // Review round 1, finding 15: "no launches" means the Suits list itself is empty, read off its raw length,
+  // not the post-filter row count, so a preset that filters an existing list to zero rows still gets the usual
+  // reset-minded copy. A search is covered by the !query check above: while one is typed this state never
+  // applies, so the regular "No pair matches" copy takes over as usual. The ternary below already checks
+  // pairsQuery.isError first, so this never needs its own check on it.
+  const noLaunches = suits && !query && !loading && (pairsQuery.data ?? []).length === 0;
   const showMockNote =
     isMockSource(ds) &&
     !loading &&
@@ -60,6 +67,16 @@ export default function MarketsPage() {
             >
               Retry
             </button>
+          </div>
+        ) : noLaunches ? (
+          <div className="px-4 py-16 text-center">
+            <div className="text-[16px]">No launches yet.</div>
+            <Link
+              href="/launch"
+              className="mt-[18px] inline-flex h-[30px] items-center justify-center border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(240,232,214,0.5)]"
+            >
+              Launch a token
+            </Link>
           </div>
         ) : (
           <PairsTable

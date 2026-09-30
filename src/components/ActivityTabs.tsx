@@ -200,7 +200,7 @@ function launchRows(pair: TokenPair, now: number, quoteUsd: number | null): Info
     { label: "Opening valuation", value: quoteUsd !== null ? fmtUsd(valuation * quoteUsd) : `${fmtAmt(valuation)} ${pair.quote}` },
     { label: "First buy", value: launch.firstBuyIn === "0" ? "None" : `${fmtAmt(gross)} ${pair.quote} · ${fmtAmt(tokens)} ${pair.ticker}` },
     { label: "Launched", value: `${fmtISODate(at)} · ${fmtAge(ageHours(at, now))} ago`, href: txUrl(launch.launchTx) },
-    { label: "Fee share", value: `${payoutPct} % payout · ${100 - payoutPct} % MaxLong` },
+    { label: "Pool fee share", value: `${payoutPct} % payout · ${100 - payoutPct} % MaxLong` },
   ];
   if (launch.website) rows.push({ label: "Website", value: launch.website, href: launch.website });
   if (launch.x) rows.push({ label: "X", value: launch.x, href: launch.x });
@@ -219,7 +219,7 @@ function InfoList({ pair, now }: { pair: TokenPair; now: number }) {
     // contract, and a hookless pool (the zero address) renders the label unlinked.
     { label: "Hook", value: pair.hook, href: pair.hookAddress !== ZERO_ADDRESS ? addressUrl(pair.hookAddress) : undefined },
     { label: "Token", value: short(pair.address), href: addressUrl(pair.address) },
-    { label: "Fee tier", value: pair.feeTier },
+    { label: "Pool fee", value: pair.feeTier },
     {
       label: "Created",
       value: `${fmtISODate(pair.createdAt)} · ${fmtAge(ageHours(pair.createdAt, now))} ago`,
