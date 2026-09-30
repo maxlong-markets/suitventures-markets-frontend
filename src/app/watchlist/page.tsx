@@ -10,6 +10,7 @@ import { walletButtonClass } from "@/components/WalletButton";
 import { useAppState } from "@/context/AppState";
 import { usePairs } from "@/hooks/useMarketsData";
 import { selectPairs } from "@/lib/markets";
+import type { TokenPair } from "@/lib/types";
 
 export default function WatchlistPage() {
   const {
@@ -24,15 +25,26 @@ export default function WatchlistPage() {
   } = useAppState();
   const { openConnectModal } = useConnectModal();
   const pairsQuery = usePairs();
+  // Review Focus 17: a starred launch nobody bought can fall out of the default 500-row list within a day, with
+  // no note that it is gone. The Suits list (every launch, listed or not) is read too, and merged in by id.
+  const launchesQuery = usePairs("sv");
 
-  // Ages are measured from the moment the pairs were fetched.
+  // Ages are measured from the moment the default list was fetched.
   const now = pairsQuery.dataUpdatedAt;
+  const merged = useMemo(() => {
+    const byId = new Map<string, TokenPair>();
+    for (const p of pairsQuery.data ?? []) byId.set(p.id, p);
+    // The default list wins when a token is in both: it is the one already shown everywhere else in the app.
+    // The Suits list only fills in a launch the default list dropped, never duplicates one it already has.
+    for (const p of launchesQuery.data ?? []) if (!byId.has(p.id)) byId.set(p.id, p);
+    return [...byId.values()];
+  }, [pairsQuery.data, launchesQuery.data]);
   const rows = useMemo(
-    () => selectPairs(pairsQuery.data ?? [], filters, now, { only: stars }),
-    [pairsQuery.data, filters, now, stars],
+    () => selectPairs(merged, filters, now, { only: stars }),
+    [merged, filters, now, stars],
   );
 
-  const loading = pairsQuery.isPending || watchlistLoading;
+  const loading = pairsQuery.isPending || launchesQuery.isPending || watchlistLoading;
   /**
    * The list lives on the server behind a session, so a connected wallet that has not signed in
    * *here* has no stars to show and may well have twenty on it. Telling it the watchlist is empty

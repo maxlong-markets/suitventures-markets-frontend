@@ -17,9 +17,19 @@ const h = vi.hoisted(() => ({
     setWatch: vi.fn<(id: string, on: boolean) => Promise<void>>(),
     votes: vi.fn<() => Promise<Record<string, VoteDir>>>(),
     vote: vi.fn<(id: string, dir: VoteDir) => Promise<VoteDir | null>>(),
-    pairs: vi.fn<() => Promise<TokenPair[]>>(),
+    pairs: vi.fn<(scope?: "sv") => Promise<TokenPair[]>>(),
   },
 }));
+
+const addr = (c: string) => `0x${c.repeat(40)}` as Address;
+function row(ticker: string, id: Address, over: Partial<TokenPair> = {}): TokenPair {
+  return {
+    id, ticker, name: `${ticker} token`, address: id, quote: "USDG", origin: "SV", tradeable: true, priceUsd: 0.00001,
+    priceQuote: 0.00001, change1h: null, change24h: null, vol24h: 0, mcap: 10_000, fdv: 10_000, liquidity: 0, holders: 1,
+    createdAt: Date.now(), bull: 0, bear: 0, poolId: addr("0"), hook: "None", hookAddress: addr("0"), feeTier: "1.00%",
+    ...over,
+  };
+}
 
 // `SignModal` renders beside the page below, so the sign-in panel's click can be observed as the
 // dialog it actually opens rather than as a context field only this test can see.
@@ -37,6 +47,9 @@ vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
 // `QuoteChips` reads `window.matchMedia`, which jsdom does not implement, and it has nothing to
 // do with the loading branch under test — swapped out rather than polyfilling a global for it.
 vi.mock("@/components/QuoteChips", () => ({ default: () => null }));
+// PairsTable's rows read useRouter() (PairsTable.tsx:148) for their click-through; earlier tests here
+// never rendered a real row (pairs always resolved []), so this was never needed before Review Focus 17.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), prefetch: vi.fn() }) }));
 
 function show() {
   const { wrapper: QueryWrapper } = queryHarness();
@@ -105,5 +118,38 @@ describe("WatchlistPage", () => {
     expect(screen.queryByText("Sign in to load your watchlist.")).toBeNull();
     expect(screen.queryByLabelText("Loading pairs")).toBeNull();
     expect(h.ds.watchlist).toHaveBeenCalled();
+  });
+
+  // Review Focus 17: a starred launch nobody bought can fall out of the default 500-row list, and used
+  // to disappear from the watchlist with no note. The Suits list (every launch) is merged in by id.
+  it("shows a starred launch that is missing from the default 500-row list, merged from the Suits list", async () => {
+    const LAUNCH_ONLY = row("GHOST", addr("7"));
+    h.ds.session.mockResolvedValue(WALLET);
+    h.ds.watchlist.mockResolvedValue([LAUNCH_ONLY.id]);
+    h.ds.pairs.mockImplementation(async (scope) => (scope === "sv" ? [LAUNCH_ONLY] : []));
+    show();
+
+    await waitFor(() => expect(screen.getByText("GHOST")).toBeTruthy());
+    expect(screen.getByText("1 token")).toBeTruthy();
+  });
+
+  it("does not duplicate a starred token that is in both the default list and the Suits list", async () => {
+    const BOTH = row("DUAL", addr("8"));
+    h.ds.session.mockResolvedValue(WALLET);
+    h.ds.watchlist.mockResolvedValue([BOTH.id]);
+    h.ds.pairs.mockImplementation(async (scope) => (scope === "sv" ? [BOTH] : [BOTH]));
+    show();
+
+    await waitFor(() => expect(screen.getByText("DUAL")).toBeTruthy());
+    expect(screen.getByText("1 token")).toBeTruthy();
+  });
+
+  it("keeps the loading state up while the Suits list is still in flight, even once the default list and session settle", async () => {
+    h.ds.session.mockResolvedValue(WALLET);
+    h.ds.pairs.mockImplementation((scope) => (scope === "sv" ? new Promise<TokenPair[]>(() => {}) : Promise.resolve([])));
+    show();
+
+    await waitFor(() => expect(screen.getByLabelText("Loading pairs")).toBeTruthy());
+    expect(screen.queryByText("Nothing on your watchlist yet.")).toBeNull();
   });
 });
