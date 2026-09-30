@@ -1,9 +1,11 @@
+import type { Hex } from "viem";
 import type { Address } from "@/lib/types";
 import type { LaunchFields } from "./fields";
 
 /**
  * The browser's half of `POST /api/launch/upload` (instant launchpad design, section 7.2, submit step 2). Every refusal
- * becomes one plain sentence; the route's codes never reach the screen.
+ * becomes one plain sentence; the route's codes never reach the screen. Also this tab's memory of a launch whose outcome
+ * is not known (the end of this file).
  */
 export type UploadAnswer = { imageCid: string; metadataCid: string; metadataUri: string };
 
@@ -91,4 +93,90 @@ export async function uploadLaunchAssets(fields: LaunchFields, image: Blob, fetc
     default:
       throw new UploadError(UPLOAD_MESSAGES.failed, code || String(res.status));
   }
+}
+
+/**
+ * A launch that was sent, or may have been, whose outcome is not known (UX review B3, fix round 1 ruling 6). The form
+ * keeps it for this browser tab, so a reload for the same wallet shows the same locked card instead of a blank form one
+ * press away from a second coin. `hash` is missing when the wallet erred after it was asked to send; `at` is when.
+ */
+export type UnsettledLaunch = { wallet: Address; token: Address; hash?: Hex; at: number };
+
+export const UNSETTLED_KEY = "maxlong:launch:unsettled";
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+const unsettledListeners = new Set<() => void>();
+/** The record last forgotten, never read back even when the storage refused to remove it, so the way out always works. */
+let forgotten: string | null = null;
+
+/** The tab's storage, or null on the server or where the browser refuses it (private windows, blocked site data). */
+function tabStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+/** The stored record as text, for `useSyncExternalStore`: the same text reads as the same snapshot. Never throws. */
+export function readUnsettled(): string | null {
+  let raw: string | null = null;
+  try {
+    raw = tabStorage()?.getItem(UNSETTLED_KEY) ?? null;
+  } catch {
+    return null;
+  }
+  return raw !== null && raw === forgotten ? null : raw;
+}
+
+/** One of this file's own records, or null for anything else: the storage is the browser's, not ours to trust. */
+export function parseUnsettled(raw: string | null): UnsettledLaunch | null {
+  if (raw === null) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof v !== "object" || v === null) return null;
+  const { wallet, token, hash, at } = v as Record<string, unknown>;
+  if (typeof wallet !== "string" || !ADDRESS_RE.test(wallet) || typeof token !== "string" || !ADDRESS_RE.test(token)) return null;
+  if (typeof at !== "number" || !Number.isFinite(at)) return null;
+  if (hash !== undefined && (typeof hash !== "string" || !HASH_RE.test(hash))) return null;
+  const launch: UnsettledLaunch = { wallet: wallet.toLowerCase() as Address, token: token as Address, at };
+  if (hash !== undefined) launch.hash = hash as Hex;
+  return launch;
+}
+
+function notifyUnsettled(): void {
+  for (const listener of unsettledListeners) listener();
+}
+
+/** Keeps the launch for this tab. A storage that refuses only loses the reload case: the open form stays locked anyway. */
+export function rememberUnsettled(launch: UnsettledLaunch): void {
+  const record: UnsettledLaunch = { wallet: launch.wallet.toLowerCase() as Address, token: launch.token, at: launch.at };
+  if (launch.hash !== undefined) record.hash = launch.hash;
+  try {
+    tabStorage()?.setItem(UNSETTLED_KEY, JSON.stringify(record));
+    forgotten = null;
+  } catch {
+    // Nothing to do: see above.
+  }
+  notifyUnsettled();
+}
+
+/** The card's "Start a new launch": forgets the launch, even where the storage refuses to remove it. */
+export function forgetUnsettled(): void {
+  forgotten = readUnsettled() ?? forgotten;
+  try {
+    tabStorage()?.removeItem(UNSETTLED_KEY);
+  } catch {
+    // `forgotten` keeps it from being read back.
+  }
+  notifyUnsettled();
+}
+
+export function subscribeUnsettled(listener: () => void): () => void {
+  unsettledListeners.add(listener);
+  return () => void unsettledListeners.delete(listener);
 }

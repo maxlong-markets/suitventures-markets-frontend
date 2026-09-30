@@ -4,7 +4,7 @@ import {
   LAUNCH_MESSAGES, LaunchExistsError, LaunchFailedError, LaunchRejectedError, LaunchUnconfirmedError, messageForRevert,
 } from "@/lib/launch";
 import { fmtInt } from "@/lib/format";
-import { UPLOAD_MESSAGES, UploadError } from "@/lib/launch/client";
+import { UNSETTLED_KEY, UPLOAD_MESSAGES, UploadError, parseUnsettled, rememberUnsettled } from "@/lib/launch/client";
 import { estimateFirstBuyTokens, firstBuyCapGross, minFirstBuyTokens, rawToNumber } from "@/lib/launch/math";
 import type { Address, QuoteAsset } from "@/lib/types";
 import { act, fireEvent, render, screen, waitFor, within } from "@/test/dom";
@@ -44,8 +44,11 @@ const h = vi.hoisted(() => ({
     snapped: 4_995_430_000n as bigint | undefined,
     pending: false,
   },
-  /** What the form last asked the preview for: the name and symbol predictToken sees. */
-  openingInput: null as null | { name: string; symbol: string },
+  /** What the form last asked the preview for: the account, salt, name and symbol predictToken sees. */
+  openingInput: null as null | { account?: string; salt: string; name: string; symbol: string },
+  /** The token-found watch: what the form asked, and what it answers. */
+  deployedArgs: null as null | { token?: string; watch: boolean },
+  deployed: false,
   balance: 1_000_000_000n as bigint | undefined,
   quotes: [] as unknown[],
   upload: vi.fn(),
@@ -67,11 +70,15 @@ vi.mock("@/hooks/useLaunchpad", () => ({
     const b = quote ? h.bounds[quote.toLowerCase()] : undefined;
     return b ? { ...b, refetch: h.refetch } : undefined;
   },
-  useOpening: (input: { name: string; symbol: string }) => {
+  useOpening: (input: { account?: string; salt: string; name: string; symbol: string }) => {
     h.openingInput = input;
     return h.opening;
   },
   useTokenBalanceOf: () => h.balance,
+  useTokenDeployed: (token: string | undefined, watch: boolean) => {
+    h.deployedArgs = { token, watch };
+    return h.deployed;
+  },
 }));
 vi.mock("wagmi", () => ({
   useAccount: () => ({ chainId: h.chainId }),
@@ -116,6 +123,10 @@ beforeEach(() => {
   h.openConnect.mockReset();
   h.switchChain.mockReset();
   h.switching = false;
+  h.deployedArgs = null;
+  h.deployed = false;
+  // A launch remembered by one case must not lock the next one.
+  sessionStorage.clear();
 });
 
 function fill(o: { name?: string; symbol?: string } = {}) {
@@ -377,12 +388,32 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect(screen.getByText("0x1111…1111 (this wallet)")).toBeTruthy(); // left empty, it still pays this wallet
     fireEvent.change(field, { target: { value: "0x12" } });
     expect(screen.getByText("Not a valid address")).toBeTruthy();
-    expect(screen.getByText("Enter a valid payout address.")).toBeTruthy();
+    // Was "Enter a valid payout address." under the button. Fix round 1 (rulings 8 and 12) puts the payout's own reason
+    // under its field, as for every other field, and the button's reason points at it.
+    expect(screen.getByText("Check the payout address.")).toBeTruthy();
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.getAttribute("aria-describedby")).toBe(screen.getByText("That is not a valid address. Check it for typos.").id);
     fireEvent.change(field, { target: { value: OTHER_WALLET } });
     expect(screen.getByText("0x2222…2222")).toBeTruthy();
+    expect(field.getAttribute("aria-invalid")).toBe("false");
     await press();
     await waitFor(() => expect(h.execute).toHaveBeenCalled());
     expect(h.execute.mock.calls[0]![0].payout).toBe(OTHER_WALLET);
+  });
+
+  // Fix round 1, ruling 12: the contract would pay the zero address's fees to the creator instead.
+  it("refuses the zero address as the payout, with a plain reason under the field", () => {
+    render(<LaunchForm />);
+    fill();
+    fireEvent.click(screen.getByRole("button", { name: "Pay another address" }));
+    const field = screen.getByLabelText("Payout address");
+    fireEvent.change(field, { target: { value: "0x0000000000000000000000000000000000000000" } });
+    const note = screen.getByText("The zero address cannot be the payout. Leave the field empty to use this wallet.");
+    expect(field.getAttribute("aria-describedby")).toBe(note.id);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByText("Not a valid address")).toBeTruthy();
+    expect(screen.getByText("Check the payout address.")).toBeTruthy();
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
   });
 
   // UX review, should fix 4.
@@ -700,6 +731,7 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     await press();
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Your sign-in has expired. Press Launch to sign in again."));
     expect(h.state.dropSession).toHaveBeenCalledTimes(1);
+    expect(h.state.dropSession).toHaveBeenCalledWith(WALLET); // fix round 1, ruling 7: the wallet the upload was made for
     expect(h.execute).not.toHaveBeenCalled();
     h.state.signed = false; // what AppState reports once the session is dropped
     rerender(<LaunchForm />);
@@ -783,6 +815,67 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     expect(h.execute.mock.calls[1]![1]).toMatchObject({ account: OTHER_WALLET });
   });
 
+  // Fix round 1, ruling 1: an error once the wallet was asked to send leaves the outcome unknown.
+  it("locks when the wallet erred after it was asked to send, and an edit and a press send nothing", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchUnconfirmedError(LAUNCH_MESSAGES.maybeSent));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.maybeSent));
+    expect(screen.getByRole("alert").textContent).not.toMatch(/nothing was spent/i);
+    expect(screen.queryByRole("link", { name: /transaction/ })).toBeNull(); // no hash is known
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}`);
+    const locked = screen.getByRole("button", { name: "Sent" });
+    // Edited, the name predicts another address, which the code check would find empty: the lock is what stops a second coin.
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Another Chalk" } });
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+  });
+
+  // Fix round 1, ruling 9: the lock holds through what a creator might try next.
+  it("keeps an unconfirmed launch locked through a name edit and a wallet switch", async () => {
+    h.execute.mockImplementationOnce(async () => {
+      const confirmation = Promise.reject(new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed));
+      confirmation.catch(() => {});
+      return { hash: TX, confirmation };
+    });
+    const { rerender } = render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Another Chalk" } });
+    h.state.address = OTHER_WALLET;
+    rerender(<LaunchForm />);
+    const locked = screen.getByRole("button", { name: "Sent" });
+    await act(async () => {
+      fireEvent.click(locked);
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.unconfirmed);
+  });
+
+  // Fix round 1, ruling 9: the code check guards the address the preview predicted, so the launch must send that preview's
+  // salt and account, also after PoolAlreadyInitialized draws a new salt.
+  it("launches with the salt and account the preview predicted from, also after a new salt is drawn", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchFailedError(messageForRevert("PoolAlreadyInitialized"), "PoolAlreadyInitialized"));
+    render(<LaunchForm />);
+    fill();
+    const first = { ...h.openingInput! };
+    await press();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(h.execute.mock.calls[0]![0].salt).toBe(first.salt);
+    expect(h.execute.mock.calls[0]![1]).toMatchObject({ account: first.account });
+    expect(first.account).toBe(WALLET);
+    const second = { ...h.openingInput! };
+    expect(second.salt).not.toBe(first.salt); // the preview already predicts from the new salt
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.execute.mock.calls[1]![0]).toMatchObject({ salt: second.salt, token: TOKEN });
+    expect(h.execute.mock.calls[1]![1]).toMatchObject({ account: second.account });
+  });
+
   it("lists Approve only when the wallet code reports it", async () => {
     h.execute.mockImplementation(async (_input: unknown, _deps: unknown, onStep: (s: string) => void) => {
       onStep("sign");
@@ -810,5 +903,110 @@ describe("LaunchForm: submitting (spec 7.2's steps)", () => {
     expect([...steps.querySelectorAll("li")].map((li) => li.textContent?.replace(/^[✓\d]*/, ""))).toEqual([
       "Upload", "Approve", "Sign the payment", "Confirm in wallet", "Launching",
     ]);
+  });
+});
+
+// Fix round 1, ruling 6: after "could not confirm", a reload gave a blank form one press away from a second coin.
+describe("LaunchForm: a launch whose outcome is not known, remembered for this tab", () => {
+  const unconfirmedOnce = () =>
+    h.execute.mockImplementationOnce(async () => {
+      const confirmation = Promise.reject(new LaunchUnconfirmedError(LAUNCH_MESSAGES.unconfirmed));
+      confirmation.catch(() => {});
+      return { hash: TX, confirmation };
+    });
+
+  it("remembers a launch it could not confirm: the wallet, the predicted token, the hash and the time", async () => {
+    unconfirmedOnce();
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy());
+    expect(parseUnsettled(sessionStorage.getItem(UNSETTLED_KEY))).toEqual({
+      wallet: WALLET.toLowerCase(), token: TOKEN, hash: TX, at: expect.any(Number),
+    });
+  });
+
+  it("remembers one whose wallet erred after it was asked, with no hash", async () => {
+    h.execute.mockRejectedValueOnce(new LaunchUnconfirmedError(LAUNCH_MESSAGES.maybeSent));
+    render(<LaunchForm />);
+    fill();
+    await press();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy());
+    expect(parseUnsettled(sessionStorage.getItem(UNSETTLED_KEY))).toEqual({ wallet: WALLET.toLowerCase(), token: TOKEN, at: expect.any(Number) });
+  });
+
+  it("shows the same locked card after a reload for the same wallet, and a fresh form for another wallet", async () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, hash: TX, at: 101 });
+    const { unmount } = render(<LaunchForm />);
+    expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.unconfirmed);
+    expect(screen.getByRole("link", { name: "View the transaction ↗" }).getAttribute("href")).toBe(txUrl(TX));
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}?launched=${TX}`);
+    expect(h.deployedArgs).toEqual({ token: TOKEN, watch: true }); // waiting for the token to turn up
+    fill();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sent" }));
+    });
+    expect(h.execute).not.toHaveBeenCalled();
+    unmount();
+    h.state.address = OTHER_WALLET;
+    render(<LaunchForm />);
+    fill();
+    expect(screen.queryByRole("button", { name: "Sent" })).toBeNull();
+    expect((launch() as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("restores the card for a launch whose wallet erred after it was asked, with no transaction link", () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, at: 102 });
+    render(<LaunchForm />);
+    expect(screen.getByRole("alert").textContent).toBe(LAUNCH_MESSAGES.maybeSent);
+    expect(screen.queryByRole("link", { name: /transaction/ })).toBeNull();
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}`);
+  });
+
+  it("offers 'Start a new launch', which forgets the launch and opens the form with a new salt", async () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, hash: TX, at: 103 });
+    render(<LaunchForm />);
+    fill();
+    const before = h.openingInput!.salt;
+    fireEvent.click(screen.getByRole("button", { name: "Start a new launch" }));
+    expect(sessionStorage.getItem(UNSETTLED_KEY)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(h.openingInput!.salt).not.toBe(before);
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.execute.mock.calls[0]![0].salt).toBe(h.openingInput!.salt);
+  });
+
+  it("says the launch went through once the token turns up at its predicted address", () => {
+    rememberUnsettled({ wallet: WALLET, token: TOKEN, hash: TX, at: 104 });
+    h.deployed = true;
+    render(<LaunchForm />);
+    expect(screen.getByRole("alert").textContent).toBe("It went through: your token is live.");
+    expect(screen.getByRole("link", { name: "Open the token page" }).getAttribute("href")).toBe(`/t/${TOKEN}?launched=${TX}`);
+    expect(screen.getByRole("button", { name: "Launched" }).getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByRole("button", { name: "Start a new launch" })).toBeTruthy();
+  });
+
+  it("still launches, and still locks, when the tab's storage refuses", async () => {
+    const refuse = () => {
+      throw new Error("The operation is insecure.");
+    };
+    const spies = [
+      vi.spyOn(Storage.prototype, "getItem").mockImplementation(refuse),
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(refuse),
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(refuse),
+    ];
+    try {
+      unconfirmedOnce();
+      render(<LaunchForm />);
+      fill();
+      await press();
+      await waitFor(() => expect(screen.getByRole("button", { name: "Sent" })).toBeTruthy()); // the open form still locks
+      fireEvent.click(screen.getByRole("button", { name: "Start a new launch" }));
+      await press();
+      await waitFor(() => expect(h.push).toHaveBeenCalled());
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });

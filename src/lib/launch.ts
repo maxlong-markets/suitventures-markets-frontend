@@ -85,7 +85,10 @@ export const LAUNCH_MESSAGES = {
   rejected: "Cancelled in wallet. Nothing was spent.",
   rejectedAfterApprove: "Cancelled in wallet. Nothing was spent except gas.",
   unconfirmed: "Sent, but we could not confirm it. Check the transaction before trying again.",
+  maybeSent:
+    "Your wallet reported an error after the launch was requested. It may have been sent. Check your wallet's activity before trying again.",
   alreadyLive: "This token is already live: an earlier press of Launch went through. Nothing more was sent.",
+  checkFailed: "Could not check the network. Nothing was sent. Try again.",
   notLive: "Launching is not live yet.",
   wrongChain: "Switch your wallet to Robinhood Chain and try again. Nothing was sent.",
   approveFailed: "Could not approve the currency. Nothing was spent except gas.",
@@ -138,13 +141,18 @@ export function revertNameOf(err: unknown): string | null {
   return raw && raw.startsWith("0x") ? decodeName(raw as Hex) : null;
 }
 
+/** The creator dismissed the wallet: viem's error for it, anywhere in the chain of causes. */
+function isRejection(err: unknown): boolean {
+  return err instanceof BaseError && Boolean(err.walk((e) => e instanceof UserRejectedRequestError));
+}
+
 export function mapLaunchError(err: unknown, fallback: string = LAUNCH_MESSAGES.launchFallback): Error {
   if (
     err instanceof LaunchFailedError || err instanceof LaunchRejectedError || err instanceof LaunchUnconfirmedError || err instanceof LaunchExistsError
   ) {
     return err;
   }
-  if (err instanceof BaseError && err.walk((e) => e instanceof UserRejectedRequestError)) return new LaunchRejectedError(LAUNCH_MESSAGES.rejected);
+  if (isRejection(err)) return new LaunchRejectedError(LAUNCH_MESSAGES.rejected);
   const name = revertNameOf(err);
   return new LaunchFailedError(messageForRevert(name, fallback), name);
 }
@@ -200,9 +208,17 @@ async function confirmLaunch(deps: LaunchDeps, launchpad: Address, hash: Hex): P
   return { token: ours.args.token.toLowerCase() as Address };
 }
 
-/** Code at the predicted address: the launch already happened (see LaunchExistsError). viem answers undefined for none. */
+/**
+ * Code at the predicted address: the launch already happened (see LaunchExistsError). viem answers undefined for none.
+ * A read that fails stops the launch too (fix round 1, ruling 5): nothing has been read, signed or sent at this point.
+ */
 async function alreadyDeployed(deps: LaunchDeps, token: Address): Promise<boolean> {
-  const code = await deps.publicClient.getCode({ address: token });
+  let code: Hex | undefined;
+  try {
+    code = await deps.publicClient.getCode({ address: token });
+  } catch {
+    throw new LaunchFailedError(LAUNCH_MESSAGES.checkFailed);
+  }
   return code !== undefined && code !== "0x";
 }
 
@@ -251,7 +267,16 @@ export async function executeLaunch(input: LaunchInput, deps: LaunchDeps, onStep
     onStep("confirm");
     const request = { address: launchpad, abi: svLaunchpadAbi, functionName: "launch", args: [params, permit, signature], account: deps.account } as const;
     await deps.publicClient.simulateContract(request);
-    const hash = await deps.wallet.writeContract({ ...request, chain: robinhoodChain });
+    let hash: Hex;
+    try {
+      hash = await deps.wallet.writeContract({ ...request, chain: robinhoodChain });
+    } catch (err) {
+      // The wallet was asked to send a launch that simulates (fix round 1, ruling 1). Only the creator's own rejection
+      // means nothing was sent; any other error may come after the broadcast (an expired WalletConnect request, an
+      // injected wallet's internal error), so the outcome is unknown and the form must lock, never re-open.
+      if (isRejection(err)) throw err;
+      throw new LaunchUnconfirmedError(LAUNCH_MESSAGES.maybeSent);
+    }
     onStep("launching");
     const confirmation = confirmLaunch(deps, launchpad, hash);
     void confirmation.catch(() => {});

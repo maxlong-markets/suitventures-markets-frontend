@@ -241,6 +241,41 @@ describe("executeLaunch (spec 7.2, submit steps 3 to 6)", () => {
     expect(steps).toEqual([]);
   });
 
+  // Fix round 1, ruling 5: when the check cannot be made, nothing has been read, signed or sent yet.
+  it("says nothing was sent, and mentions no gas, when the check for the token's code cannot be made", async () => {
+    const t = harness({ allowance: 10n });
+    t.getCode.mockRejectedValueOnce(new Error("fetch failed"));
+    const err = await executeLaunch({ ...INPUT, firstBuy: 100n }, t.deps).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LaunchFailedError);
+    expect((err as Error).message).toBe("Could not check the network. Nothing was sent. Try again.");
+    expect((err as Error).message).not.toMatch(/gas/);
+    expect(t.readContract).not.toHaveBeenCalled();
+    expect(t.signTypedData).not.toHaveBeenCalled();
+    expect(t.simulateContract).not.toHaveBeenCalled();
+    expect(t.writeContract).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1, ruling 1: once the simulation passed and the wallet was asked to send, the launch may be on its way; only
+  // the creator's own rejection means it is not. A WalletConnect request that expired after approval, or an injected
+  // wallet's "Internal JSON-RPC error" after it broadcast, look exactly like this.
+  it("calls a wallet error after the send was requested an unknown outcome, never a failure and never 'nothing was spent'", async () => {
+    const t = harness();
+    t.writeContract.mockRejectedValueOnce(new Error("Internal JSON-RPC error."));
+    const err = await executeLaunch(INPUT, t.deps).catch((e: unknown) => e);
+    expect(t.simulateContract).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(LaunchUnconfirmedError);
+    expect((err as Error).message).toBe(LAUNCH_MESSAGES.maybeSent);
+    expect(LAUNCH_MESSAGES.maybeSent).toBe(
+      "Your wallet reported an error after the launch was requested. It may have been sent. Check your wallet's activity before trying again.",
+    );
+  });
+
+  it("keeps a rejection of the send itself as cancelled, the one way the form opens again once the wallet was asked", async () => {
+    const t = harness();
+    t.writeContract.mockRejectedValueOnce(new UserRejectedRequestError(new Error("User rejected the request.")));
+    await expect(executeLaunch(INPUT, t.deps)).rejects.toThrow(new LaunchRejectedError(LAUNCH_MESSAGES.rejected));
+  });
+
   it("goes ahead when the predicted address holds no code, checking it before the approval", async () => {
     for (const code of [undefined, "0x"] as const) {
       const t = harness({ allowance: 10n, code });

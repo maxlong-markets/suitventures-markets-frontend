@@ -521,7 +521,7 @@ describe("AppStateProvider sign-in", () => {
     h.ds.session.mockResolvedValue(LOWER);
     show();
     await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
-    act(() => api!.dropSession());
+    act(() => api!.dropSession(WALLET)); // checksummed, as the form holds it; the session's copy is lowercase
     expect(screen.getByTestId("signed").textContent).toBe("false");
     await flush();
     expect(screen.getByTestId("modal").textContent).toBe("none"); // no prompt of its own: the form's next press asks
@@ -534,6 +534,18 @@ describe("AppStateProvider sign-in", () => {
     await waitFor(() => expect(h.launchRun).toHaveBeenCalledTimes(1));
     expect(screen.getByTestId("signed").textContent).toBe("true");
     expect(h.launchCancel).not.toHaveBeenCalled();
+  });
+
+  // Fix round 1, ruling 7: wallet A's upload can answer 401 after the creator switched to wallet B and signed in there;
+  // B's session is valid and must stay.
+  it("drops the session only when it still belongs to the wallet whose request was refused", async () => {
+    h.ds.session.mockResolvedValue(LOWER);
+    show();
+    await waitFor(() => expect(screen.getByTestId("signed").textContent).toBe("true"));
+    act(() => api!.dropSession(OTHER));
+    expect(screen.getByTestId("signed").textContent).toBe("true");
+    act(() => api!.dropSession(LOWER));
+    expect(screen.getByTestId("signed").textContent).toBe("false");
   });
 
   it("seeds the session from the cookie, matching a lowercase address to a checksummed wallet", async () => {

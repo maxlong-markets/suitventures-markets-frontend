@@ -97,8 +97,9 @@ export interface AppState {
   /**
    * Forgets the session held in memory, so `signed` turns false and the next gated action asks for the signature again.
    * For a server that answered 401: the cookie is gone (its 7 days ran out, or the secret rotated). It asks nothing itself.
+   * `address` is the wallet the refused request was made for: a session that belongs to another wallet by now stays.
    */
-  dropSession(): void;
+  dropSession(address: Address): void;
 
   toasts: Toast[];
   addToast(t: Omit<Toast, "id">): number;
@@ -398,7 +399,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     pending?.onCancel?.();
   }, []);
 
-  const dropSession = useCallback(() => setSession(null), []);
+  const dropSession = useCallback(
+    (addr: Address) => setSession((s) => (sameAddress(s?.address, addr) ? null : s)),
+    [],
+  );
 
   // --- watchlist -------------------------------------------------------
   const watchlistQuery = useWatchlist(signed);
