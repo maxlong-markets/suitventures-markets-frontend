@@ -12,7 +12,7 @@ const NOW = 1_790_000_000;
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 const addr = (c: string) => `0x${c.repeat(40)}`;
 const poolId = (c: string) => `0x${c.repeat(64)}`;
-const OLD = addr("a"), SV = addr("b"), TRADED_SV = addr("c"), CREATOR = addr("d"), PAYOUT = addr("e");
+const OLD = addr("a"), SV = addr("b"), TRADED_SV = addr("c"), CREATOR = addr("d"), PAYOUT = addr("e"), OTHER_CREATOR = addr("9");
 const P_OLD = poolId("a"), P_SV = poolId("b"), P_TRADED = poolId("c");
 const LAUNCH_TX = poolId("f");
 const SUPPLY = "1000000000000000000000000000";
@@ -122,5 +122,41 @@ describe("the instant launchpad on the markets table and the token page (spec 5.
   it("gives a token not launched here launch: null, and list rows no launch field at all", async () => {
     expect((await backend().pair(OLD))?.launch).toBeNull();
     expect((await backend().pairs("all")).every((p) => !("launch" in p))).toBe(true);
+  });
+
+  // The Suits tab's own list (amended 30 Sep 2026): every launch in market.launches, whether or not it traded and
+  // whether or not its listing window closed. The default list's rule is unchanged.
+  it("lists every launch in the sv scope newest first, a delisted launch nobody bought through its launch pool, each with its creator", async () => {
+    await insertLaunches(db, [
+      launchRow(),
+      launchRow({ tokenId: TRADED_SV, poolId: P_TRADED, creator: OTHER_CREATOR, name: "Traded", symbol: "TRD", block: 90, txHash: poolId("9"), timestamp: NOW - 3 * 86_400 }),
+    ], NOW);
+    now = NOW + 86_400;
+    // The older launch traded after the newer one opened, so ordering by activity would put it first: launch time must win.
+    await db.query("update market.pools set last_swap_at = $1 where id = $2", [now - 400, P_TRADED]);
+    await recomputeListedPools(db, "all", now);
+    const listed = await db.query<{ listed_pool_id: string | null }>("select listed_pool_id from market.tokens where id = $1", [SV]);
+    expect(listed[0]?.listed_pool_id).toBeNull();
+
+    const sv = await backend().pairs("sv");
+    expect(sv.map((p) => p.id)).toEqual([SV, TRADED_SV]);
+    expect(sv[0]).toMatchObject({ poolId: P_SV, origin: "SV", ticker: "CHALK", launchCreator: CREATOR });
+    expect(sv[1]).toMatchObject({ poolId: P_TRADED, origin: "SV", launchCreator: OTHER_CREATOR });
+
+    // Asked second, inside the same 30-second memo: the default list is its own entry and still leaves the delisted launch out.
+    const all = await backend().pairs("all");
+    expect(all.map((p) => p.id)).toEqual([TRADED_SV, OLD]);
+    for (const p of all) expect(p.launchCreator).toBeUndefined();
+    for (const p of await backend().pairs("launchpad")) expect(p.launchCreator).toBeUndefined();
+  });
+
+  it("keeps a hidden launch in the sv scope: hiding blanks its image and links, not its row", async () => {
+    await insertLaunches(db, [launchRow()], NOW);
+    await db.query("update market.launches set hidden = true where token_id = $1", [SV]);
+    expect((await backend().pairs("sv")).map((p) => p.id)).toEqual([SV]);
+  });
+
+  it("answers an empty sv list before anyone has launched", async () => {
+    expect(await backend().pairs("sv")).toEqual([]);
   });
 });

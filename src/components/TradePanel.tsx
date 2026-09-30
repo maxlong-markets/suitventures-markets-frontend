@@ -8,6 +8,7 @@ import { invalidatePairBalances, usePairBalances } from "@/hooks/useTokenBalance
 import { useSwapQuote } from "@/hooks/useMarketsData";
 import { hasRouter, launchpadUrl, robinhoodChain } from "@/lib/chain";
 import { fmtAmt, fmtQuote, fmtTradeAmt, fmtUsd } from "@/lib/format";
+import { originLabel } from "@/lib/markets";
 import { toHuman } from "@/lib/quote/math";
 import { executeSwap, SwapFailedError, SwapRejectedError, SwapUnconfirmedError } from "@/lib/swap";
 import type { Denom, Side, TokenPair } from "@/lib/types";
@@ -56,7 +57,7 @@ function UntradeableCard({ pair }: { pair: TokenPair }) {
           rel="noreferrer"
           className="mt-5 inline-flex h-[34px] items-center border border-wallet-border px-4 font-mono text-[9.5px] uppercase tracking-[0.22em] hover:border-wallet-border-hover hover:bg-wallet-hover"
         >
-          <span className="whitespace-nowrap">Trade on {pair.origin} ↗</span>
+          <span className="whitespace-nowrap">Trade on {originLabel(pair.origin)} ↗</span>
         </a>
       ) : null}
     </div>

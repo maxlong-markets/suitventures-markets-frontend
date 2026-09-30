@@ -12,6 +12,7 @@ import {
   useChartCandles,
   useHolders,
   usePair,
+  usePairs,
   useTraders,
   useVotes,
   useWatchlist,
@@ -34,7 +35,7 @@ const h = vi.hoisted(() => ({
     votes: vi.fn<() => Promise<Record<string, never>>>(),
     candles: vi.fn<(id: string, interval: Interval) => Promise<Candle[]>>(),
     holders: vi.fn<(id: string) => Promise<HoldersView>>(),
-    pairs: vi.fn<() => Promise<TokenPair[]>>(),
+    pairs: vi.fn<(scope?: "sv") => Promise<TokenPair[]>>(),
     pair: vi.fn<(id: string) => Promise<TokenPair | null>>(),
   },
 }));
@@ -205,6 +206,37 @@ describe("useHolders", () => {
   it("stops polling once the list is ready, and never polls a token that will not get one", async () => {
     expect(await pollInterval("ready")).toBe(false);
     expect(await pollInterval("skipped")).toBe(false);
+  });
+});
+
+describe("usePairs and the Suits list (amended 30 Sep 2026)", () => {
+  const DEFAULT_ROW = { id: TOKEN, ticker: "AAA", origin: "LONG" } as TokenPair;
+  const SUITS_ROW: TokenPair = {
+    ...DEFAULT_ROW, id: "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a", ticker: "CHALK", origin: "SV", launchCreator: "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+  };
+
+  beforeEach(() => {
+    h.ds.pairs.mockReset().mockImplementation(async (scope) => (scope === "sv" ? [SUITS_ROW] : [DEFAULT_ROW]));
+    h.ds.pair.mockReset();
+  });
+
+  it("keeps the Suits list under its own key and asks the source for the sv scope", async () => {
+    const { client, wrapper } = queryHarness();
+    const { result } = renderHook(() => ({ all: usePairs(), suits: usePairs("sv") }), { wrapper });
+    await waitFor(() => expect(result.current.suits.data).toEqual([SUITS_ROW]));
+    await waitFor(() => expect(result.current.all.data).toEqual([DEFAULT_ROW]));
+    expect(keys.pairsSv).not.toEqual(keys.pairs);
+    expect(client.getQueryData(keys.pairsSv)).toEqual([SUITS_ROW]);
+    expect(client.getQueryData(keys.pairs)).toEqual([DEFAULT_ROW]);
+    expect(h.ds.pairs).toHaveBeenCalledTimes(2);
+    expect(h.ds.pairs.mock.calls).toEqual(expect.arrayContaining([["sv"], []]));
+  });
+
+  it("leaves usePair on the default list", async () => {
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => usePair(TOKEN), { wrapper });
+    await waitFor(() => expect(result.current.pair?.ticker).toBe("AAA"));
+    expect(h.ds.pairs.mock.calls).toEqual([[]]);
   });
 });
 

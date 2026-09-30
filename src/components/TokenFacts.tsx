@@ -1,5 +1,6 @@
 import type { TokenPair } from "@/lib/types";
 import { addressUrl } from "@/lib/chain";
+import { originLabel } from "@/lib/markets";
 import {
   ageHours,
   fmtAge,
@@ -49,7 +50,7 @@ function buildRows(pair: TokenPair, now: number): FactRow[] {
     { label: "Name", value: pair.name },
     { label: "Token address", value: pair.address, href: addressUrl(pair.address) },
     { label: "Quote asset", value: pair.quote },
-    { label: "Origin", value: pair.origin },
+    { label: "Origin", value: originLabel(pair.origin) },
     { label: "Price (USD)", value: fmtPriceOrDash(priceUsd) },
     { label: "1h change", value: fmtPctOrDash(pair.change1h) },
     { label: "24h change", value: fmtPctOrDash(pair.change24h) },

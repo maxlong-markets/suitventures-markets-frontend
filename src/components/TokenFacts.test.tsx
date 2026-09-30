@@ -91,6 +91,12 @@ describe("TokenFacts", () => {
     expect(screen.getByText(fmtUsd(pair.liquidity!))).toBeTruthy();
   });
 
+  it("names the origin with the table's word: SUITS for a token launched here (amended 30 Sep 2026)", () => {
+    render(<TokenFacts pair={{ ...BASE_PAIR, origin: "SV" }} address={ADDRESS} />);
+    expect(screen.getByText("SUITS")).toBeTruthy();
+    expect(screen.queryByText("SV")).toBeNull();
+  });
+
   it("renders its own unknown-token state when pair is null, rather than a 404 page", () => {
     render(<TokenFacts pair={null} address={ADDRESS} />);
     expect(screen.getByText(/No token at/)).toBeTruthy();

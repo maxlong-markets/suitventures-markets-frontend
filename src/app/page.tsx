@@ -8,18 +8,24 @@ import { useAppState } from "@/context/AppState";
 import { useDataSource } from "@/context/DataSource";
 import { usePairs } from "@/hooks/useMarketsData";
 import { isMockSource } from "@/lib/data";
-import { presetLabel, selectPairs } from "@/lib/markets";
+import { originLabel, presetLabel, selectPairs } from "@/lib/markets";
 
 export default function MarketsPage() {
   const { filters, stars, toggleStar, sortBy, resetFilters } = useAppState();
   const ds = useDataSource();
-  const pairsQuery = usePairs();
+  // The SUITS chip reads its own list (amended 30 Sep 2026): every launch, traded or not, listed or not. The default
+  // list is the 500 most recently traded tokens, which a fresh launch can already be pushed out of. Loading and errors
+  // below follow whichever list is in use.
+  const suits = filters.origin === "SV";
+  const pairsQuery = usePairs(suits ? "sv" : undefined);
 
   // Ages are measured from the moment the pairs were fetched.
   const now = pairsQuery.dataUpdatedAt;
   const rows = useMemo(
-    () => selectPairs(pairsQuery.data ?? [], filters, now),
-    [pairsQuery.data, filters, now],
+    // Every Suits row is a launch already, so the origin test is skipped there: a launch whose listed pool belongs to
+    // another origin still shows. The quote chips, the presets, the search and the sort apply as usual.
+    () => selectPairs(pairsQuery.data ?? [], suits ? { ...filters, origin: "all" } : filters, now),
+    [pairsQuery.data, filters, now, suits],
   );
 
   const loading = pairsQuery.isPending;
@@ -27,7 +33,7 @@ export default function MarketsPage() {
   const emptySub = query
     ? `No pair matches “${query}”.`
     : `No ${filters.quotes.length ? filters.quotes.join(" / ") + " " : ""}pairs${
-        filters.origin !== "all" ? ` on ${filters.origin}` : ""
+        filters.origin !== "all" ? ` on ${originLabel(filters.origin)}` : ""
       } match ${presetLabel(filters.preset)}.`;
   const showMockNote =
     isMockSource(ds) &&

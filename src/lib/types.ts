@@ -136,6 +136,11 @@ export interface TokenPair {
   feeTier: string;
   /** Instant launchpad (spec 5.5): undefined on list rows, null for a token not launched here. */
   launch?: LaunchInfo | null;
+  /**
+   * The wallet that launched this token, lowercase as stored (amended 30 Sep 2026). Only rows of the Suits list,
+   * `pairs("sv")`, carry it; it is undefined everywhere else, the default list and the single-token answer included.
+   */
+  launchCreator?: Address;
 }
 
 export interface Candle {
@@ -201,7 +206,11 @@ export interface Quote {
 
 export interface MarketsDataSource {
   quotes(): Promise<QuoteAsset[]>;
-  pairs(): Promise<TokenPair[]>;
+  /**
+   * The markets table's list: the 500 most recently traded tokens, or with "sv" the Suits list (amended 30 Sep 2026),
+   * every launch newest first with its `launchCreator`, listed or not.
+   */
+  pairs(scope?: "sv"): Promise<TokenPair[]>;
   /** One token by address, listed or not; null when the source does not know it. */
   pair(id: string): Promise<TokenPair | null>;
   candles(id: string, interval: Interval): Promise<Candle[]>;

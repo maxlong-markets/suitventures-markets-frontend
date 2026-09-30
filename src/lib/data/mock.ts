@@ -224,9 +224,11 @@ export class MockDataSource implements MarketsDataSource {
     return this.quoteList.map((q) => ({ ...q }));
   }
 
-  async pairs(): Promise<TokenPair[]> {
+  /** The Suits list (amended 30 Sep 2026) is the seed's SV rows. The seed carries no launchCreator, so the demo's /launch lists none. */
+  async pairs(scope?: "sv"): Promise<TokenPair[]> {
     await this.delay();
-    return this.pairList.map((p) => ({ ...p }));
+    const list = scope === "sv" ? this.pairList.filter((p) => p.origin === "SV") : this.pairList;
+    return list.map((p) => ({ ...p }));
   }
 
   async candles(id: string, interval: Interval): Promise<Candle[]> {

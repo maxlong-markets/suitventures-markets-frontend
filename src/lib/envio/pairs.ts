@@ -14,7 +14,11 @@ export const PAIRS_LIMIT = 500;
 const WINDOW_BATCH = 50; // pools per aliased window request; 0.4 s measured
 const WINDOW_CONCURRENCY = 3;
 
-export type PairsScope = "all" | "launchpad";
+/**
+ * "sv" is the Suits tab's list (amended 30 Sep 2026): every launch, answered by the store from market.launches. The
+ * Hasura queries here know only the other two; envioBackend.ts derives "sv" from the launchpad list.
+ */
+export type PairsScope = "all" | "launchpad" | "sv";
 
 /** h1 candles for every pool, from a day before the 24h bucket so the day-ago reference has a fallback. */
 async function loadWindowRows(poolIds: string[], now: number): Promise<WindowRow[]> {
@@ -55,7 +59,7 @@ function recoverySince(main: TokenRow[], now: number): number {
  * from the first one's tail. Merging them and re-sorting on the *resolved* pool is what puts AI
  * and its ~1000 siblings back on the table.
  */
-export async function loadPairs(scope: PairsScope = "all") {
+export async function loadPairs(scope: Exclude<PairsScope, "sv"> = "all") {
   return ttlCache(`pairs:${scope}`, PAIRS_TTL * 1000, async () => {
     const now = nowSec();
     const launchpad = scope === "launchpad";

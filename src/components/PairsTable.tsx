@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { memo, useState, type KeyboardEvent, type MouseEvent } from "react";
-import type { SortDir, SortKey } from "@/lib/markets";
+import { originLabel, type SortDir, type SortKey } from "@/lib/markets";
 import type { TokenPair } from "@/lib/types";
 import {
   ageHours,
@@ -148,7 +148,7 @@ const PairRow = memo(function PairRow({
   const router = useRouter();
   const href = `/t/${pair.id}`;
   const age = fmtAge(ageHours(pair.createdAt, now));
-  const pad = pair.origin.toUpperCase();
+  const pad = originLabel(pair.origin);
 
   const open = () => {
     // Phone rows expand in place; larger screens go straight to the token.

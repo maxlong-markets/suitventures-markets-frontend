@@ -15,9 +15,11 @@ const pair = {
 } as TokenPair;
 
 describe("TokenHeader (spec 7.3)", () => {
-  it("adds a LAUNCHED HERE chip beside the SV badge for a token launched here", () => {
+  it("adds a LAUNCHED HERE chip beside the SUITS badge for a token launched here", () => {
     render(<TokenHeader pair={{ ...pair, launch: { creator: "0xc1" } as unknown as LaunchInfo }} />);
-    expect(screen.getByText("SV")).toBeTruthy();
+    // The origin stays SV in the data; the badge prints the same word as the table's (amended 30 Sep 2026).
+    expect(screen.getByText("SUITS")).toBeTruthy();
+    expect(screen.queryByText("SV")).toBeNull();
     expect(screen.getByText("LAUNCHED HERE")).toBeTruthy();
   });
   it("shows no chip otherwise", () => {

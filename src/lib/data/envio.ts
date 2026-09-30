@@ -54,7 +54,10 @@ export class EnvioDataSource implements MarketsDataSource {
   readonly kind = "envio" as const;
   private pairsCache: { at: number; list: TokenPair[] } | null = null;
 
-  async pairs(): Promise<TokenPair[]> {
+  async pairs(scope?: "sv"): Promise<TokenPair[]> {
+    // The Suits list (amended 30 Sep 2026) is its own answer and never lands in pairsCache: quoteSwap reads that cache
+    // as the default list, and the two lists hold different rows.
+    if (scope === "sv") return getJson<TokenPair[]>("/api/pairs?scope=sv");
     const list = await getJson<TokenPair[]>("/api/pairs");
     this.pairsCache = { at: Date.now(), list };
     return list;

@@ -10,7 +10,7 @@ import { launchHealth } from "@/lib/launch/store";
 import { nowSec } from "@/lib/time";
 import type { HoldersStatus } from "@/lib/types";
 import type { HealthReport, MarketBackend } from "./backend";
-import { PAIR_ONE_SELECT, PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
+import { PAIR_LAUNCH_SELECT, PAIR_ONE_SELECT, PAIR_SELECT, pairFromRow, type PairRow } from "./dbShape";
 import { poolKeyRow, type PoolKeyParts } from "./poolKey";
 
 const SYNC_OK_WITHIN_SEC = 300;
@@ -52,6 +52,9 @@ const PAIRS_SQL: Record<PairsScope, string> = {
   all: `${PAIR_SELECT} ${ORDER}`,
   // A token's origin equals its pools' origin (the indexer keeps them equal); tokens_origin_listed carries this.
   launchpad: `${PAIR_SELECT} where t.origin in ('LONG', 'Pons', 'SV') ${ORDER}`,
+  // The Suits tab (amended 30 Sep 2026): every launch, newest first, traded or not and listed or not. market.launches
+  // holds one row per launch and stays small, so this needs no index of its own.
+  sv: `${PAIR_LAUNCH_SELECT} order by l.launched_at desc, t.id limit ${PAIRS_LIMIT}`,
 };
 const WINDOW_SQL = `select pool_id, t, open, close, volume_quote as "volumeQuote" from market.candles
   where pool_id = any($1::text[]) and interval = 'h1' and t >= $2 order by t`;

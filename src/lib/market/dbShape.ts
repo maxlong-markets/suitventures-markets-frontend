@@ -6,6 +6,8 @@ export type PairRow = {
   pool_id: string; quote_id: string; pool_origin: string; hooks: string; fee: number; pool_created_at: number;
   price_quote: number; tvl_token: string | null; tvl_quote: string | null; routable: boolean | null;
   quote_symbol: string; quote_decimals: number; usd_price: number | null; usd_updated_at: number | null; aggregator: string | null;
+  /** market.launches.creator, lowercase as stored. Selected by PAIR_LAUNCH_SELECT only; absent from every other row. */
+  launch_creator?: string;
 };
 
 const PAIR_COLUMNS = `
@@ -28,6 +30,18 @@ join market.quotes q on q.id = p.quote_id`;
 export const PAIR_ONE_SELECT = `${PAIR_COLUMNS}
 from market.tokens t
 left join market.launches l on l.token_id = t.id
+join market.pools p on p.id = coalesce(t.listed_pool_id, l.pool_id)
+join market.quotes q on q.id = p.quote_id`;
+
+/**
+ * The Suits tab's list (amended 30 Sep 2026): one row per launch in market.launches, traded or not, listed or not.
+ * Each row takes the token's listed pool, or its launch pool once the listing window has closed, the same fallback as
+ * PAIR_ONE_SELECT. A hidden launch keeps its row, since hiding only blanks the image and links. The default list keeps
+ * PAIR_SELECT and its listing rule.
+ */
+export const PAIR_LAUNCH_SELECT = `${PAIR_COLUMNS}, l.creator as launch_creator
+from market.launches l
+join market.tokens t on t.id = l.token_id
 join market.pools p on p.id = coalesce(t.listed_pool_id, l.pool_id)
 join market.quotes q on q.id = p.quote_id`;
 
@@ -79,5 +93,7 @@ export function pairFromRow(row: PairRow, stats: WindowStats | undefined, nowSec
     hook: hookLabel(origin),
     hookAddress: row.hooks.toLowerCase() as Address,
     feeTier: feeTierLabel(row.fee),
+    // Only the Suits list selects the creator; every other row leaves the field out rather than carrying it undefined.
+    ...(row.launch_creator === undefined ? {} : { launchCreator: row.launch_creator as Address }),
   };
 }

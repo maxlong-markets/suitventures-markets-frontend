@@ -946,6 +946,16 @@ about 1e-19 per token.
 swapped tokens during its window. Every other listed pool has swapped and has a `last_swap_at`, so their order is unchanged. The
 launchpad scope, `dbBackend.ts:49`, becomes `where t.origin in ('LONG', 'Pons', 'SV')`.
 
+**Amended 30 Sep 2026: the Suits list.** Measured on production, a coin launched two minutes earlier already sat at
+rank 95 of the 500 rows, and two coins launched the evening before were in no list at all, so a creator could not find
+their own coin. A third scope, `sv`, answers `GET /api/pairs?scope=sv` with every launch in `market.launches`, newest
+first by `l.launched_at`, capped at 500. It lists a launch whether or not it traded and whether or not its 24-hour
+window has closed, and it keeps hidden launches, because `hidden` only blanks the image and links. Each row joins its
+pool on `coalesce(t.listed_pool_id, l.pool_id)`, as the single-token query does, and carries the launch's creator.
+The Suits tab on the markets table and the wallet's own launches on `/launch` both read it (7.4). The default list's
+listing rule, the 24-hour window and `ORDER` above are unchanged. `market.launches` holds one row per launch and stays
+small, so the scope adds no index.
+
 ### 5.5 The `launch` block on the single-token response
 
 `TokenPair` in `src/lib/types.ts` gains one optional field, filled only by `backend.pair(id)`, never by the 500-row
@@ -1201,7 +1211,7 @@ for up to five minutes before falling back to today's "No token at…" text, sti
 facts layer shows its unknown-token state meanwhile.
 
 **Chip.** `TokenHeader`, beside the origin `Badge` at line 59, a second `Badge` "LAUNCHED HERE" when `pair.launch`.
-The origin badge itself already prints `SV`.
+The origin badge itself already prints `SV`. Amended 30 Sep 2026: it prints `SUITS`, the same word as the table (7.4).
 
 **Launch rows.** `InfoList` in `ActivityTabs.tsx` appends, when `pair.launch`: Creator, with an explorer link;
 Payout, with a link; Opening valuation, in USD when the quote has a price, else in the quote; First buy, the gross
@@ -1232,6 +1242,19 @@ row from its first buy (added 29 Sep 2026).
 
 `ORIGIN_OPTIONS` in `src/lib/markets.ts:36-45` gains `{ key: "SV", label: "SV" }`; `filterPairs` already compares
 `p.origin`. The row badge prints `SV` with no label map. The API's `launchpad` scope includes SV (5.4).
+
+**Amended 30 Sep 2026: the Suits tab.** The origin filter's SV chip reads `SUITS` and sits second, right after All.
+With it on, the table's rows no longer come from the default 500-row list: the page asks `GET /api/pairs?scope=sv`,
+which lists every launch newest first, whether or not it traded and whether or not its listing window has closed (5.4).
+The quote chips, the presets, the search and the sort apply to those rows as usual, and loading and errors follow that
+list. Every row there is a launch, so a launch whose listed pool belongs to another origin still shows. One label
+helper, `originLabel` in `src/lib/markets.ts`, prints `SUITS` for SV and every other origin in capitals, and the chips,
+the row badge, the token page's badge and facts row, and the table's empty-state sentence all go through it; the stored
+origin stays `SV`. `/launch` shows a "Your launches" card under the form, `src/components/YourLaunches.tsx`: the
+connected wallet's own launches from the same list, matched on the launch's creator, newest first, each linking to
+its token page with its age and, above zero, its market cap. It renders nothing without a wallet, while the list
+loads, when the wallet has no launch, and while the launchpad is not live. The default list's listing rule in 5.4 is
+unchanged.
 
 ## 8. Tests and acceptance
 

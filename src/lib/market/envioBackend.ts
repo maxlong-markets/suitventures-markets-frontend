@@ -93,7 +93,9 @@ export function createEnvioBackend(opts: { quoter?: Quoter } = {}): MarketBacken
   const quoter = opts.quoter ?? createQuoter();
   return {
     kind: "envio",
-    pairs: (scope) => loadPairs(scope),
+    // "sv" is not a Hasura query. This path is not used in production, where the store answers it from market.launches;
+    // here it is the launchpad list narrowed to SV, which carries no launchCreator and misses a delisted launch.
+    pairs: async (scope) => (scope === "sv" ? (await loadPairs("launchpad")).filter((p) => p.origin === "SV") : loadPairs(scope)),
     async pair(id) {
       const now = nowSec();
       const t = await gql<TokenRows>(TOKEN_QUERY, { id });

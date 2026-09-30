@@ -204,6 +204,41 @@ describe("EnvioDataSource.quoteSwap", () => {
   });
 });
 
+describe("EnvioDataSource.pairs and the Suits list (amended 30 Sep 2026)", () => {
+  const LAUNCHED = "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a";
+  const suitsRow = { ...pair, id: LAUNCHED, address: LAUNCHED, ticker: "CHALK", origin: "SV", launchCreator: "0xc1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" } as TokenPair;
+  let urls: string[] = [];
+  beforeEach(() => {
+    urls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        urls.push(url);
+        const body = url === "/api/pairs?scope=sv" ? [suitsRow] : url === "/api/pairs" ? [pair] : null;
+        return { ok: body !== null, status: body ? 200 : 404, json: async () => body } as unknown as Response;
+      }),
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("asks /api/pairs?scope=sv for the Suits list and answers its rows", async () => {
+    expect(await source().pairs("sv")).toEqual([suitsRow]);
+    expect(urls).toEqual(["/api/pairs?scope=sv"]);
+  });
+
+  it("keeps the default list's cache: a quote after the Suits list still reads the default rows", async () => {
+    const ds = source();
+    await ds.pairs();
+    await ds.pairs("sv");
+    // Amount 0 answers from the cached default list. Had the Suits rows replaced it, TOKEN would be missing there and
+    // the quote would ask the token route, which answers 404 here.
+    const quote = await ds.quoteSwap(TOKEN, "buy", "0", "quote", false, 1);
+    expect(quote.call).toBeUndefined();
+    expect(urls).toEqual(["/api/pairs", "/api/pairs?scope=sv"]);
+  });
+});
+
 describe("EnvioDataSource sessions and user data", () => {
   const WALLET = "0xAbCdEf0123456789AbCdEf0123456789AbCdEf01" as Address;
   /** What the next fetch answers, by path. */

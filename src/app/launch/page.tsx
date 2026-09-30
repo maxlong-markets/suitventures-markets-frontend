@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import LaunchForm from "@/components/LaunchForm";
+import YourLaunches from "@/components/YourLaunches";
 import { hasLaunchpad } from "@/lib/launch/address";
 
 export const metadata: Metadata = { title: "Launch" };
@@ -22,7 +23,15 @@ export default function LaunchPage() {
         <h1 className="text-[18px] font-medium tracking-[-0.01em]">Launch a token</h1>
         <span className="font-mono text-[10.5px] uppercase tracking-[0.16em] text-ink-40">Uniswap v4 · Robinhood Chain</span>
       </div>
-      {hasLaunchpad() ? <LaunchForm /> : <NotLive />}
+      {hasLaunchpad() ? (
+        <>
+          <LaunchForm />
+          {/* Amended 30 Sep 2026: the connected wallet's own launches, shown only once it has one. */}
+          <YourLaunches />
+        </>
+      ) : (
+        <NotLive />
+      )}
     </section>
   );
 }

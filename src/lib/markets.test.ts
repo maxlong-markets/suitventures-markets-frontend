@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_FILTERS, ORIGIN_OPTIONS, selectPairs } from "./markets";
+import { DEFAULT_FILTERS, ORIGIN_OPTIONS, originLabel, selectPairs } from "./markets";
 import type { TokenPair } from "./types";
 
 function pair(over: Partial<TokenPair>): TokenPair {
@@ -26,8 +26,33 @@ describe("selectPairs with null fields", () => {
   });
   it("offers SV in the origin filter and keeps only launches when it is picked (instant launchpad design, 7.4)", () => {
     expect(ORIGIN_OPTIONS.map((o) => o.key)).toContain("SV");
-    expect(ORIGIN_OPTIONS.find((o) => o.key === "SV")?.label).toBe("SV");
     const list = [pair({ id: "0xa", origin: "SV" }), pair({ id: "0xb", origin: "LONG" })];
     expect(selectPairs(list, { ...DEFAULT_FILTERS, origin: "SV" }, 1_000).map((r) => r.id)).toEqual(["0xa"]);
+  });
+});
+
+describe("origin labels (amended 30 Sep 2026)", () => {
+  it("puts the SUITS chip second, right after All, and prints every other origin in capitals", () => {
+    expect(ORIGIN_OPTIONS.map((o) => [o.key, o.label])).toEqual([
+      ["all", "All"],
+      ["SV", "SUITS"],
+      ["LONG", "LONG"],
+      ["Pons", "PONS"],
+      ["Uniswap", "UNISWAP"],
+      ["Other", "OTHER"],
+    ]);
+  });
+
+  it("names a token launched here SUITS, and every other origin by its own name in capitals", () => {
+    expect(originLabel("SV")).toBe("SUITS");
+    expect(originLabel("LONG")).toBe("LONG");
+    expect(originLabel("Pons")).toBe("PONS");
+    expect(originLabel("Uniswap")).toBe("UNISWAP");
+    expect(originLabel("Other")).toBe("OTHER");
+    expect(originLabel("SUIT")).toBe("SUIT");
+  });
+
+  it("gives every chip the same word the row badge prints", () => {
+    for (const o of ORIGIN_OPTIONS) if (o.key !== "all") expect(o.label).toBe(originLabel(o.key));
   });
 });

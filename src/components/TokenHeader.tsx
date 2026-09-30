@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAppState } from "@/context/AppState";
+import { originLabel } from "@/lib/markets";
 import type { TokenPair } from "@/lib/types";
 import {
   fmtPctOrDash,
@@ -56,7 +57,7 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             <span className="text-ink-65">
               {pair.ticker} / {pair.quote}
             </span>
-            <Badge>{pair.origin.toUpperCase()}</Badge>
+            <Badge>{originLabel(pair.origin)}</Badge>
             {pair.launch ? <Badge>LAUNCHED HERE</Badge> : null}
             <span>{short(pair.address)}</span>
             <button

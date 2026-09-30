@@ -116,10 +116,13 @@ RPC those reads use, defaulting to the public one.
 
 The design is `docs/superpowers/specs/2026-09-28-instant-launchpad-design.md`. The reader adds the launchpad as a
 second log selection in its per-minute HyperSync request and folds `Launched`, `FeesCollected` and `PayoutChanged`
-into `market.launches` and `market.launch_fee_events`. A launched token lists with the `SV` badge from its launch
-block. A launched token keeps the SV origin, but the badge and the SV filter follow the listed pool, so if another pool
-becomes the listed one the badge can differ. One nobody has bought leaves the table after the listing window below and returns with its first trade; its
-page stays up. `POST /api/launch/upload` re-encodes a creator's image to a WebP and pins it and a metadata JSON on
+into `market.launches` and `market.launch_fee_events`. A launched token lists from its launch block with the origin
+`SV`, which the table, the origin chip and the token page all print as `SUITS`. A launched token keeps the SV origin,
+but the badge follows the listed pool, so if another pool becomes the listed one the badge can differ. One nobody has
+bought leaves the default table after the listing window below and returns with its first trade; its page stays up.
+The Suits tab is fed by its own call, `GET /api/pairs?scope=sv`, which lists every launch newest first, bought or not
+and listed or not. The launch page lists the connected wallet's own launches under the form, from the same list.
+`POST /api/launch/upload` re-encodes a creator's image to a WebP and pins it and a metadata JSON on
 Filebase before the launch. Only Suits holders may upload, within the per-wallet limits below. The nightly job's
 `uploads` phase unpins what no launch used.
 
@@ -164,7 +167,7 @@ flowchart LR
   subgraph Browser
     LF["/launch form"]
     TV["/t/address token page"]
-    MK["/ markets, SV filter"]
+    MK["/ markets, SUITS tab"]
     WAL["Wallet"]
   end
   subgraph App["Next.js on Vercel"]
@@ -197,6 +200,7 @@ flowchart LR
 
   LF --> SES
   LF --> UPL
+  LF -- "your launches, scope=sv" --> PAIRS
   LF -- "settings and preview reads" --> LP
   WAL -- "launch, collectFees, claim, setPayout" --> LP
   WAL -- "approve the quote to Permit2" --> P2
@@ -221,7 +225,7 @@ flowchart LR
   TV --> TOK
   TV --> LOGO
   TV --> QUO
-  MK --> PAIRS
+  MK -- "scope=sv on the SUITS tab" --> PAIRS
   TOK --> PG
   PAIRS --> PG
   LOGO --> PG
@@ -548,9 +552,9 @@ Next.js routes and pages:
 
 | Endpoint | Method | Called by | Auth | Reads | Writes |
 |---|---|---|---|---|---|
-| `/launch` | page | creator | none to view | contract views through the wallet RPC | nothing |
+| `/launch` | page | creator | none to view | contract views through the wallet RPC, and `GET /api/pairs?scope=sv` for the connected wallet's own launches | nothing |
 | `/t/[address]` | page | anyone, and the redirect with `?launched=<tx>` | none | the store through the backend | nothing |
-| `/` with the SV origin filter | page | anyone | none | `GET /api/pairs` | nothing |
+| `/` with the SUITS origin chip | page | anyone | none | `GET /api/pairs?scope=sv` | nothing |
 | `/api/session/nonce` | GET | the sign-in asked at wallet connect, or the form's fallback step | per-IP budget | nothing | nonce cookie, 10 minutes |
 | `/api/session` | POST | the same, after the SIWE signature | nonce cookie, SIWE signature | nonce cookie | session cookie, 7 days |
 | `/api/session` | GET | app | session cookie | session cookie | nothing |
@@ -560,6 +564,7 @@ Next.js routes and pages:
 | `/api/tokens/[address]/logo` | GET | every logo on the site | none, no query string | `market.launches`, IPFS gateways | nothing |
 | `/api/tokens/[address]/quote` | GET | trade panel | none | V4 Quoter over RPC, the store | nothing |
 | `/api/pairs` | GET | markets table | none | the store, `scope=all` or `scope=launchpad`, the second now including SV | nothing |
+| `/api/pairs?scope=sv` | GET | the SUITS chip on the markets table, and the launch page's list of the wallet's own launches | none, cached 30 s | `market.launches` with its tokens, pools and quotes: every launch newest first, at most 500, bought or not, listed or not, hidden ones included | nothing |
 | `/api/health` | GET | monitors | none | the `launches` block, `sync.lastCycle.launchEvents` | nothing |
 | `/api/internal/sync` | GET | Vercel cron, every minute | Bearer `CRON_SECRET` | HyperSync, chain RPC | every launch table, the listing, the cursor |
 | `/api/internal/sync/nightly` | GET | Vercel cron, 03:00 UTC | Bearer `CRON_SECRET` | `market.sync_state`, `launch_uploads`, block time over RPC | Filebase HEAD and DELETE, `launch_uploads.status` |
@@ -623,7 +628,7 @@ Postgres tables:
 
 | Table | Written by | Read by |
 |---|---|---|
-| `market.launches` | chain reader, and `hidden` by hand | token route, logo route, health, `attachUploads` |
+| `market.launches` | chain reader, and `hidden` by hand | token route, logo route, health, `attachUploads`, pairs with `scope=sv` |
 | `market.launch_fee_events` | chain reader | token route |
 | `market.launch_uploads` | upload route, chain reader, nightly | upload route, nightly, health |
 | `market.pools` | chain reader, origin SV from `Launched` | pairs, token route, listing |

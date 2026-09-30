@@ -53,6 +53,17 @@ describe("GET /api/pairs", () => {
     expect(pairs).toHaveBeenLastCalledWith("all");
   });
 
+  it("hands scope=sv, the Suits list, to the backend as sv with the same cache header, and still reads anything else as all (amended 30 Sep 2026)", async () => {
+    const res = await call("sv");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, s-maxage=30, stale-while-revalidate=60");
+    expect(pairs).toHaveBeenLastCalledWith("sv");
+    await call("SV");
+    expect(pairs).toHaveBeenLastCalledWith("all");
+    await call("suits");
+    expect(pairs).toHaveBeenLastCalledWith("all");
+  });
+
   it("carries real vote counts when a store is configured", async () => {
     holder.db = {} as Db;
     voteCounts.mockResolvedValue({ [T1]: { bull: 5, bear: 2 }, [T2]: { bull: 0, bear: 0 } });

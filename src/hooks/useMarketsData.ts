@@ -8,6 +8,8 @@ import type { Candle, Denom, Interval, Side, TokenPair, TradersBy } from "@/lib/
 
 export const keys = {
   pairs: ["pairs"] as const,
+  /** The Suits list, every launch (amended 30 Sep 2026): its own entry, so it never stands in for the default list. */
+  pairsSv: ["pairs", "sv"] as const,
   pair: (id: string) => ["pair", id] as const,
   quotes: ["quotes"] as const,
   candles: (id: string, interval: Interval) =>
@@ -22,9 +24,13 @@ export const keys = {
   traders: (by: TradersBy) => ["traders", by] as const,
 };
 
-export function usePairs() {
+/** The default list, or with "sv" the Suits list: every launch, newest first, each with its `launchCreator`. */
+export function usePairs(scope?: "sv") {
   const ds = useDataSource();
-  return useQuery({ queryKey: keys.pairs, queryFn: () => ds.pairs() });
+  return useQuery({
+    queryKey: scope === "sv" ? keys.pairsSv : keys.pairs,
+    queryFn: () => (scope === "sv" ? ds.pairs("sv") : ds.pairs()),
+  });
 }
 
 /** Spec 7.3: how often, and for how long, a page opened by /launch's redirect asks again while the reader catches up. */
