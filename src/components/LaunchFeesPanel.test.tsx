@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, getAddress, type Hex, type Log } from "viem";
 import { LAUNCHPAD_EVENTS_ABI, POOL_MANAGER } from "@/lib/chain/abi";
@@ -357,6 +358,35 @@ describe("LaunchFeesPanel connecting and reconnecting (Review round 1, finding 3
     fireEvent.click(screen.getByRole("button", { name: "Switch to Robinhood Chain" }));
     expect(screen.getByRole("alert").textContent).toBe("Your wallet did not switch. Switch to Robinhood Chain in your wallet and try again.");
   });
+
+  // The mocked query result is a new object on every render, as TanStack's is. Depending on it refetched on every
+  // render on Robinhood Chain, which built a new client, re-rendered and refetched again: an endless loop for every
+  // connected viewer. On that code this fails at the first assertion, since the mount itself refetched.
+  it("refetches once per switch, and never on a plain render on Robinhood Chain", () => {
+    const { rerender } = show();
+    rerender();
+    rerender();
+    expect(h.walletClientRefetch).not.toHaveBeenCalled();
+    h.chainId = 1;
+    rerender();
+    h.chainId = CHAIN_ID;
+    rerender();
+    rerender();
+    rerender();
+    expect(h.walletClientRefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the refused-switch message once the wallet is on Robinhood Chain", () => {
+    h.chainId = 1;
+    h.switchChain.mockImplementation((_vars, options) => options?.onError?.(new Error("rejected")));
+    const { rerender } = show();
+    fireEvent.click(screen.getByRole("button", { name: "Switch to Robinhood Chain" }));
+    expect(screen.getByRole("alert")).toBeTruthy();
+    h.chainId = CHAIN_ID;
+    rerender();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Collect fees" })).toBeTruthy();
+  });
 });
 
 describe("LaunchFeesPanel what Collect does (Review Focus 11)", () => {
@@ -445,6 +475,73 @@ describe("LaunchFeesPanel Just collected reads the receipt (Review round 1, find
       await flushMicrotasks();
     });
     await waitFor(() => expect(screen.getByText("Collected. Totals update shortly.")).toBeTruthy());
+  });
+
+  const OTHER_CONTRACT = "0x00000000000000000000000000000000000000f2" as Address;
+  const OTHER_TOKEN = "0x00000000000000000000000000000000000000f1" as Address;
+  /** The same event from a contract that is not the launchpad: anyone can emit one. */
+  const spoofed = () =>
+    feesCollectedLog({ token: TOKEN, payout: PAYOUT, tokenFees: 9n * E18, quoteFees: 9_000_000n, tokenToPayout: 9n * E18, quoteToPayout: 9_000_000n }, OTHER_CONTRACT);
+  /** A real launchpad event for a different token, as a batched transaction could carry. */
+  const anotherTokens = () =>
+    feesCollectedLog({ token: OTHER_TOKEN, payout: PAYOUT, tokenFees: 5n * E18, quoteFees: 5_000_000n, tokenToPayout: 5n * E18, quoteToPayout: 5_000_000n });
+
+  // Amounts unlike the mocked uncollected read (700 and 300), so a figure taken from anywhere but this token's own
+  // launchpad log cannot pass. Dropping either filter in readCollected shows the 9s or the 5s instead.
+  it("reads this token's log from the launchpad only, past a spoofed log and another token's", async () => {
+    const real = feesCollectedLog({ token: TOKEN, payout: PAYOUT, tokenFees: 200n * E18, quoteFees: 20_000_000n, tokenToPayout: 140n * E18, quoteToPayout: 14_000_000n });
+    h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [spoofed(), anotherTokens(), real] });
+    show();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
+      await flushMicrotasks();
+    });
+    await waitFor(() =>
+      expect(screen.getByText("Just collected: 140 CHALK · 14 USDG to the payout, 60 CHALK · 6 USDG to MaxLong.")).toBeTruthy(),
+    );
+  });
+
+  it("shows no figure when the only logs are a spoofed one and another token's", async () => {
+    h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [spoofed(), anotherTokens()] });
+    show();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
+      await flushMicrotasks();
+    });
+    await waitFor(() => expect(screen.getByText("Collected. Totals update shortly.")).toBeTruthy());
+    expect(screen.queryByText(/Just collected/)).toBeNull();
+  });
+
+  it("says 'to you' by the address the transaction paid, not by the panel's idea of the payout", async () => {
+    // The viewer is STRANGER and the store still names PAYOUT, but this collection paid STRANGER.
+    const paid = feesCollectedLog({ token: TOKEN, payout: STRANGER, tokenFees: 1000n * E18, quoteFees: 10_000_000n, tokenToPayout: 700n * E18, quoteToPayout: 7_000_000n });
+    h.getTransactionReceipt.mockReset().mockResolvedValue({ status: "success", logs: [paid] });
+    show();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
+      await flushMicrotasks();
+    });
+    await waitFor(() =>
+      expect(screen.getByText("Just collected: 700 CHALK · 7 USDG to you, 300 CHALK · 3 USDG to MaxLong.")).toBeTruthy(),
+    );
+  });
+
+  // StrictMode, which the App Router turns on in development, mounts, unmounts and mounts again. A mounted flag that
+  // was only ever set to false then silenced every update after a confirmed write: no line at all on the old code.
+  it("still reports a collection under StrictMode's mount, unmount and mount again", async () => {
+    const { wrapper: QueryWrapper } = queryHarness();
+    render(
+      <StrictMode>
+        <QueryWrapper>
+          <LaunchFeesPanel pair={pair} launch={launch} now={NOW_MS} />
+        </QueryWrapper>
+      </StrictMode>,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Collect fees" }));
+      await flushMicrotasks();
+    });
+    await waitFor(() => expect(screen.getByText(/Just collected: 700 CHALK/)).toBeTruthy());
   });
 });
 

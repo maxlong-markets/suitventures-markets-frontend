@@ -73,7 +73,9 @@ type WalletState = "disconnected" | "wrong-network" | "connecting" | "ready";
 
 /** What one Collect transaction's own `FeesCollected` log actually moved, split by destination. "unknown" when the
  * receipt or the event could not be read: the collection still went through, only the split is unavailable. */
-type CollectedSplit = { tokenToPayout: bigint; quoteToPayout: bigint; tokenToPlatform: bigint; quoteToPlatform: bigint } | "unknown";
+type CollectedSplit =
+  | { payout: Address; tokenToPayout: bigint; quoteToPayout: bigint; tokenToPlatform: bigint; quoteToPlatform: bigint }
+  | "unknown";
 type JustCollected = { baseline: number; split: CollectedSplit };
 
 /**
@@ -85,8 +87,7 @@ type JustCollected = { baseline: number; split: CollectedSplit };
 export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair; launch: LaunchInfo; now: number }) {
   const { address, isConnected, addToast, updateToast } = useAppState();
   const publicClient = usePublicClient({ chainId: robinhoodChain.id });
-  const walletClientQuery = useWalletClient({ chainId: robinhoodChain.id });
-  const walletClient = walletClientQuery.data;
+  const { data: walletClient, refetch: refetchWalletClient } = useWalletClient({ chainId: robinhoodChain.id });
   const { chainId, isReconnecting } = useAccount();
   const { switchChain } = useSwitchChain();
   const { openConnectModal } = useConnectModal();
@@ -105,12 +106,18 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
   const [confirmReady, setConfirmReady] = useState(false);
   // Review round 1, finding 5: set on a successful Change payout, so the viewer stops being treated as the payout at
   // once, before the store's own copy of `launch.payout` has caught up.
-  const [handedTo, setHandedTo] = useState<Address | null>(null);
+  const [handed, setHanded] = useState<{ from: Address; to: Address } | null>(null);
+  // A switch the wallet refused. Shown only while the wallet is still on the wrong network, so it cannot sit beside
+  // working buttons after the creator switches from the wallet itself.
+  const [switchRefused, setSwitchRefused] = useState(false);
   // Review round 1, finding 2 and 8: the split this Collect actually moved (read from its own receipt, not a
   // click-time guess), plus the store's feesCollectedAt right before it. Shown only while those still match (finding
   // 8): the render-time comparison itself decides visibility, so nothing needs to clear this on a timer.
   const [justCollected, setJustCollected] = useState<JustCollected | null>(null);
   const refreshRef = useRef<number | null>(null);
+  // Which refresh run is current. A run that finds another has started since, or that the panel stopped, ends itself,
+  // so two writes confirming close together can never leave an interval nobody owns.
+  const runRef = useRef(0);
   // Review round 1, finding 9: sooner than the effect below can run its cleanup, an async write can still be waiting
   // on a confirmation after this panel has already unmounted (a different token's page: /t/[address] remounts on
   // navigation, but only once the new route actually renders, not the instant the old write was sent).
@@ -124,9 +131,10 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
   const tok = (raw: bigint) => `${fmtAmt(Number(toHuman(raw, 18)))} ${pair.ticker}`;
   const quo = (raw: bigint) => `${fmtAmt(Number(toHuman(raw, launch.quoteDecimals)))} ${pair.quote}`;
   const both = (t: bigint, q: bigint) => `${tok(t)} · ${quo(q)}`;
-  // Review round 1, finding 5: `handedTo` overrides `launch.payout` the moment a Change payout confirms, so the
-  // viewer is never told it is still the payout once it has handed the stream on.
-  const effectivePayout = handedTo ?? launch.payout;
+  // Review round 1, finding 5: a confirmed Change payout overrides `launch.payout` at once, so the viewer is never
+  // told it is still the payout after handing the stream on. The override holds only while the store still shows the
+  // address that was handed from: once the store moves, by this handover or a later one, the store is the truth again.
+  const effectivePayout = handed && launch.payout.toLowerCase() === handed.from.toLowerCase() ? handed.to : launch.payout;
   const isPayout = Boolean(address && address.toLowerCase() === effectivePayout.toLowerCase());
   const u = fees.uncollected;
   const nothingToCollect = u !== undefined && u.tokenFees === 0n && u.quoteFees === 0n;
@@ -144,7 +152,7 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
     const base = addressProblem(value);
     if (base) return base;
     const lower = value.toLowerCase();
-    if (lower === launch.payout.toLowerCase()) return "That is already the payout address.";
+    if (lower === effectivePayout.toLowerCase()) return "That is already the payout address.";
     if (lower === token.toLowerCase() || lower === launch.quoteAddress.toLowerCase()) {
       return "Fees sent to a token contract can never be moved.";
     }
@@ -181,10 +189,8 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
     }
     if (walletState === "wrong-network") {
       setError(null);
-      switchChain(
-        { chainId: robinhoodChain.id },
-        { onError: () => setError("Your wallet did not switch. Switch to Robinhood Chain in your wallet and try again.") },
-      );
+      setSwitchRefused(false);
+      switchChain({ chainId: robinhoodChain.id }, { onError: () => setSwitchRefused(true) });
     }
   }
   /** The button's usual label once the wallet is ready; otherwise what pressing it will do, or why it cannot be pressed. */
@@ -195,53 +201,69 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
     return defaultLabel;
   }
 
-  // Review round 1, finding 3: once the wallet's own chain id reads Robinhood again, ask the wallet-client query
-  // again rather than wait for it to notice on its own. Its staleTime is Infinity and only an address change
-  // invalidates it, so nothing else here would ever refresh it after a switch.
+  // Review round 1, finding 3: once the wallet's own chain changes to Robinhood, ask the wallet-client query again
+  // rather than wait for it to notice on its own. Its staleTime is Infinity and only an address change invalidates
+  // it, so nothing else here would ever refresh it after a switch. Only on the change itself, and keyed on the stable
+  // `refetch`: the query result is a new object on every render, so depending on it re-ran this effect, refetched,
+  // built a new client, re-rendered and refetched again, for as long as the panel stayed on screen.
+  const lastChainRef = useRef(chainId);
   useEffect(() => {
-    if (chainId === robinhoodChain.id) void walletClientQuery.refetch();
-  }, [chainId, walletClientQuery]);
+    if (lastChainRef.current === chainId) return;
+    lastChainRef.current = chainId;
+    if (chainId === robinhoodChain.id) void refetchWalletClient();
+  }, [chainId, refetchWalletClient]);
 
   function stopRefresh() {
+    runRef.current += 1;
     if (refreshRef.current !== null) window.clearInterval(refreshRef.current);
     refreshRef.current = null;
   }
-  // Cleanup only: the effect body itself never runs anything on mount, so there is nothing here for
-  // react-hooks/set-state-in-effect to catch. mountedRef and stopRefresh only touch a ref and an interval, never a
-  // state setter, and only ever run when this panel unmounts.
-  useEffect(
-    () => () => {
+  // Marks the panel mounted on every mount, not only the first: React's StrictMode, which the App Router turns on in
+  // development, mounts, unmounts and mounts again, and a flag only ever set to false would silence every update after
+  // a confirmed write there. The body touches a ref only, never a state setter.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
       stopRefresh();
-    },
-    [],
-  );
+    };
+  }, []);
 
   /**
    * Review round 1, finding 5 and 8: invalidates this token's pair query at once, then every REFRESH_POLL_MS, until
    * `caughtUp` says the store's own copy already reflects the write (Collect's feesCollectedAt moving, or Change
    * payout's payout moving) or REFRESH_MAX_TICKS tries pass, whichever comes first. A nudge only: nothing the panel
-   * shows is decided by this poll's own state (see justCollected's render-time check, and handedTo above), only
-   * refetched sooner than the store would otherwise be asked.
+   * shows is decided by this poll's own state (see justCollected's render-time check, and the payout override above),
+   * only refetched sooner than the store would otherwise be asked. Each run owns its interval and ends itself when a
+   * newer run has started, so two runs that overlap cannot leave one behind. The pair query holds null for a token
+   * the store does not have, which counts as "not caught up".
    */
   async function startRefresh(caughtUp: (fresh: TokenPair) => boolean) {
     stopRefresh();
+    const run = runRef.current;
     let ticks = 0;
-    let stopped = false;
-    const tick = async () => {
+    /** One ask. Answers true when this run is over. */
+    const tick = async (): Promise<boolean> => {
       ticks += 1;
-      await queryClient.invalidateQueries({ queryKey: keys.pair(pair.id) });
-      const fresh = queryClient.getQueryData<TokenPair>(keys.pair(pair.id));
-      if (!mountedRef.current || (fresh !== undefined && caughtUp(fresh)) || ticks >= REFRESH_MAX_TICKS) {
-        stopped = true;
-        stopRefresh();
+      try {
+        await queryClient.invalidateQueries({ queryKey: keys.pair(pair.id) });
+      } catch {
+        // A refetch that failed is just a tick that learned nothing.
       }
+      if (!mountedRef.current || run !== runRef.current) return true;
+      const fresh = queryClient.getQueryData<TokenPair | null>(keys.pair(pair.id));
+      return (fresh != null && caughtUp(fresh)) || ticks >= REFRESH_MAX_TICKS;
     };
-    // Asks once right away, since there is no reason to make the first poll wait a full REFRESH_POLL_MS, then keeps
-    // asking on the interval below until `tick` itself stops it.
-    await tick();
-    if (stopped) return;
-    refreshRef.current = window.setInterval(() => void tick(), REFRESH_POLL_MS);
+    // Asks once right away, since there is no reason to make the first poll wait a full REFRESH_POLL_MS.
+    if (await tick()) return;
+    const id = window.setInterval(() => {
+      void tick().then((over) => {
+        if (!over) return;
+        window.clearInterval(id);
+        if (refreshRef.current === id) refreshRef.current = null;
+      });
+    }, REFRESH_POLL_MS);
+    refreshRef.current = id;
   }
 
   /**
@@ -264,6 +286,7 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
       }).filter((e) => isAddressEqual(e.args.token, token));
       if (!event) return "unknown";
       return {
+        payout: event.args.payout,
         tokenToPayout: event.args.tokenToPayout,
         quoteToPayout: event.args.quoteToPayout,
         tokenToPlatform: event.args.tokenFees - event.args.tokenToPayout,
@@ -317,7 +340,7 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
     const oldPayoutLower = launch.payout.toLowerCase();
     void run("payout", "Changing the payout", "Payout changed", (deps) => changePayout(token, target, deps), () => {
       if (!mountedRef.current) return;
-      setHandedTo(target);
+      setHanded({ from: launch.payout as Address, to: target });
       setNewPayout("");
       setConfirmingPayout(false);
       void startRefresh((fresh) => fresh.launch != null && fresh.launch.payout.toLowerCase() !== oldPayoutLower);
@@ -379,7 +402,8 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
               {justCollected.split === "unknown"
                 ? "Collected. Totals update shortly."
                 : `Just collected: ${both(justCollected.split.tokenToPayout, justCollected.split.quoteToPayout)} to ${
-                    isPayout ? "you" : "the payout"
+                    // The address the transaction itself paid, not the panel's current idea of the payout.
+                    address && isAddressEqual(justCollected.split.payout, address) ? "you" : "the payout"
                   }, ${both(justCollected.split.tokenToPlatform, justCollected.split.quoteToPlatform)} to MaxLong.`}
             </div>
           ) : null}
@@ -496,6 +520,11 @@ export default function LaunchFeesPanel({ pair, launch, now }: { pair: TokenPair
         {error ? (
           <div role="alert" className="font-mono text-[10.5px] text-down">
             {error}
+          </div>
+        ) : null}
+        {switchRefused && walletState === "wrong-network" ? (
+          <div role="alert" className="font-mono text-[10.5px] text-down">
+            Your wallet did not switch. Switch to Robinhood Chain in your wallet and try again.
           </div>
         ) : null}
       </div>
