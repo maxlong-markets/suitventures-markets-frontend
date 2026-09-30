@@ -67,7 +67,18 @@ export function usePair(id: string, opts: { launched?: boolean } = {}) {
   // TokenView reads isPending for its skeleton; both flags cover both queries, so a deep link never flashes "No token"
   // while the fallback is still in flight, and a listed row already in hand never flashes the skeleton.
   const waiting = pair === undefined && fallback.isLoading;
-  return { ...query, pair, isPending: query.isPending || waiting, isLoading: query.isLoading || waiting };
+  /**
+   * B1b (amended 30 Sep 2026): resets the launched-wait clock and asks again right away, so
+   * TokenView's Retry after the five-minute timeout restarts the same countdown instead of
+   * requiring a full reload. Moving `waitingSince` forward is what makes `refetchInterval` above
+   * see a fresh window on its next check; `refetch()` is what makes that check happen now rather
+   * than on whatever schedule the query was already idling on.
+   */
+  const retryWait = () => {
+    waitingSince.current = Date.now();
+    void fallback.refetch();
+  };
+  return { ...query, pair, isPending: query.isPending || waiting, isLoading: query.isLoading || waiting, retryWait };
 }
 
 export function useQuotes() {

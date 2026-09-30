@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { LAUNCH_WAIT_MAX_MS, usePair } from "@/hooks/useMarketsData";
 import { txUrl } from "@/lib/chain";
 import { short } from "@/lib/format";
@@ -14,6 +15,10 @@ import TradePanel from "./TradePanel";
 import { Spinner } from "./ui";
 
 const GUTTER = "px-4 pb-4 tablet:px-5 tablet:pb-5 desktop:px-6 desktop:pb-6";
+/** Outline: the Retry recipe from page.tsx's pairs-load error card, verbatim (also quoted in
+ *  GatedSection.tsx's OUTLINE_BTN); reused here for B1b's timed-out Retry, 30 Sep 2026. */
+const OUTLINE_BTN =
+  "h-[30px] border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(240,232,214,0.5)]";
 
 function BackLink() {
   return (
@@ -41,14 +46,40 @@ function TokenSkeleton() {
 }
 
 export default function TokenView({ address, launchedTx }: { address: string; launchedTx?: Hex }) {
-  const { pair, isPending, dataUpdatedAt } = usePair(address, { launched: launchedTx !== undefined });
+  const router = useRouter();
+  const { pair, isPending, dataUpdatedAt, retryWait } = usePair(address, { launched: launchedTx !== undefined });
   // Spec 7.3: a page opened by /launch's redirect waits for the reader for five minutes, then says what it always says.
+  // `waitAttempt` restarts the clock below on Retry (B1b): bumping it re-runs the effect, which schedules a fresh timeout.
   const [waitOver, setWaitOver] = useState(false);
+  const [waitAttempt, setWaitAttempt] = useState(0);
   useEffect(() => {
     if (!launchedTx) return;
     const id = window.setTimeout(() => setWaitOver(true), LAUNCH_WAIT_MAX_MS);
     return () => window.clearTimeout(id);
-  }, [launchedTx]);
+  }, [launchedTx, waitAttempt]);
+  /**
+   * B1a, amended 30 Sep 2026: the server rendered this page's facts block and tab title before
+   * the wait above ever started, so once the wait actually finds the token those server-rendered
+   * parts must catch up without the visitor reloading. `router.refresh()` re-runs the Server
+   * Components for this route with a fresh read; it does not touch this component's own state
+   * (`pair` above keeps coming from react-query, not from the server), so refreshing does not by
+   * itself change any of this effect's dependencies and cannot loop on its own. The ref is the
+   * actual guard: it survives Strict Mode's double effect-invocation in development and a later
+   * re-render with the same pair, so this fires exactly once per token, not once per render.
+   */
+  const refreshedForRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!launchedTx || !pair) return;
+    if (refreshedForRef.current === pair.id) return;
+    refreshedForRef.current = pair.id;
+    router.refresh();
+  }, [launchedTx, pair, router]);
+  /** B1b: the wait timed out with nothing found. Same countdown, asked again right now. */
+  const retry = () => {
+    setWaitOver(false);
+    setWaitAttempt((n) => n + 1);
+    retryWait();
+  };
   // null: no tab clicked yet for the current token, so CandleChart opens on the finest interval
   // that actually has data (useChartCandles) instead of a fixed default.
   const [selectedInterval, setSelectedInterval] = useState<Interval | null>(null);
@@ -74,6 +105,10 @@ export default function TokenView({ address, launchedTx }: { address: string; la
 
   if (!pair) {
     const waiting = launchedTx !== undefined && !waitOver;
+    // B1b, amended 30 Sep 2026: the five-minute wait running out is not the same fact as a bad
+    // address, and must not read like one. This state keeps the tx link and adds Retry, which
+    // asks for another five minutes rather than sending the creator to reload the page.
+    const timedOut = launchedTx !== undefined && waitOver;
     return (
       <section className={GUTTER}>
         <BackLink />
@@ -83,6 +118,13 @@ export default function TokenView({ address, launchedTx }: { address: string; la
               <div className="text-[16px]">Your token is live on chain. Its page fills in within about two minutes.</div>
               <div className="mt-3 flex justify-center">
                 <Spinner />
+              </div>
+            </>
+          ) : timedOut ? (
+            <>
+              <div className="text-[16px]">Your token is on chain, but the site&apos;s data is running late.</div>
+              <div className="mt-[6px] text-[12.5px] text-ink-50">
+                Retry checks again for up to five more minutes.
               </div>
             </>
           ) : (
@@ -102,6 +144,13 @@ export default function TokenView({ address, launchedTx }: { address: string; la
             >
               View the launch transaction ↗
             </a>
+          ) : null}
+          {timedOut ? (
+            <div className="mt-4">
+              <button type="button" onClick={retry} className={OUTLINE_BTN}>
+                Retry
+              </button>
+            </div>
           ) : null}
         </div>
       </section>

@@ -42,14 +42,28 @@ describe("GET /api/tokens/[address]", () => {
     expect(pair).not.toHaveBeenCalled();
   });
 
-  it("answers 404 with the list's cache header for an unknown token, and memoises that answer", async () => {
+  // Amended 30 Sep 2026 (should fix 9, launch UX review): a 404 used to carry the list's own
+  // s-maxage=30 and memoise the miss in-process for the same 30 s, so a creator's own reload
+  // could still be told "not found" long after the launch had actually landed. On the old code
+  // this test's two assertions read `res.headers.get("Cache-Control")).toBe(CACHE)` (30 s) and
+  // `pair).toHaveBeenCalledTimes(1)` after a second call; both fail against the fix below, which
+  // is the point: a short-lived CDN hold, and a fresh backend read every time it is still unknown.
+  it("answers 404 with a short cache hold for an unknown token, and asks again on the next call", async () => {
     pair.mockResolvedValue(null);
     const res = await call(ADDR);
     expect(res.status).toBe(404);
     await expect(res.json()).resolves.toEqual({ error: "unknown token" });
-    expect(res.headers.get("Cache-Control")).toBe(CACHE);
+    expect(res.headers.get("Cache-Control")).toBe("public, s-maxage=5");
     expect((await call(ADDR)).status).toBe(404);
-    expect(pair).toHaveBeenCalledTimes(1); // ttlCache stores null as a value
+    expect(pair).toHaveBeenCalledTimes(2); // not memoised: the very next call must check again
+  });
+
+  it("still answers only one backend read for two requests racing the same still-unknown token", async () => {
+    pair.mockResolvedValue(null);
+    const [a, b] = await Promise.all([call(ADDR), call(ADDR)]);
+    expect(a.status).toBe(404);
+    expect(b.status).toBe(404);
+    expect(pair).toHaveBeenCalledTimes(1);
   });
 
   it("answers the pair, lowercasing the path segment", async () => {

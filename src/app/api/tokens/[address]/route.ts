@@ -13,10 +13,16 @@ export async function GET(_req: Request, ctx: { params: Promise<{ address: strin
   const id = address.toLowerCase();
   if (!isAddress(id)) return badRequest("bad address");
   try {
-    const pair = await ttlCache(`pair:${id}`, TTL * 1000, () => getBackend().pair(id));
+    const pair = await ttlCache(`pair:${id}`, TTL * 1000, () => getBackend().pair(id), {
+      // Amended 30 Sep 2026 (should fix 9): a launch can land in the store seconds after this
+      // answers 404, so "not found" must not sit in the 30 s memo the way a real pair does.
+      skipCache: (v) => v === null,
+    });
     if (!pair) {
-      // Unknown is a fact for the next 30 s too, so the CDN may hold it as long as the list.
-      return NextResponse.json({ error: "unknown token" }, { status: 404, headers: { "Cache-Control": `public, s-maxage=${TTL}, stale-while-revalidate=60` } });
+      // A short CDN hold only, not the list's 30 s: this is the one answer that can flip from
+      // true to false within seconds of a creator's own launch, and a stale 404 here reads as
+      // "the address is wrong" right when it is not.
+      return NextResponse.json({ error: "unknown token" }, { status: 404, headers: { "Cache-Control": "public, s-maxage=5" } });
     }
     // Merged onto a copy after the memo answered: `ttlCache` hands every caller the same object.
     const [withCounts] = await withVoteCounts([pair]);

@@ -297,4 +297,40 @@ describe("usePair and the instant launchpad (spec 5.5 and 7.3)", () => {
     expect(h.ds.pair.mock.calls.length).toBe(asked);
     expect(late.result.current.pair).toBeUndefined();
   });
+
+  // B1b, amended 30 Sep 2026: TokenView's Retry, after the five-minute cutoff above, must restart
+  // the same countdown rather than needing a reload. On the old `usePair` (no `retryWait` in its
+  // return) `result.current.retryWait` is `undefined`, so the first line below throws
+  // "retryWait is not a function" and the test fails immediately.
+  it("retryWait asks again right away and resumes polling for another five minutes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    h.ds.pairs.mockResolvedValue([]);
+    h.ds.pair.mockResolvedValue(null);
+    const { wrapper } = queryHarness();
+    const { result } = renderHook(() => usePair(SV, { launched: true }), { wrapper });
+    await waitFor(() => expect(h.ds.pair).toHaveBeenCalledTimes(1));
+
+    // Run the clock past the cutoff; polling stops, exactly as the case above establishes.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LAUNCH_WAIT_MAX_MS + LAUNCH_WAIT_POLL_MS);
+    });
+    const askedBeforeRetry = h.ds.pair.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * LAUNCH_WAIT_POLL_MS);
+    });
+    expect(h.ds.pair.mock.calls.length).toBe(askedBeforeRetry); // confirms it had really stopped
+
+    await act(async () => {
+      result.current.retryWait();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(h.ds.pair.mock.calls.length).toBeGreaterThan(askedBeforeRetry); // asked again right away
+    const askedRightAfterRetry = h.ds.pair.mock.calls.length;
+
+    // A fresh five-minute window: one more poll tick must still be live, not stuck at `false` again.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LAUNCH_WAIT_POLL_MS);
+    });
+    expect(h.ds.pair.mock.calls.length).toBeGreaterThan(askedRightAfterRetry);
+  });
 });

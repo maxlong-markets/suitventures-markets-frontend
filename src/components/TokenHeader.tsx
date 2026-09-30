@@ -53,12 +53,16 @@ export default function TokenHeader({ pair }: { pair: TokenPair }) {
             </span>
             <span className="truncate text-[13px] text-ink-50">{pair.name}</span>
           </div>
-          <div className="mt-[6px] flex items-center gap-[10px] whitespace-nowrap font-mono text-[11px] text-ink-50">
+          <div className="mt-[6px] flex flex-wrap items-center gap-[10px] font-mono text-[11px] text-ink-50">
             <span className="text-ink-65">
               {pair.ticker} / {pair.quote}
             </span>
             <Badge>{originLabel(pair.origin).toUpperCase()}</Badge>
-            {pair.launch ? <Badge>LAUNCHED HERE</Badge> : null}
+            {/* Should fix 10, 30 Sep 2026: SUITS already says "launched here"; a second badge
+                saying the same thing was what pushed this row past a phone's width and scrolled
+                the whole page sideways. Kept for a token whose origin badge reads something else
+                while it still carries a `launch` block, so the fact is not lost, just not doubled. */}
+            {pair.launch && pair.origin !== "SV" ? <Badge>LAUNCHED HERE</Badge> : null}
             <span>{short(pair.address)}</span>
             <button
               type="button"

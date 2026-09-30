@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cache } from "react";
 import GatedSection from "@/components/GatedSection";
 import TokenFacts from "@/components/TokenFacts";
 import TokenView from "@/components/TokenView";
@@ -15,6 +16,14 @@ interface Props {
 /** `?launched=<tx>` from /launch's redirect (spec 7.3): a transaction hash, or ignored. */
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 
+/** Reads `?launched=<tx>` from a resolved searchParams object; undefined when absent or malformed.
+ *  Shared by `generateMetadata` and the page body (amended 30 Sep 2026, B1c) so the tab title and
+ *  the rendered page agree on whether this is a fresh launch still waiting to be indexed. */
+function parseLaunchedTx(searchParams: { [key: string]: string | string[] | undefined }): Hex | undefined {
+  const { launched } = searchParams;
+  return typeof launched === "string" && TX_HASH.test(launched) ? (launched.toLowerCase() as Hex) : undefined;
+}
+
 const SITE_URL = "https://www.maxlong.markets";
 // Same key and TTL as src/app/api/tokens/[address]/route.ts's GET handler, so this page's own
 // two reads (generateMetadata, then the page body) and any request to that API route all share
@@ -26,9 +35,18 @@ const TTL = 30;
  *  is what actually bounds backend load, not Next's route cache. */
 export const dynamic = "force-dynamic";
 
-async function getPair(id: string): Promise<TokenPair | null> {
-  return ttlCache(`pair:${id}`, TTL * 1000, () => getBackend().pair(id));
-}
+/**
+ * `cache()` (amended 30 Sep 2026, should fix 9) makes `generateMetadata` and the page body call
+ * this at most once each *request*, the same guarantee `fetch` gives for free and the Next.js
+ * docs name `cache` as the stand-in for when `fetch` is not what is doing the reading
+ * (generate-metadata.md: "React `cache` can be used if `fetch` is unavailable"). That keeps the
+ * "one database read per request" ceiling exact regardless of `ttlCache`'s own memo, which (see
+ * cache.ts) no longer holds a `null` answer for a token that is not found yet, so two calls to
+ * `getPair` a request apart must not turn into two database reads for one visit.
+ */
+const getPair = cache(async (id: string): Promise<TokenPair | null> => {
+  return ttlCache(`pair:${id}`, TTL * 1000, () => getBackend().pair(id), { skipCache: (v) => v === null });
+});
 
 /**
  * One factual, quotable sentence: ticker, name, quote asset, price, 24h change, 24h volume,
@@ -53,7 +71,7 @@ function buildDescription(pair: TokenPair): string {
   return withoutName.slice(0, 159) + "…";
 }
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
+export async function generateMetadata({ params, searchParams }: Props): Promise<Metadata> {
   const { address } = await params;
   const id = decodeURIComponent(address).toLowerCase();
   const canonical = `${SITE_URL}/t/${id}`;
@@ -62,7 +80,14 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   if (!pair) {
     // Unknown-token pages still get a real canonical so a stale or mistyped link consolidates
     // onto one URL rather than Google indexing every variant as a distinct thin page.
-    return { title: "Unknown token", alternates: { canonical } };
+    const launchedTx = parseLaunchedTx(await searchParams);
+    // B1c, amended 30 Sep 2026: a page opened from /launch's redirect is not actually unknown,
+    // it just is not indexed yet, and the tab a creator is watching should say so rather than
+    // suggest a bad address.
+    return {
+      title: launchedTx ? "Indexing your token" : "Unknown token",
+      alternates: { canonical },
+    };
   }
 
   const price = pair.stale ? "—" : fmtPrice(pair.priceUsd);
@@ -93,8 +118,7 @@ export default async function TokenPage({ params, searchParams }: Props) {
   const { address } = await params;
   const id = decodeURIComponent(address).toLowerCase();
   const pair = await getPair(id);
-  const { launched } = await searchParams;
-  const launchedTx = typeof launched === "string" && TX_HASH.test(launched) ? (launched.toLowerCase() as Hex) : undefined;
+  const launchedTx = parseLaunchedTx(await searchParams);
 
   return (
     <>
