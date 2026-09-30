@@ -16,7 +16,8 @@ import {
 } from "@/lib/launch";
 import { UPLOAD_REUSE_MS, UploadError, uploadKey, uploadLaunchAssets, type UploadAnswer } from "@/lib/launch/client";
 import {
-  DESCRIPTION_MAX_CHARS, IMAGE_MAX_BYTES, NAME_MAX_BYTES, SYMBOL_MAX_BYTES, utf8Bytes, validateFields, type LaunchFields,
+  DESCRIPTION_MAX_CHARS, FIELD_LABELS, IMAGE_MAX_BYTES, NAME_MAX_BYTES, SYMBOL_MAX_BYTES, fieldIssues, fieldMessage, onChainText,
+  utf8Bytes, validateFields, type LaunchFieldName, type LaunchFields,
 } from "@/lib/launch/fields";
 import {
   RULE_OF_THUMB, capTokens, estimateFirstBuyTokens, firstBuyCapGross, maxFirstBuy, minFirstBuyTokens, presetValuations, pricePerToken,
@@ -87,6 +88,18 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/** A field's own message, in the image note's recipe, right under the field (UX review 6). */
+function FieldNote({ id, text }: { id: string; text: string | null }) {
+  return text ? (
+    <div id={id} className="mt-2 font-mono text-[10.5px] leading-[1.5] text-down">
+      {text}
+    </div>
+  ) : null;
+}
+
+/** A counter in the label row, in the down colour while over its limit. */
+const counterClass = (over: boolean) => `normal-case tracking-[0.04em]${over ? " text-down" : ""}`;
+
 export default function LaunchForm() {
   const router = useRouter();
   const { address, isConnected, signed, withSignIn, dropSession, addToast, updateToast } = useAppState();
@@ -120,6 +133,8 @@ export default function LaunchForm() {
   // Set once the launch is confirmed: the form stays locked until the token page opens, so no enabled Launch flashes.
   const [done, setDone] = useState(false);
   const [lock, setLock] = useState<Lock | null>(null);
+  // Fields the creator has left once: their messages show from then on, never while first typing into them.
+  const [left, setLeft] = useState<ReadonlySet<LaunchFieldName>>(() => new Set());
   const inFlight = useRef(false);
   const resumeAfterSignIn = useRef(false);
   const uploadCache = useRef<{ key: string; answer: UploadAnswer; at: number } | null>(null);
@@ -142,7 +157,10 @@ export default function LaunchForm() {
         : custom === "" ? null : parseAmount(custom, decimals) || null
       : (presets[preset] ?? null);
   const inRange = requested !== null && bounds !== undefined && requested >= bounds.min && requested <= bounds.max;
-  const opening = useOpening({ account: address, salt, name, symbol, quote, valuation: inRange ? requested : null });
+  // What goes on chain (UX review 7): the preview predicts the token for exactly these, and the launch sends the same.
+  const nameOnChain = onChainText(name);
+  const symbolOnChain = onChainText(symbol);
+  const opening = useOpening({ account: address, salt, name: nameOnChain, symbol: symbolOnChain, quote, valuation: inRange ? requested : null });
   const snapped = inRange ? opening.snapped : undefined;
   const balance = useTokenBalanceOf(quote, address);
 
@@ -164,7 +182,14 @@ export default function LaunchForm() {
   const capGross = snapped && routerFeeBps !== undefined && capBps !== undefined ? firstBuyCapGross(snapped, capBps, routerFeeBps) : null;
   const maxBuy = maxFirstBuy(balance, creationFee, capGross);
   const rawFields: LaunchFields = { name, symbol, description, website, x, telegram };
+  // One set of rules with the upload route (fields.ts): the stored fields when all pass, and each field's own issue.
   const checked = validateFields(rawFields);
+  const issues = fieldIssues(rawFields);
+  const noteFor = (field: LaunchFieldName): string | null => {
+    const issue = issues[field];
+    return issue !== undefined && left.has(field) ? fieldMessage(field, issue) : null;
+  };
+  const leave = (field: LaunchFieldName) => () => setLeft((s) => (s.has(field) ? s : new Set(s).add(field)));
   const payoutAddress = (payoutOpen && payout !== "" ? payout : address) as Address | undefined;
 
   /** Whole dollars when the currency has a USD price, else the currency's own units. */
@@ -191,12 +216,9 @@ export default function LaunchForm() {
     if (settings.launchesToday !== undefined && settings.dailyLimit !== undefined && settings.launchesToday >= settings.dailyLimit) {
       return "You have used today's launches.";
     }
-    if (!image || name === "" || symbol === "") return "Add an image, a name and a symbol.";
-    if (!checked.ok) {
-      return checked.field === "name" || checked.field === "symbol"
-        ? `The name fits ${NAME_MAX_BYTES} bytes and the symbol ${SYMBOL_MAX_BYTES}.`
-        : "Check the description and the links.";
-    }
+    if (!image || nameOnChain === "" || symbolOnChain === "") return "Add an image, a name and a symbol.";
+    // The field says what to change under itself; this points at the first one in form order.
+    if (!checked.ok) return `Check the ${FIELD_LABELS[checked.field]}.`;
     if (!bounds) return "Reading this currency's limits.";
     if (closedCurrency) return "This currency is not open for launches.";
     if (!inRange) return `Pick a valuation between ${money(bounds.min)} and ${money(bounds.max)}.`;
@@ -243,8 +265,8 @@ export default function LaunchForm() {
     // The predicted token is taken here, from the settled preview: the wallet code checks it for code before sending.
     const token = opening.token;
     if (
-      reason !== null || !address || !walletClient || !publicClient || !quote || !image || !snapped || requested === null ||
-      !payoutAddress || !token
+      reason !== null || !checked.ok || !address || !walletClient || !publicClient || !quote || !image || !snapped ||
+      requested === null || !payoutAddress || !token
     ) {
       // A resumed submit that can no longer go ahead leaves no step spinning.
       setPlan([]);
@@ -284,21 +306,23 @@ export default function LaunchForm() {
     setPlan((p) => (p[0] === "sign-in" ? ["sign-in", ...walletSteps] : walletSteps));
     let toastId: number | null = null;
     let hash: Hex | undefined;
+    // The fields as the route stores them: the name and symbol trimmed, as the preview predicted them, and links normalised.
+    const fields = checked.fields;
     try {
       setCurrent("upload");
-      const answer = await uploadOnce(rawFields, image, address, now);
+      const answer = await uploadOnce(fields, image, address, now);
       const handle = await executeLaunch(
         {
-          name, symbol, metadataUri: answer.metadataUri, quote, valuation: requested, firstBuy: firstBuyRaw,
+          name: fields.name, symbol: fields.symbol, metadataUri: answer.metadataUri, quote, valuation: requested, firstBuy: firstBuyRaw,
           minFirstBuyTokens: firstBuyRaw > 0n ? minFirstBuyTokens(estimate) : 0n, payout: payoutAddress, salt, creationFee, token,
         },
         { wallet: walletClient, publicClient, account: address },
         onStep,
       );
       hash = handle.hash;
-      toastId = addToast({ kind: "pending", message: `Launching ${symbol}`, hash: handle.hash });
+      toastId = addToast({ kind: "pending", message: `Launching ${fields.symbol}`, hash: handle.hash });
       const confirmed = await handle.confirmation;
-      updateToast(toastId, { kind: "confirmed", message: `Launched ${symbol}` });
+      updateToast(toastId, { kind: "confirmed", message: `Launched ${fields.symbol}` });
       setDone(true);
       router.push(`/t/${confirmed.token}?launched=${handle.hash}`);
     } catch (err) {
@@ -338,9 +362,16 @@ export default function LaunchForm() {
   }, [signed]);
 
   const busy = pending || done;
-  const nameBytes = utf8Bytes(name);
-  const symbolBytes = utf8Bytes(symbol);
+  // Counted as they go on chain: trimmed.
+  const nameBytes = utf8Bytes(nameOnChain);
+  const symbolBytes = utf8Bytes(symbolOnChain);
+  const descriptionChars = [...description].length;
   const shareBps = settings.creatorShareBps;
+  /** A field's accessible wiring to its own message: invalid while the message shows, described by it. */
+  const described = (field: LaunchFieldName) => {
+    const note = noteFor(field);
+    return { "aria-invalid": note !== null, "aria-describedby": note !== null ? `launch-${field}-note` : undefined, onBlur: leave(field) };
+  };
   const onAmount = (setter: (v: string) => void) => (raw: string) => {
     if (AMOUNT_RE.test(raw)) setter(raw);
   };
@@ -367,42 +398,56 @@ export default function LaunchForm() {
 
         <label className={`${LABEL} mt-5`} htmlFor="launch-name">
           <span>Name</span>
-          <span className="normal-case tracking-[0.04em]">{nameBytes}/{NAME_MAX_BYTES} bytes</span>
+          <span className={counterClass(nameBytes > NAME_MAX_BYTES)}>{nameBytes}/{NAME_MAX_BYTES} bytes</span>
         </label>
-        <input id="launch-name" aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className={INPUT} autoComplete="off" />
+        <input id="launch-name" aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} {...described("name")} className={INPUT} autoComplete="off" />
+        <FieldNote id="launch-name-note" text={noteFor("name")} />
 
         <label className={`${LABEL} mt-4`} htmlFor="launch-symbol">
           <span>Symbol</span>
-          <span className="normal-case tracking-[0.04em]">{symbolBytes}/{SYMBOL_MAX_BYTES} bytes</span>
+          <span className={counterClass(symbolBytes > SYMBOL_MAX_BYTES)}>{symbolBytes}/{SYMBOL_MAX_BYTES} bytes</span>
         </label>
-        <input id="launch-symbol" aria-label="Symbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} className={INPUT} autoComplete="off" />
+        <input id="launch-symbol" aria-label="Symbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} {...described("symbol")} className={INPUT} autoComplete="off" />
+        <FieldNote id="launch-symbol-note" text={noteFor("symbol")} />
 
         <label className={`${LABEL} mt-4`} htmlFor="launch-description">
           <span>Description</span>
-          <span className="normal-case tracking-[0.04em]">{[...description].length}/{DESCRIPTION_MAX_CHARS}</span>
+          <span className={counterClass(descriptionChars > DESCRIPTION_MAX_CHARS)}>{descriptionChars}/{DESCRIPTION_MAX_CHARS}</span>
         </label>
         <textarea
           id="launch-description"
           aria-label="Description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
+          {...described("description")}
           rows={3}
           className="mt-2 w-full border border-hairline-strong bg-transparent px-3 py-2 text-[13px] outline-none focus:border-hairline-focus"
         />
+        <FieldNote id="launch-description-note" text={noteFor("description")} />
 
         {(
           [
-            ["Website", website, setWebsite, "https://"],
-            ["X", x, setX, "handle or x.com link"],
-            ["Telegram", telegram, setTelegram, "name or t.me link"],
+            ["website", "Website", website, setWebsite, "https://"],
+            ["x", "X", x, setX, "handle or x.com link"],
+            ["telegram", "Telegram", telegram, setTelegram, "name or t.me link"],
           ] as const
-        ).map(([label, value, setter, hint]) => (
+        ).map(([field, label, value, setter, hint]) => (
           <div key={label}>
             <label className={`${LABEL} mt-4`} htmlFor={`launch-${label}`}>
               <span>{label}</span>
               <span className="normal-case tracking-[0.04em]">optional</span>
             </label>
-            <input id={`launch-${label}`} aria-label={label} value={value} placeholder={hint} onChange={(e) => setter(e.target.value)} className={INPUT} autoComplete="off" />
+            <input
+              id={`launch-${label}`}
+              aria-label={label}
+              value={value}
+              placeholder={hint}
+              onChange={(e) => setter(e.target.value)}
+              {...described(field)}
+              className={INPUT}
+              autoComplete="off"
+            />
+            <FieldNote id={`launch-${field}-note`} text={noteFor(field)} />
           </div>
         ))}
 

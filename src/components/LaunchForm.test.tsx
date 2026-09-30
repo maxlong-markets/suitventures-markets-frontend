@@ -38,6 +38,8 @@ const h = vi.hoisted(() => ({
   settings: {} as Record<string, unknown>,
   bounds: {} as Record<string, { min: bigint; max: bigint; creationFee: bigint }>,
   opening: { token: "0x7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a", openTick: -398_400, snapped: 4_995_430_000n as bigint | undefined, pending: false },
+  /** What the form last asked the preview for: the name and symbol predictToken sees. */
+  openingInput: null as null | { name: string; symbol: string },
   balance: 1_000_000_000n as bigint | undefined,
   quotes: [] as unknown[],
   upload: vi.fn(),
@@ -56,7 +58,10 @@ vi.mock("@/hooks/useLaunchpad", () => ({
     const b = quote ? h.bounds[quote.toLowerCase()] : undefined;
     return b ? { ...b, refetch: h.refetch } : undefined;
   },
-  useOpening: () => h.opening,
+  useOpening: (input: { name: string; symbol: string }) => {
+    h.openingInput = input;
+    return h.opening;
+  },
   useTokenBalanceOf: () => h.balance,
 }));
 vi.mock("wagmi", () => ({
@@ -88,6 +93,7 @@ beforeEach(() => {
     [AMC]: { min: 50n * 10n ** 18n, max: 100_000n * 10n ** 18n, creationFee: 0n },
   };
   h.opening = { token: TOKEN, openTick: -398_400, snapped: SNAPPED, pending: false };
+  h.openingInput = null;
   h.balance = 1_000_000_000n; // 1,000 USDG
   h.quotes = QUOTES;
   h.upload.mockReset().mockResolvedValue(ANSWER);
@@ -161,6 +167,8 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect((launch() as HTMLButtonElement).disabled).toBe(true);
   });
 
+  // The shared line "The name fits 32 bytes and the symbol 11." gave way to the name's own message under the field (UX
+  // review 6, next test); the button's reason now points at the field.
   it("counts the name in bytes: 8 rockets fit, 9 do not (Review Focus 1)", () => {
     render(<LaunchForm />);
     fill({ name: "🚀".repeat(8) });
@@ -168,7 +176,72 @@ describe("LaunchForm: the button's reasons, first match wins (spec 7.2)", () => 
     expect((launch() as HTMLButtonElement).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "🚀".repeat(9) } });
     expect(screen.getByText("36/32 bytes")).toBeTruthy();
-    expect(screen.getByText("The name fits 32 bytes and the symbol 11.")).toBeTruthy();
+    expect(screen.getByText("Check the name.")).toBeTruthy();
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // UX review, should fix 6.
+  it("shows the name's own message under it once the field is left, and turns the byte counter red while over", () => {
+    render(<LaunchForm />);
+    fill({ name: "🚀".repeat(9) });
+    expect(screen.getByText("36/32 bytes").className).toContain("text-down");
+    const message = "Shorten the name to 32 bytes. An emoji takes 4 bytes, an accented letter 2.";
+    expect(screen.queryByText(message)).toBeNull(); // not while the creator is still typing in it
+    const input = screen.getByLabelText("Name");
+    fireEvent.blur(input);
+    const note = screen.getByText(message);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(input.getAttribute("aria-describedby")).toBe(note.id);
+    fireEvent.change(input, { target: { value: "🚀".repeat(8) } });
+    expect(screen.queryByText(message)).toBeNull(); // gone the moment it fits
+    expect(screen.getByText("32/32 bytes").className).not.toContain("text-down");
+    expect(input.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("says under each field what to change: a joined emoji, a tab, a website without https://, an X share link, a Telegram invite", () => {
+    render(<LaunchForm />);
+    fill({ name: "Dev \u{1F468}\u{200D}\u{1F4BB}" });
+    fireEvent.blur(screen.getByLabelText("Name"));
+    expect(screen.getByText("Joined emoji such as \u{1F468}\u{200D}\u{1F4BB} cannot go in the name. Use single emoji.")).toBeTruthy();
+    const cases: ReadonlyArray<[string, string, string]> = [
+      ["Symbol", "CH\tK", "The symbol holds a hidden character, such as a tab or line break. Type it again by hand."],
+      ["Description", "one\ttwo", "The description holds a tab or a similar hidden character. Use spaces instead."],
+      ["Website", "mysite.com", "The website must start with https://, as in https://example.com."],
+      ["X", "https://x.com/chalk?s=21", "Remove the ? and everything after it from the X link."],
+      ["Telegram", "https://t.me/+invite", "Invite links cannot be listed. Use a public group or channel, like https://t.me/name."],
+    ];
+    for (const [label, value, message] of cases) {
+      const input = screen.getByLabelText(label);
+      fireEvent.change(input, { target: { value } });
+      fireEvent.blur(input);
+      expect(input.getAttribute("aria-describedby")).toBe(screen.getByText(message).id);
+    }
+    expect(screen.getByText("Check the name.")).toBeTruthy(); // the first field in form order
+    expect((launch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("turns the description counter red over 500 characters", () => {
+    render(<LaunchForm />);
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "a".repeat(501) } });
+    expect(screen.getByText("501/500").className).toContain("text-down");
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "a".repeat(500) } });
+    expect(screen.getByText("500/500").className).not.toContain("text-down");
+  });
+
+  // UX review, should fix 7: a stray space would go on chain for good, and the preview must predict the address it lands at.
+  it("trims the name and symbol for the counter, the preview, the upload and the launch alike", async () => {
+    render(<LaunchForm />);
+    fill({ name: "   ", symbol: "CHALK" });
+    expect(screen.getByText("Add an image, a name and a symbol.")).toBeTruthy(); // spaces alone are no name
+    fill({ name: "  Tailor's Chalk ", symbol: " CHALK  " });
+    expect(screen.getByText("14/32 bytes")).toBeTruthy();
+    expect(screen.getByText("5/11 bytes")).toBeTruthy();
+    expect(h.openingInput).toMatchObject({ name: "Tailor's Chalk", symbol: "CHALK" });
+    await press();
+    await waitFor(() => expect(h.push).toHaveBeenCalled());
+    expect(h.upload.mock.calls[0]![0]).toMatchObject({ name: "Tailor's Chalk", symbol: "CHALK" });
+    expect(h.execute.mock.calls[0]![0]).toMatchObject({ name: "Tailor's Chalk", symbol: "CHALK", token: TOKEN });
+    expect(h.state.addToast).toHaveBeenCalledWith({ kind: "pending", message: "Launching CHALK", hash: TX });
   });
 
   it("refuses a valuation outside the currency's bounds, a first buy above the balance, then one above the cap", () => {
