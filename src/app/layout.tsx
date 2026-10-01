@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import { Yellowtail } from "next/font/google";
 import { headers } from "next/headers";
+import { Analytics } from "@vercel/analytics/next";
 import Providers from "@/context/Providers";
 import TokenGate from "@/components/TokenGate";
 import TopBar from "@/components/TopBar";
@@ -53,6 +54,9 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           <ToastStack />
           <SignModal />
         </Providers>
+        {/* Vercel Web Analytics (1 Oct 2026): page views only, no cookies. Outside the gate so a visitor
+            turned away at the door still counts as a view; it renders nothing and needs no provider. */}
+        <Analytics />
       </body>
     </html>
   );
