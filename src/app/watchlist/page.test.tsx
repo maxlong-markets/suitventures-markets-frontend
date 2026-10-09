@@ -40,7 +40,7 @@ vi.mock("wagmi", () => ({
 }));
 vi.mock("@rainbow-me/rainbowkit", () => ({ useConnectModal: () => ({ openConnectModal: vi.fn() }) }));
 // The connect modal never opens here, so the connect-time sign-in (gate off, nothing to admit) never enters the picture.
-vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false, gateEnabled: () => false, useSuitsAccess: () => ({ status: "idle" }) }));
+vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false }));
 // `AppState.tsx` imports this as "./DataSource"; Vitest keys mocks by resolved path, and the `@/`
 // alias resolves to the same file, so the spelling here does not have to match the import's.
 vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));

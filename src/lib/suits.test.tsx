@@ -4,9 +4,7 @@ import { renderHook } from "@/test/dom";
 import { ZERO_ADDRESS } from "@/lib/chain";
 
 const h = vi.hoisted(() => ({
-  // balanceOf(SuitsNFT, wallet) — the only read useSuitsAccess makes, and the first read
-  // useIsSuitHolder makes. isLoading/isError/refetch let tests drive useSuitsAccess's five
-  // statuses without simulating react-query's actual state machine.
+  // balanceOf(SuitsNFT, wallet) — the first read useIsSuitHolder makes.
   balance: {
     data: undefined as bigint | undefined,
     isLoading: false,
@@ -39,15 +37,13 @@ const OTHER_NFT = "0x4444444444444444444444444444444444444444";
 /**
  * `SUITS_NFT_ADDRESS` and `SVROUTER_ADDRESS` are read once at module load, so each case
  * re-imports the module with its own environment. The `wagmi` mock is registered per file and
- * survives `resetModules`. Returns the whole module rather than one export, since cases below
- * exercise `useIsSuitHolder`, `useSuitsAccess`, and `gateEnabled` from the same environment.
+ * survives `resetModules`.
  */
-async function load(env: { nft?: string; mock?: string; router?: string; gate?: string }) {
+async function load(env: { nft?: string; mock?: string; router?: string }) {
   vi.resetModules();
   vi.stubEnv("NEXT_PUBLIC_SUITS_NFT_ADDRESS", env.nft);
   vi.stubEnv("NEXT_PUBLIC_MOCK_SUIT_HOLDER", env.mock);
   vi.stubEnv("NEXT_PUBLIC_SVROUTER_ADDRESS", env.router);
-  vi.stubEnv("NEXT_PUBLIC_TOKEN_GATE", env.gate);
   return await import("./suits");
 }
 
@@ -138,114 +134,5 @@ describe("useIsSuitHolder", () => {
     h.balance.data = BigInt(0);
     h.suitsNft.data = NFT;
     expect(renderHook(() => useIsSuitHolder(WALLET)).result.current).toBe(false);
-  });
-});
-
-describe("useSuitsAccess", () => {
-  afterEach(resetMocks);
-
-  it("is idle with no wallet connected", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    const { result } = renderHook(() => useSuitsAccess());
-    expect(result.current).toEqual({ status: "idle" });
-  });
-
-  it("is idle when the NFT address isn't configured, even with a wallet connected", async () => {
-    const { useSuitsAccess } = await load({});
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current).toEqual({ status: "idle" });
-  });
-
-  it("is checking while react-query still reports the read as loading", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.isLoading = true;
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current).toEqual({ status: "checking" });
-  });
-
-  it("enables the read only once there is a wallet and a configured NFT", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    renderHook(() => useSuitsAccess(WALLET));
-    expect(h.seen.mock.calls[0][0]).toMatchObject({
-      address: NFT,
-      functionName: "balanceOf",
-      args: [WALLET],
-      chainId: 4663,
-      // A denied visitor's only way out is buying a Suit in another tab; without this they would
-      // sit on "No Suit on this wallet" until they thought to reload.
-      query: { enabled: true, refetchOnWindowFocus: true },
-    });
-  });
-
-  // The render that used to flash "no Suit" at a genuine holder: `enabled` has just flipped
-  // true because a wallet connected, so react-query is pending but not yet fetching — every
-  // flag reads false while `data` is still undefined. Nothing has been answered here, and
-  // anything but "checking" is a lie.
-  it("is checking when no flag is set but no answer has arrived either", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.isLoading = false;
-    h.balance.isError = false;
-    h.balance.data = undefined;
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current).toEqual({ status: "checking" });
-  });
-
-  // A background refetch failing must not evict a holder who is already inside.
-  it("keeps a known count when a later refetch errors", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.data = BigInt(1);
-    h.balance.isError = true;
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current).toEqual({ status: "granted", count: BigInt(1) });
-  });
-
-  it("is granted once balanceOf confirms a positive count", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.data = BigInt(3);
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current).toEqual({ status: "granted", count: BigInt(3) });
-  });
-
-  it("is denied once balanceOf confirms zero — a real answer, not a failure", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.data = BigInt(0);
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current).toEqual({ status: "denied", count: BigInt(0) });
-  });
-
-  it("is error when the read fails — distinct from denied, and never reported as owning nothing", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.isError = true;
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    expect(result.current.status).toBe("error");
-    expect(result.current).not.toMatchObject({ status: "denied" });
-  });
-
-  it("error's retry calls the underlying refetch", async () => {
-    const { useSuitsAccess } = await load({ nft: NFT });
-    h.balance.isError = true;
-    const { result } = renderHook(() => useSuitsAccess(WALLET));
-    if (result.current.status !== "error") throw new Error("expected error status");
-    result.current.retry();
-    expect(h.balance.refetch).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("gateEnabled", () => {
-  afterEach(resetMocks);
-
-  it("is off when NEXT_PUBLIC_TOKEN_GATE is \"off\", even with an NFT address configured", async () => {
-    const { gateEnabled } = await load({ nft: NFT, gate: "off" });
-    expect(gateEnabled()).toBe(false);
-  });
-
-  it("is off when the NFT address is unset", async () => {
-    const { gateEnabled } = await load({});
-    expect(gateEnabled()).toBe(false);
-  });
-
-  it("is on when the NFT address is configured and the flag isn't \"off\"", async () => {
-    const { gateEnabled } = await load({ nft: NFT });
-    expect(gateEnabled()).toBe(true);
   });
 });

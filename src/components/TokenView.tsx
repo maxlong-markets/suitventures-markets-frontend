@@ -16,8 +16,8 @@ import TradePanel from "./TradePanel";
 import { Spinner } from "./ui";
 
 const GUTTER = "px-4 pb-4 tablet:px-5 tablet:pb-5 desktop:px-6 desktop:pb-6";
-/** Outline: the Retry recipe from page.tsx's pairs-load error card, verbatim (also quoted in
- *  GatedSection.tsx's OUTLINE_BTN); reused here for B1b's timed-out Retry, 30 Sep 2026. */
+/** Outline: the Retry recipe from page.tsx's pairs-load error card, verbatim; reused here for
+ *  B1b's timed-out Retry, 30 Sep 2026. */
 const OUTLINE_BTN =
   "h-[30px] border border-hairline-btn bg-transparent px-[14px] font-mono text-[9.5px] uppercase tracking-[0.2em] text-ink hover:border-[rgba(240,232,214,0.5)]";
 

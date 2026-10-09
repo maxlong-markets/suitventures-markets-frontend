@@ -4,7 +4,6 @@ import { Yellowtail } from "next/font/google";
 import { headers } from "next/headers";
 import { Analytics } from "@vercel/analytics/next";
 import Providers from "@/context/Providers";
-import TokenGate from "@/components/TokenGate";
 import TopBar from "@/components/TopBar";
 import ToastStack from "@/components/ToastStack";
 import SignModal from "@/components/SignModal";
@@ -45,17 +44,13 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     <html lang="en" className={`${yellowtail.variable} h-full antialiased`}>
       <body className="min-h-full">
         <Providers cookies={cookies}>
-          {/* ToastStack and SignModal stay outside the gate: they are portals owned by
-              Providers, not part of the app a non-holder must not see (design doc §4.4). */}
-          <TokenGate>
-            <TopBar />
-            <main>{children}</main>
-          </TokenGate>
+          <TopBar />
+          <main>{children}</main>
           <ToastStack />
           <SignModal />
         </Providers>
-        {/* Vercel Web Analytics (1 Oct 2026): page views only, no cookies. Outside the gate so a visitor
-            turned away at the door still counts as a view; it renders nothing and needs no provider. */}
+        {/* Vercel Web Analytics (1 Oct 2026): page views only, no cookies. It renders nothing and
+            needs no provider. */}
         <Analytics />
       </body>
     </html>

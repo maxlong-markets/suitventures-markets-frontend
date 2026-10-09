@@ -1,6 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Address, Hex, LaunchInfo, TokenPair } from "@/lib/types";
-import type { SuitsAccess } from "@/lib/suits";
 import { fmtInt, fmtISODate, fmtPct, fmtPrice, fmtUsd } from "@/lib/format";
 import { render, screen } from "@/test/dom";
 import TokenFacts from "./TokenFacts";
@@ -33,27 +32,6 @@ const BASE_PAIR: TokenPair = {
   hookAddress: "0x0000000000000000000000000000000000000000" as Address,
   feeTier: "0.30%",
 };
-
-// PublicFactsSection (the shell around the public block) reads the gate the same way GatedSection
-// and TokenGate do: `useAppState()` for the wallet, `useSuitsAccess` for the read. Defaults here
-// (gate on, status "idle") put the block on screen, as a crawler or a visitor with no wallet sees it.
-const h = vi.hoisted(() => ({
-  address: undefined as string | undefined,
-  access: { status: "idle" } as SuitsAccess,
-  gateEnabled: vi.fn(() => true),
-}));
-
-vi.mock("@/context/AppState", () => ({ useAppState: () => ({ address: h.address }) }));
-vi.mock("@/lib/suits", () => ({
-  useSuitsAccess: () => h.access,
-  gateEnabled: h.gateEnabled,
-}));
-
-beforeEach(() => {
-  h.address = undefined;
-  h.access = { status: "idle" };
-  h.gateEnabled.mockReset().mockReturnValue(true);
-});
 
 describe("TokenFacts", () => {
   it("renders every fact with its value", () => {
@@ -94,9 +72,8 @@ describe("TokenFacts", () => {
     expect(ld["@type"]).toBe("Product");
     expect(ld.identifier).toBe(BASE_PAIR.address);
     expect(ld.url).toBe(`https://www.maxlong.markets/t/${BASE_PAIR.id}`);
-    // No paywall markup: nothing indexable is withheld. A visitor without a Suit gets
-    // GatedSection's lock card in place of the chart, not the real thing hidden by CSS, so there
-    // is nothing to declare — and isAccessibleForFree is a CreativeWork property, not Product's.
+    // No paywall markup: nothing indexable is withheld, since every visitor gets the whole page
+    // — and isAccessibleForFree is a CreativeWork property, not Product's.
     expect(ld.isAccessibleForFree).toBeUndefined();
     expect(ld.hasPart).toBeUndefined();
     expect((ld.additionalProperty as { value: string }).value).toBe(BASE_PAIR.ticker);
@@ -146,9 +123,9 @@ describe("TokenFacts: staying silent for a fresh launch (amended 30 Sep 2026, co
     expect(h1?.textContent).toBe("Indexing your token");
     expect(h1?.className).toContain("sr-only");
     expect(container.querySelectorAll("h1").length).toBe(1);
-    // Re-review finding 1: the hidden heading needs its own bordered section, or nothing closes
-    // GatedSection's lock card from below for a visitor the gate does not admit while the wait is
-    // in progress. So the only content is the section and the h1 inside it: two elements, not one.
+    // Re-review finding 1: the hidden heading needs its own bordered section, so the block above
+    // reads as closed from below while the wait is in progress. So the only content is the
+    // section and the h1 inside it: two elements, not one.
     expect(container.querySelectorAll("*").length).toBe(2);
     expect(container.querySelector("section")?.className).toContain("border-t");
   });
@@ -254,30 +231,11 @@ describe("TokenFacts: the pool fee tier sentence", () => {
   });
 });
 
-describe("TokenFacts: the public block shows itself only to a viewer outside the app (30 Sep 2026)", () => {
+describe("TokenFacts: the public block is in the HTML for a crawler, off screen for everyone (gate removed 9 Oct 2026)", () => {
   const shell = (container: HTMLElement) => container.querySelector("section")!;
   const rowsWrapper = (container: HTMLElement) => shell(container).querySelector("div")!;
 
-  it.each([
-    ["disconnected, as a crawler or a visitor with no wallet sees it", { status: "idle" }],
-    ["once a connected wallet is turned away", { status: "denied", count: 0n }],
-    ["when the Suits check failed", { status: "error", retry: () => {} }],
-  ] as const)("is on screen with the gate on: %s", (_name, access) => {
-    h.access = access as SuitsAccess;
-    const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
-    expect(shell(container).className).not.toContain("sr-only");
-    expect(shell(container).className).toContain("border-t");
-    expect(rowsWrapper(container).getAttribute("aria-hidden")).toBeNull();
-  });
-
-  it.each([
-    ["while the Suits check is still running", true, { status: "checking" }],
-    ["once access is granted, since the app shows the same figures under the trade panel", true, { status: "granted", count: 1n }],
-    ["with the gate off, even for a wallet that holds no Suit", false, { status: "denied", count: 0n }],
-    ["with the gate off and no wallet", false, { status: "idle" }],
-  ] as const)("is kept off screen but in the HTML: %s", (_name, gateOn, access) => {
-    h.gateEnabled.mockReturnValue(gateOn);
-    h.access = access as SuitsAccess;
+  it("is kept off screen but in the HTML, since the app shows the same figures under the trade panel", () => {
     const { container } = render(<TokenFacts pair={BASE_PAIR} address={ADDRESS} />);
     expect(shell(container).className).toBe("sr-only");
     // The heading stays readable by a screen reader; the rows are hidden from it, because the card reads them out.

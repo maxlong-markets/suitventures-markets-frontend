@@ -24,13 +24,14 @@ describe("sitemap", () => {
     expect(urls).toContain(`https://www.maxlong.markets/t/${T1}`);
   });
 
-  // /watchlist is still gated, so it returns the same lock screen `/` does. Listing it would
-  // submit URLs of identical content: duplicate, thin, and a waste of the crawl budget the token
-  // pages need. It comes back the day the gate lifts. /traders is no route since 30 Sep 2026 and
-  // must not be listed either.
-  it("leaves the still-gated routes out, so no two submitted URLs render the same page", async () => {
+  // /watchlist is one wallet's own list; a crawler gets the signed-out empty copy, thin content
+  // that would waste the crawl budget the token pages need. /traders is no route since 30 Sep
+  // 2026 and must not be listed either. /launch is a real public page since the gate came down
+  // (9 Oct 2026) and belongs in.
+  it("lists /launch, and leaves /watchlist and the removed /traders out", async () => {
     pairs.mockResolvedValue([pair(T1)]);
     const urls = (await sitemap()).map((e) => e.url);
+    expect(urls).toContain("https://www.maxlong.markets/launch");
     expect(urls).not.toContain("https://www.maxlong.markets/traders");
     expect(urls).not.toContain("https://www.maxlong.markets/watchlist");
   });
@@ -44,12 +45,12 @@ describe("sitemap", () => {
   it("returns just the static routes, not a 500, when the backend throws", async () => {
     pairs.mockRejectedValue(new Error("db unavailable"));
     const entries = await sitemap();
-    expect(entries.map((e) => e.url)).toEqual(["https://www.maxlong.markets"]);
+    expect(entries.map((e) => e.url)).toEqual(["https://www.maxlong.markets", "https://www.maxlong.markets/launch"]);
   });
 
   it("caps the token entries well under Google's per-sitemap comfort zone", async () => {
     pairs.mockResolvedValue(Array.from({ length: 500 }, (_, i) => pair(`0x${String(i).padStart(40, "0")}`)));
     const entries = await sitemap();
-    expect(entries.length).toBeLessThanOrEqual(301); // the homepage + the 300-token cap
+    expect(entries.length).toBeLessThanOrEqual(302); // the homepage, /launch, and the 300-token cap
   });
 });

@@ -23,7 +23,7 @@ vi.mock("wagmi", () => ({
   useSignMessage: () => ({ signMessageAsync: vi.fn(), isPending: false }),
 }));
 vi.mock("@rainbow-me/rainbowkit", () => ({ useConnectModal: () => ({ openConnectModal: vi.fn(), connectModalOpen: false }) }));
-vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false, gateEnabled: () => false, useSuitsAccess: () => ({ status: "idle" }) }));
+vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false }));
 vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
 // QuoteChips reads window.matchMedia, which jsdom lacks, and has nothing to do with which list the table shows.
 vi.mock("@/components/QuoteChips", () => ({ default: () => null }));

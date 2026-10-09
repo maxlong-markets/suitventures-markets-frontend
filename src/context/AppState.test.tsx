@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Address, Hex, SignMessage, TokenPair, VoteDir, VoteResult } from "@/lib/types";
-import type { SuitsAccess } from "@/lib/suits";
 import { SessionsOffError } from "@/lib/session/errors";
 import { keys, usePairs } from "@/hooks/useMarketsData";
 import { act, fireEvent, queryHarness, render, screen, waitFor } from "@/test/dom";
@@ -23,9 +22,6 @@ const h = vi.hoisted(() => ({
   accountEffect: null as null | { onDisconnect?: () => void },
   openConnectModal: vi.fn(),
   connectModalOpen: false,
-  /** The holders-only gate as the connect-time ask sees it: on, and this wallet admitted, unless a case says otherwise. */
-  gateOn: true,
-  access: { status: "granted", count: 1n } as SuitsAccess,
   launchRun: vi.fn(),
   launchCancel: vi.fn(),
   ds: {
@@ -49,7 +45,7 @@ vi.mock("wagmi", () => ({
 vi.mock("@rainbow-me/rainbowkit", () => ({
   useConnectModal: () => ({ openConnectModal: h.openConnectModal, connectModalOpen: h.connectModalOpen }),
 }));
-vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false, gateEnabled: () => h.gateOn, useSuitsAccess: () => h.access }));
+vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false }));
 // `AppState.tsx` imports this as "./DataSource"; Vitest keys mocks by resolved path, and the `@/`
 // alias resolves to the same file, so the spelling here does not have to match the import's.
 vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
@@ -197,8 +193,6 @@ describe("AppStateProvider sign-in", () => {
     (sign as ReturnType<typeof vi.fn>).mockClear();
     h.connectModalOpen = false;
     h.accountEffect = null;
-    h.gateOn = true;
-    h.access = { status: "granted", count: 1n };
     h.launchRun.mockReset();
     h.launchCancel.mockReset();
   });
@@ -382,32 +376,7 @@ describe("AppStateProvider sign-in", () => {
     expect(screen.getByTestId("modal").textContent).toBe("launch");
   });
 
-  it("waits for the holders-only gate, and asks once the wallet is admitted", async () => {
-    h.access = { status: "checking" };
-    h.account = { address: undefined, isConnected: false };
-    const { rerenderApp } = show();
-    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
-    connectThroughModal(rerenderApp);
-    await flush();
-    expect(screen.getByTestId("modal").textContent).toBe("none");
-    h.access = { status: "granted", count: 1n };
-    rerenderApp();
-    await waitFor(() => expect(screen.getByTestId("modal").textContent).toBe("connect"));
-  });
-
-  it("never asks a wallet the gate turns away, so the lock screen stays signature-free", async () => {
-    h.access = { status: "denied", count: 0n };
-    h.account = { address: undefined, isConnected: false };
-    const { rerenderApp } = show();
-    await waitFor(() => expect(h.ds.session).toHaveBeenCalled());
-    connectThroughModal(rerenderApp);
-    await flush();
-    expect(screen.getByTestId("modal").textContent).toBe("none");
-  });
-
-  it("asks at connect with the gate off, whatever the Suits read says", async () => {
-    h.gateOn = false;
-    h.access = { status: "idle" };
+  it("asks at connect, whatever the Suits read says (the holders-only gate is gone, 9 Oct 2026)", async () => {
     h.account = { address: undefined, isConnected: false };
     const { rerenderApp } = show();
     await waitFor(() => expect(h.ds.session).toHaveBeenCalled());

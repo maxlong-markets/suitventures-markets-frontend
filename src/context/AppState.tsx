@@ -23,7 +23,7 @@ import {
   type SortKey,
 } from "@/lib/markets";
 import type { Address, SignMessage, TokenPair, VoteDir } from "@/lib/types";
-import { gateEnabled, useIsSuitHolder, useSuitsAccess } from "@/lib/suits";
+import { useIsSuitHolder } from "@/lib/suits";
 import { SessionsOffError } from "@/lib/session/errors";
 import { keys, useVotes, useWatchlist } from "@/hooks/useMarketsData";
 import { useDataSource } from "./DataSource";
@@ -209,14 +209,6 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const askOnHandOver = useRef(false);
   /** The probe met a 503: `SESSION_SECRET` is unset here, so no sign-in can succeed and none is asked unprompted. */
   const sessionsOff = useRef(false);
-  /**
-   * The holders-only gate's answer (D44). The connect-time ask waits for it and is dropped for a wallet it turns away,
-   * so the lock screen never asks for a signature. This is the same `balanceOf` read `TokenGate` makes, so no request
-   * is added; a read that failed counts as not admitted, and the gate still asks later for whatever needs a session.
-   */
-  const access = useSuitsAccess(address);
-  const accessPending = gateEnabled() && access.status === "checking";
-  const admitted = !gateEnabled() || access.status === "granted";
 
   // On load the cookie says whether this browser is already signed in, so a wallet that signed in
   // on another device sees its watchlist here without signing again. A failed probe means "not
@@ -347,11 +339,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
       askOnHandOver.current = !pendingRef.current;
     }
-    if (!askOnHandOver.current || sessionLoading || accessPending) return;
+    if (!askOnHandOver.current || sessionLoading) return;
     askOnHandOver.current = false;
-    if (sessionsOff.current || !admitted || !isConnected || !address || pendingRef.current || sameAddress(session?.address, address)) return;
+    if (sessionsOff.current || !isConnected || !address || pendingRef.current || sameAddress(session?.address, address)) return;
     setSignModal({ kind: "connect", for: address });
-  }, [connectModalOpen, isConnected, sessionLoading, accessPending, admitted, address, session]);
+  }, [connectModalOpen, isConnected, sessionLoading, address, session]);
 
   // The wallet left while a connect-time ask was open or still waiting: both are over. A wallet connected later gets
   // its own hand-over, or nothing, rather than a dialog left behind by the previous one.

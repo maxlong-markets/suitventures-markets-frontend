@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { cache } from "react";
-import GatedSection from "@/components/GatedSection";
 import TokenFacts from "@/components/TokenFacts";
 import TokenView from "@/components/TokenView";
 import { lookupPair } from "@/app/api/_lib/pairLookup";
@@ -116,20 +115,16 @@ export default async function TokenPage({ params, searchParams }: Props) {
 
   return (
     <>
-      {/* The interactive app stays behind the gate; GatedSection renders a compact lock card in
-          its place when the gate is on and the viewer holds no Suit. It comes first now (amended
-          30 Sep 2026): it is what a visitor came for, and the facts block below used to push it
-          off a phone screen entirely. `serverHadPair` (fix round 1, findings 1 and 5) is this
-          read's own answer, so TokenView knows whether it is the one place left to say anything
-          about a pair-less page, and whether a later, client-found pair is news worth a refresh. */}
-      <GatedSection>
-        <TokenView address={id} launchedTx={launchedTx} serverHadPair={pair !== null} />
-      </GatedSection>
-      {/* Public, server-rendered, outside any gate: this is the HTML a crawler or an AI search
-          engine sees regardless of wallet or Suits ownership (2026-09-28 SEO spec). Its rows now
-          live inside an expandable "Token details" disclosure; `launchedTx` lets it stay silent
-          while TokenView above is the one showing the post-launch wait, instead of both showing
-          their own, contradictory idea of what a pair-less page means. */}
+      {/* The interactive app comes first (amended 30 Sep 2026): it is what a visitor came for,
+          and the facts block below used to push it off a phone screen entirely. `serverHadPair`
+          (fix round 1, findings 1 and 5) is this read's own answer, so TokenView knows whether it
+          is the one place left to say anything about a pair-less page, and whether a later,
+          client-found pair is news worth a refresh. */}
+      <TokenView address={id} launchedTx={launchedTx} serverHadPair={pair !== null} />
+      {/* Public, server-rendered: this is the HTML a crawler or an AI search engine sees without
+          running JavaScript (2026-09-28 SEO spec). `launchedTx` lets it stay silent while
+          TokenView above is the one showing the post-launch wait, instead of both showing their
+          own, contradictory idea of what a pair-less page means. */}
       <TokenFacts pair={pair} address={id} launchedTx={launchedTx} />
     </>
   );

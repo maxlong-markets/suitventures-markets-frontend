@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hex, TokenPair } from "@/lib/types";
 import { clearTtlCache } from "@/lib/envio/cache";
@@ -47,24 +46,16 @@ vi.mock("@/lib/market/backend", () => ({ getBackend: () => ({ pair: h.pair }) })
 // minimal stand-in keeps them from throwing on import without pretending to model either one.
 vi.mock("@/lib/db/client", () => ({ DbUnavailableError: class DbUnavailableError extends Error {} }));
 vi.mock("@/lib/envio/client", () => ({ EnvioUnavailableError: class EnvioUnavailableError extends Error {} }));
-// GatedSection and TokenView each have their own test file; here they are opaque markers, so
-// this suite exercises only what page.tsx itself decides: the order its two sections come in,
-// what `launchedTx` it hands to TokenFacts, and what `serverHadPair` it hands to TokenView (fix
-// round 1, findings 1 and 5): the mock records its own props so that wiring is checkable here.
-vi.mock("@/components/GatedSection", () => ({
-  default: ({ children }: { children: ReactNode }) => <div data-testid="app-slot">{children}</div>,
-}));
+// TokenView has its own test file; here it is an opaque marker, so this suite exercises only
+// what page.tsx itself decides: the order its two sections come in, what `launchedTx` it hands
+// to TokenFacts, and what `serverHadPair` it hands to TokenView (fix round 1, findings 1 and 5):
+// the mock records its own props so that wiring is checkable here.
 vi.mock("@/components/TokenView", () => ({
   default: (props: { serverHadPair: boolean }) => {
     h.tokenViewProps(props);
     return <div data-testid="token-view">TokenView</div>;
   },
 }));
-// TokenFacts (real, unmocked, since it is the component under test here) renders
-// PublicFactsSection for a found pair, which reads these two the same way GatedSection does; see
-// TokenFacts.test.tsx and GatedSection.test.tsx for the same pattern.
-vi.mock("@/context/AppState", () => ({ useAppState: () => ({ address: undefined }) }));
-vi.mock("@/lib/suits", () => ({ useSuitsAccess: () => ({ status: "idle" }), gateEnabled: () => true }));
 
 /** `TokenPage` is an async Server Component: call and await it like any async function, then
  *  hand the resolved element (ordinary React from here on) to `render`. */
@@ -87,7 +78,7 @@ describe("TokenPage", () => {
     h.pair.mockResolvedValue(null);
     const { container } = await renderPage(ADDRESS);
     const html = container.innerHTML;
-    const appAt = html.indexOf('data-testid="app-slot"');
+    const appAt = html.indexOf('data-testid="token-view"');
     const factsAt = html.indexOf("No token at");
     expect(appAt).toBeGreaterThanOrEqual(0);
     expect(factsAt).toBeGreaterThan(appAt);

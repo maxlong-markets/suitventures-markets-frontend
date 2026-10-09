@@ -5,10 +5,10 @@ import { getBackend } from "@/lib/market/backend";
 const SITE_URL = "https://www.maxlong.markets";
 
 /**
- * Regenerate hourly rather than only at build/deploy. `/` is behind the Suits gate and gives a
- * crawler no path to any token page (that is the whole reason this file exists — see robots.ts),
- * so a sitemap that only refreshes on deploy would leave freshly-listed tokens undiscoverable for
- * however long it is between deploys, with nothing else to find them by.
+ * Regenerate hourly rather than only at build/deploy. The markets table at `/` is client-rendered,
+ * so a crawler still finds no token links in its HTML; this sitemap is the reliable path to the
+ * token pages, and one that only refreshes on deploy would leave freshly-listed tokens
+ * undiscoverable for however long it is between deploys.
  */
 export const revalidate = 3600;
 
@@ -21,24 +21,22 @@ export const revalidate = 3600;
 const TOKEN_PAGE_LIMIT = 300;
 
 /**
- * Only the homepage. `/t/[address]` is added per listed pair below — there is no static entry
- * that could stand in for a token address.
+ * The homepage and the launch page. `/t/[address]` is added per listed pair below — there is no
+ * static entry that could stand in for a token address.
  *
- * `/watchlist` and `/launch` are deliberately NOT here, though they are real routes. Both are
- * still gated, so a crawler asking for either gets the lock screen, byte for byte the same page
- * `/` returns. Submitting three URLs that render identical content asks Google to index
- * duplicates and invites it to judge the site thin, and it spends crawl budget the token pages
- * actually need. `/` earns its place because it is the homepage and that lock screen is the
- * brand's public face for now. The other two belong here the day the gate lifts, not before.
- * `/traders` is not a route at all since 30 Sep 2026: its tab and page were removed, and the
- * board behind them is parked.
+ * `/launch` joined the day the Suits gate came down (9 Oct 2026): it is a real public page now.
+ * `/watchlist` is deliberately NOT here, though it is a real route: it is one wallet's own list,
+ * and a crawler, holding no wallet, gets the signed-out empty copy, which is thin content that
+ * would spend crawl budget the token pages actually need. `/traders` is not a route at all since
+ * 30 Sep 2026: its tab and page were removed, and the board behind them is parked.
  */
 const STATIC_ROUTES: MetadataRoute.Sitemap = [
   { url: SITE_URL, changeFrequency: "daily", priority: 1 },
+  { url: `${SITE_URL}/launch`, changeFrequency: "weekly", priority: 0.5 },
 ];
 
 /**
- * The only crawl path to `/t/[address]` while `/` is gated (see robots.ts's comment), so this has
+ * The reliable crawl path to `/t/[address]` (the table at `/` is client-rendered), so this has
  * to fail soft: a backend outage must still hand Google the static routes rather than a 500, which
  * a crawler would otherwise treat as a reason to back off the whole site rather than just retry.
  * Pulls pairs from the same cached backend the `/api/pairs` route uses (`getBackend().pairs`,
