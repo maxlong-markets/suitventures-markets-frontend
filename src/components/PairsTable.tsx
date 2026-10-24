@@ -8,6 +8,7 @@ import type { TokenPair } from "@/lib/types";
 import {
   ageHours,
   fmtAge,
+  short,
   fmtInt,
   fmtPctOrDash,
   fmtPriceOrDash,
@@ -42,6 +43,8 @@ export interface PairsTableProps {
   sortDir: SortDir;
   onSort(key: SortKey): void;
   empty: EmptyStateProps;
+  /** Upper-cased tickers that more than one token uses; those rows get a SAME TICKER badge and their address. */
+  shared?: ReadonlySet<string>;
 }
 
 interface ThProps {
@@ -123,6 +126,7 @@ interface RowProps {
   now: number;
   starred: boolean;
   expanded: boolean;
+  shared: boolean;
   onToggleExpand(id: string): void;
   onToggleStar(id: string): void;
 }
@@ -142,6 +146,7 @@ const PairRow = memo(function PairRow({
   now,
   starred,
   expanded,
+  shared,
   onToggleExpand,
   onToggleStar,
 }: RowProps) {
@@ -188,12 +193,20 @@ const PairRow = memo(function PairRow({
               <span className="hidden flex-none tablet:inline">
                 <Badge>{pad}</Badge>
               </span>
+              {shared ? (
+                <span className="flex-none" title="Another token uses this ticker. Check the address before you buy.">
+                  <Badge className="border-[rgba(212,106,99,0.5)] text-down">SAME TICKER</Badge>
+                </span>
+              ) : null}
             </div>
             <div className="mt-px truncate font-sans text-[11px] text-ink-45">
               <span className="tablet:hidden">
-                {pair.name} · {pair.quote} · {pad}
+                {shared ? short(pair.address) : `${pair.name} · ${pair.quote} · ${pad}`}
               </span>
-              <span className="hidden tablet:inline">{pair.name}</span>
+              <span className="hidden tablet:inline">
+                {pair.name}
+                {shared ? <span className="font-mono text-ink-60"> · {short(pair.address)}</span> : null}
+              </span>
             </div>
           </div>
         </div>
@@ -302,6 +315,7 @@ export default function PairsTable({
   sortDir,
   onSort,
   empty,
+  shared,
 }: PairsTableProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const toggleExpand = (id: string) =>
@@ -348,6 +362,7 @@ export default function PairsTable({
             now={now}
             starred={stars.has(p.id)}
             expanded={expanded === p.id}
+            shared={shared?.has(p.ticker.trim().toUpperCase()) ?? false}
             onToggleExpand={toggleExpand}
             onToggleStar={onToggleStar}
           />
