@@ -5,6 +5,8 @@ import Link from "next/link";
 import QuoteChips from "@/components/QuoteChips";
 import MarketsToolbar from "@/components/MarketsToolbar";
 import PairsTable from "@/components/PairsTable";
+import StockTape from "@/components/StockTape";
+import { sharedTickers } from "@/lib/sharedTickers";
 import { useAppState } from "@/context/AppState";
 import { useDataSource } from "@/context/DataSource";
 import { usePairs } from "@/hooks/useMarketsData";
@@ -29,6 +31,14 @@ export default function MarketsPage() {
     [pairsQuery.data, filters, now, suits],
   );
 
+  // Clashes are counted over the whole list, not the filtered rows, so a filter that hides one of two
+  // same-ticker tokens still marks the one that shows.
+  const shared = useMemo(() => sharedTickers(pairsQuery.data ?? []), [pairsQuery.data]);
+  const sharedShown = useMemo(
+    () => new Set(rows.map((r) => r.ticker.trim().toUpperCase()).filter((t) => shared.has(t))).size,
+    [rows, shared],
+  );
+
   const loading = pairsQuery.isPending;
   const query = filters.query.trim();
   const emptySub = query
@@ -51,9 +61,22 @@ export default function MarketsPage() {
 
   return (
     <>
+      <StockTape />
       <QuoteChips />
       <section className="px-4 pb-8 tablet:px-5 desktop:px-6">
         <MarketsToolbar total={rows.length} loading={loading} />
+        {!loading && sharedShown > 0 ? (
+          <div
+            role="note"
+            className="mb-[10px] flex items-center gap-[10px] border border-[rgba(212,106,99,0.35)] px-3 py-2 text-[12px] text-ink-80"
+          >
+            <span className="font-mono text-[9.5px] uppercase tracking-[0.18em] text-down">Check the address</span>
+            <span>
+              {sharedShown} {sharedShown === 1 ? "ticker here is" : "tickers here are"} used by more than one
+              token. Rows marked SAME TICKER show their contract address.
+            </span>
+          </div>
+        ) : null}
         {pairsQuery.isError ? (
           <div className="px-4 py-16 text-center">
             <div className="text-[16px]">Couldn&apos;t load pairs.</div>
@@ -89,6 +112,7 @@ export default function MarketsPage() {
             sortDir={filters.sortDir}
             onSort={sortBy}
             empty={{ title: "No pairs match.", sub: emptySub, onReset: resetFilters }}
+            shared={shared}
           />
         )}
         {showMockNote ? (
