@@ -3,6 +3,28 @@ type Entry<T> = { value?: T; expires: number; inflight?: Promise<T> };
 const store = new Map<string, Entry<unknown>>();
 
 /**
+ * Hard cap on keys (security review, 27 Oct 2026). Several public routes key this memo by a caller-chosen address
+ * (`candles:${id}:${interval}`, `trades:${id}`, `holders:${id}`, `poolKey:…`), and an entry was never removed after it
+ * expired, so a client walking random valid addresses grew the process's memory without bound. Same cap as the logo
+ * memo and the vote-counts cache.
+ */
+export const MAX_TTL_ENTRIES = 5_000;
+
+/** Before a new key goes in at the cap: drop every expired, idle entry, then, if still full, the oldest idle one. */
+function makeRoom(now: number): void {
+  for (const [key, entry] of store) {
+    if (!entry.inflight && entry.expires <= now) store.delete(key);
+  }
+  if (store.size < MAX_TTL_ENTRIES) return;
+  for (const [key, entry] of store) {
+    if (!entry.inflight) {
+      store.delete(key);
+      return;
+    }
+  }
+}
+
+/**
  * `skipCache`: a resolved value this returns true for still answers the caller (and still joins
  * an in-flight load already under way, so two callers this same tick never cost two loads), but
  * is not written into the memo for anyone after it. A single-token lookup passes this for a
@@ -44,10 +66,16 @@ export async function ttlCache<T>(
     .finally(() => {
       entry.inflight = undefined;
     });
+  if (!store.has(key) && store.size >= MAX_TTL_ENTRIES) makeRoom(now);
   store.set(key, entry as Entry<unknown>);
   return entry.inflight;
 }
 
 export function clearTtlCache(): void {
   store.clear();
+}
+
+/** Tests only: how many keys the memo holds. */
+export function ttlCacheSize(): number {
+  return store.size;
 }

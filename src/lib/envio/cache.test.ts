@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { ttlCache, clearTtlCache } from "./cache";
+import { MAX_TTL_ENTRIES, ttlCache, clearTtlCache, ttlCacheSize } from "./cache";
 
 describe("ttlCache", () => {
   it("memoizes within the ttl and dedupes concurrent loads", async () => {
@@ -59,5 +59,25 @@ describe("ttlCache", () => {
       await ttlCache("skip:3", 30_000, load, { skipCache: (v) => v === null });
       expect(load).toHaveBeenCalledTimes(1);
     });
+  });
+
+  // Security review, 27 Oct 2026: public routes key this memo by caller-chosen addresses.
+  it("never holds more than MAX_TTL_ENTRIES keys, evicting expired entries first", async () => {
+    clearTtlCache();
+    vi.useFakeTimers();
+    await ttlCache("short", 10, async () => "s");
+    await ttlCache("long", 60_000, async () => "l");
+    vi.advanceTimersByTime(20);
+    for (let i = 0; ttlCacheSize() < MAX_TTL_ENTRIES; i++) await ttlCache(`fill:${i}`, 60_000, async () => i);
+    await ttlCache("one-more", 60_000, async () => 1);
+    expect(ttlCacheSize()).toBeLessThanOrEqual(MAX_TTL_ENTRIES);
+    // The expired key went; the live one it did not need to touch stayed cached.
+    const reload = vi.fn(async () => "fresh");
+    expect(await ttlCache("long", 60_000, reload)).toBe("l");
+    expect(reload).not.toHaveBeenCalled();
+    for (let i = 0; i < 100; i++) await ttlCache(`more:${i}`, 60_000, async () => i);
+    expect(ttlCacheSize()).toBe(MAX_TTL_ENTRIES);
+    vi.useRealTimers();
+    clearTtlCache();
   });
 });
