@@ -1,681 +1,228 @@
-# SuitVentures Markets — frontend
+# MaxLong Markets: frontend, API and chain reader
 
-Desktop-first web app that lists every memecoin pair on Robinhood Chain
-(chain id 4663) and swaps through the SuitVentures router. Built from the
-design handoff in `docs/design-handoff/`.
+MaxLong Markets is a market for stock-paired memecoins on Robinhood Chain (chain id 4663, an Arbitrum Orbit L2). It
+lists every Uniswap v4 pool on the chain whose one side is an allowlisted quote asset (Robinhood's tokenized stocks
+such as PLTR, NVDA and SPCX, plus USDG), from any launchpad; prices and executes swaps through the project's own fee
+router; adds Sign-In with Ethereum, a server-side watchlist and bullish/bearish votes; and has an instant launchpad
+that deploys a token and seeds its pool in one transaction. This repository is the whole off-chain side: the Next.js
+app, its 21 API route handlers, the chain reader and top-holder builder that run as Vercel crons, and the Postgres
+schema they write. Kobs built it for the client MAXLONG between 10 Sep and 23 Oct 2026.
 
-Stack: Next.js 16 (App Router) · TypeScript · Tailwind v4 (`@theme` tokens in
-`src/app/globals.css`) · wagmi v3 + viem + RainbowKit · TanStack Query ·
-TradingView Lightweight Charts.
+Live: **https://www.maxlong.markets** (Vercel, Supabase Postgres). The contracts are in
+[suitventures-markets-contracts](https://github.com/maxlong-markets/suitventures-markets-contracts); the system
+overview and Decision Log are in [suitventures-markets](https://github.com/maxlong-markets/suitventures-markets).
 
-## Run
-
-```bash
-npm install
-cp .env.example .env.local   # then fill in what you have
-npm run dev                  # http://localhost:3000
-```
-
-`npm run build` type-checks and builds; `npm run lint` runs ESLint.
-
-## Routes
-
-| Route | Page |
+| Thing | Value |
 |---|---|
-| `/` | Markets — quote chips, presets, launchpad filter, pairs table |
-| `/watchlist` | Starred pairs (needs a connected wallet) |
-| `/t/[address]` | Token page — chart, trades / holders / info, trade panel |
-| `/launch` | Launch a token: image, name, symbol, currency, opening valuation, optional first buy; one transaction, for Suits holders |
+| SVRouter (0.5 % fee, Permit2 pull, Universal Router forward) | [`0xc9E6b76aA834e746080b1F8Ad6943930eD5147a9`](https://robinhoodchain.blockscout.com/address/0xc9E6b76aA834e746080b1F8Ad6943930eD5147a9) |
+| SVLaunchpad (1 B supply, full-range single-sided v4 position it can never withdraw, 1 % pool fee) | [`0x7885AFbda28F5a4d5c6Cc4230975c983d6c7aA0d`](https://robinhoodchain.blockscout.com/address/0x7885AFbda28F5a4d5c6Cc4230975c983d6c7aA0d) |
+| Uniswap v4 PoolManager / Universal Router / Permit2 | `0x8366a39C…e40951` / `0x06AfBA43…a6bf99` / `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
+| Health | [`/api/health`](https://www.maxlong.markets/api/health): reader age and last error, lag in blocks, stale USD feeds, holder builder cycle |
 
-## Data layer
+## Screenshots
 
-Everything the UI renders comes through `MarketsDataSource`
-(`src/lib/types.ts`), never from literals.
-
-- `MockDataSource` (`src/lib/data/mock.ts`) — deterministic, seeded with the
-  handoff's eight real pairs plus eight placeholders. Default.
-- `EnvioDataSource` (`src/lib/data/envio.ts`) — live data, read through this
-  app's own route handlers. Select it with `NEXT_PUBLIC_DATA_SOURCE=envio`.
-
-### The store
-
-Live market data lives in a Postgres schema `market` on a Supabase project the
-app owns (`supabase/migrations/`). The one-minute cron reads the PoolManager's
-`Initialize`, `Swap` and `ModifyLiquidity` events through HyperSync, folds them
-with the indexer's own arithmetic, and writes rows and a block cursor in one
-transaction. That cron does not index ERC-20 `Transfer` at all, so total supply
-comes from the token contract and the holder count from the stored baseline
-moved by trades; the separate top-holder builder folds `Transfer` per token for
-the few hundred tokens that need an exact list, and resets their count to exact
-at every refresh. The route handlers under `src/app/api` read that store.
-
-- **Sync** (`src/lib/chain`, `src/lib/sync`, `src/lib/holders`): `GET
-  /api/internal/sync` runs every minute on Vercel cron (`vercel.json`) and is the
-  chain reader (`src/lib/chain/run.ts`) described above; `GET
-  /api/internal/holders` (`src/lib/holders/run.ts`) runs every minute too and is
-  the top-holder builder, folding each covered token's `Transfer` logs into
-  `market.token_balances` at 80 HyperSync requests a minute
-  (`docs/superpowers/specs/2026-09-23-top-holders-design.md`); `GET
-  /api/internal/sync/nightly` (`src/lib/sync/nightly.ts`) runs at 03:00 UTC,
-  recomputing every listed pool, pruning swaps and candles past their retention
-  windows, dropping the holder lists of tokens neither covered nor opened in the
-  last week, then probing pool routability. All three require `Authorization:
-  Bearer <CRON_SECRET>`, take a lease in `market.sync_state` so invocations never
-  overlap, and record their last run, last success and last error there. The
-  chain job's lease matches its 300 s `maxDuration` exactly: re-folding an
-  overlapping block range would double-count candle volume and pool totals,
-  unlike the nightly phases' plain upserts — and the holder builder's lease exists
-  for the same reason, its balance upserts being additive too.
-- **Backend switch** (`src/lib/market`): route handlers call `getBackend()`,
-  which is always the store implementation now — Envio was decommissioned 21
-  Sep 2026 (Task 6) and `MARKET_DATA_BACKEND` is no longer read anywhere, so
-  setting it changes nothing and there is no rollback path left. `shapePairs()`
-  in `src/lib/envio/shape.ts` remains the parity reference the laptop-only
-  `npm run db:parity` (`scripts/db/parity.mts`) checks the store against.
-- **Routes**: `/api/pairs`, `/api/quotes` and
-  `/api/tokens/[address]/{candles,trades,holders}` keep their contract and cache
-  headers. `GET /api/tokens/[address]` is new: one `TokenPair` (or 404) for a
-  token outside the 500-row list, so deep links work. `GET /api/health` reports
-  the backend, database latency, sync age and last error, indexer lag (chain
-  head minus last processed block), which quote-asset USD prices are stale, and
-  the holder builder's last cycle and last error next to `market.token_balances`'s
-  row estimate and total size.
-- **Scripts** (`scripts/`, see `scripts/README.md`): `npm run db:migrate`,
-  `npm run db:smoke`, `npm run seed` (the resumable one-off load) and
-  `npm run db:parity`. They read `DATABASE_URL_DIRECT` (session pooler) from
-  `.env.local`, never the app's `DATABASE_URL`.
-
-Live mode needs these variables; all but the first are server-only:
-
-| Variable | Value |
+| | |
 |---|---|
-| `NEXT_PUBLIC_DATA_SOURCE` | `envio` |
-| `DATABASE_URL` | Supabase pooler, transaction mode, port 6543 |
-| `CRON_SECRET` | 32 random bytes; Vercel sends it as a Bearer token to the cron routes |
-| `HYPERSYNC_API_TOKEN` | the HyperSync token both the chain reader and the top-holder builder use, from Envio's HyperSync dashboard (`ENVIO_API_TOKEN` is a fallback). A paid key (100 requests a minute) since the builder shipped: it paces itself to 80 a minute, leaving the reader the rest. On a key that advertises a smaller budget the builder drops to that budget minus 10 rather than starving the reader, so a free key only makes the lists build slowly |
-| `HYPERSYNC_URL` | optional; defaults to `https://4663.hypersync.xyz` |
-| `CHAIN_RPC_URL` | optional; primary RPC for the reader's chain reads (metadata, Chainlink prices, holder-count balances, health), defaults to the chain's public node; always paced at 40 calls a second |
-| `CHAIN_RPC_FALLBACK_URL` | optional; backup RPC (a paid endpoint, server-only) tried once when the primary refuses, times out or errors |
-| `SYNC_INTERVAL_SEC` | optional; seconds between sync cycles inside one invocation, default 30 |
-| `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` | the launchpad contract, set only after it is deployed; empty keeps `/launch` on "not live yet", the reader off its logs and the upload route at 503 |
-| `FILEBASE_ACCESS_KEY`, `FILEBASE_SECRET_KEY`, `FILEBASE_BUCKET` | required; the Filebase IPFS bucket launch images are pinned to; all three for uploads and the nightly clean-up |
-| `FILEBASE_GATEWAY_URL` | optional; a dedicated gateway's https origin for launch logos, https origin only, default `https://ipfs.filebase.io` |
+| <img src="docs/screenshots/markets-1440.png" width="440" alt="Markets table with quote chips and presets"> | <img src="docs/screenshots/token-robincat-1440.png" width="440" alt="Token page: chart, trades and trade panel"> |
+| Markets: every listed pair, filtered by quote asset and launchpad | Token page: candles, trades, holders, and the trade panel priced by the V4 Quoter |
+| <img src="docs/screenshots/token-suitcat-1440.png" width="440" alt="A token made by the launchpad, SUITS origin chip"> | <img src="docs/screenshots/launch-1440.png" width="440" alt="Launch form"> |
+| A launchpad-made token: SUITS origin chip, 1 % pool fee | Launch: image, name, symbol, currency, opening valuation, optional first buy |
+| <img src="docs/screenshots/watchlist-1440.png" width="440" alt="Watchlist"> | <img src="docs/screenshots/markets-390.png" width="200" alt="Markets at 390 px wide"> |
+| Watchlist, stored server-side per signed-in wallet | The same table at 390 px |
 
-Preview deployments get no database variable and stay on the mock source. The live source
-prices a trade through `GET /api/tokens/[address]/quote`, which simulates the V4 Quoter and
-returns both the display numbers and the execution `call` block; `src/lib/quote.ts` keeps its
-constant-product approximation for the mock source and for the amount-0 case the route does
-not answer.
-
-`GET /api/tokens/[address]/logo` proxies the token's logo, resolved per token
-from the contract's `logo()` (Pons), its `tokenURI()` JSON (LONG) or
-DexScreener, and cached; the optional server-only `ROBINHOOD_RPC_URL` picks the
-RPC those reads use, defaulting to the public one.
-
-### The instant launchpad
-
-The design is `docs/superpowers/specs/2026-09-28-instant-launchpad-design.md`. The reader adds the launchpad as a
-second log selection in its per-minute HyperSync request and folds `Launched`, `FeesCollected` and `PayoutChanged`
-into `market.launches` and `market.launch_fee_events`. A launched token lists from its launch block with the origin
-`SV`, which the table, the origin chip and the token page all print as `SUITS`. A launched token keeps the SV origin,
-but the badge follows the listed pool, so if another pool becomes the listed one the badge can differ. One nobody has
-bought leaves the default table after the listing window below and returns with its first trade; its page stays up.
-The Suits tab is fed by its own call, `GET /api/pairs?scope=sv`, which lists every launch newest first, bought or not
-and listed or not. The launch page lists the connected wallet's own launches under the form, from the same list.
-`POST /api/launch/upload` re-encodes a creator's image to a WebP and pins it and a metadata JSON on
-Filebase before the launch. Only Suits holders may upload, within the per-wallet limits below. The nightly job's
-`uploads` phase unpins what no launch used.
-
-| Launchpad number | Value |
-|---|---|
-| Uploads per wallet per hour | 5 |
-| Uploads per wallet per day | 20 |
-| Launch image | 512 x 512 WebP |
-| Listing window for a token nobody has bought | 24 hours |
-| Token page re-reads after a launch | every 5 seconds, for up to 5 minutes |
-| A hidden launch's logo answers "no logo" | within about 2 hours at worst |
-
-To hide a launch's image and links, run this in the Supabase SQL editor:
-
-    update market.launches set hidden = true where token_id = '<lowercase address>'
-
-Rollout, in this order:
-
-1. Apply the migration with `npm run db:migrate` before pushing. Without the launch tables every token page and
-   `GET /api/tokens/[address]` fail, because the single-token query joins `market.launches`. `/api/health` answers
-   503, and logos across the whole site fail, because every logo lookup reads `market.launches`.
-2. Before rollout, run `EXPLAIN (ANALYZE, BUFFERS)` in production on the pairs query for both scopes, `all` and
-   `launchpad`, and confirm the new order uses the `pools_activity` index. The query is `ORDER` in
-   `src/lib/market/dbBackend.ts`.
-3. Set `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` only after the contract is deployed, and before anyone launches: a launch the
-   reader has already passed over needs a catch-up rewind to appear. The value is fixed at build time, so setting or
-   changing it takes a redeploy.
-4. Set the Filebase names on Vercel. `FILEBASE_ACCESS_KEY`, `FILEBASE_SECRET_KEY` and `FILEBASE_BUCKET` are
-   required. `FILEBASE_GATEWAY_URL` is optional and takes an https origin only.
-
-### The launchpad end to end
-
-This section follows one launch from the form to the nightly clean-up and names every endpoint it touches: the Next.js
-routes, the cron jobs, the contract functions and events, and the outside services. It is read from the code on
-`feat/instant-launchpad`, not from the design. The contract is `src/SVLaunchpad.sol` in the contracts repo, and the
-browser's copy of its interface is `src/lib/launch/abi.ts`.
-
-#### The parts and how they connect
+## Architecture
 
 ```mermaid
 flowchart LR
   subgraph Browser
-    LF["/launch form"]
-    TV["/t/address token page"]
-    MK["/ markets, SUITS tab"]
-    WAL["Wallet"]
+    UI[Next.js pages<br/>/, /t/addr, /launch, /watchlist]
+    W[Wallet<br/>wagmi + RainbowKit]
   end
-  subgraph App["Next.js on Vercel"]
-    SES["/api/session and /api/session/nonce"]
-    UPL["POST /api/launch/upload"]
-    TOK["GET /api/tokens/address"]
-    LOGO["GET /api/tokens/address/logo"]
-    QUO["GET /api/tokens/address/quote"]
-    PAIRS["GET /api/pairs"]
-    HEALTH["GET /api/health"]
+  subgraph Vercel
+    API[Route handlers<br/>src/app/api]
+    SYNC[Chain reader cron<br/>/api/internal/sync, every minute]
+    HOLD[Top-holder builder cron<br/>/api/internal/holders, every minute]
+    NIGHT[Nightly cron 03:00 UTC<br/>recompute, retention, routability, orphan clean-up]
   end
-  subgraph Cron["Vercel cron"]
-    SYNC["/api/internal/sync every minute"]
-    NIGHT["/api/internal/sync/nightly at 03:00 UTC"]
-  end
-  PG[("Postgres, schema market")]
-  FBS["Filebase S3 API"]
-  GW["Filebase gateway and public IPFS gateways"]
-  HS["HyperSync"]
-  RPC["Chain RPC"]
-  subgraph Chain["Robinhood Chain 4663"]
-    LP["SVLaunchpad"]
-    PM["Uniswap v4 PoolManager"]
-    P2["Permit2"]
-    SUITS["Suits NFT"]
-    SVR["SVRouter"]
-    UR["Universal Router"]
-    CL["Chainlink feeds"]
+  DB[(Supabase Postgres<br/>schema market)]
+  HS[HyperSync<br/>chain 4663]
+  RPC[Chain RPC<br/>public node, paid fallback<br/>paced at 40 calls/s]
+  CL[Chainlink feeds<br/>USD per quote asset]
+  FB[Filebase<br/>IPFS pinning]
+  subgraph Chain[Robinhood Chain]
+    R[SVRouter]
+    LP[SVLaunchpad]
+    PM[Uniswap v4 PoolManager]
   end
 
-  LF --> SES
-  LF --> UPL
-  LF -- "your launches, scope=sv" --> PAIRS
-  LF -- "settings and preview reads" --> LP
-  WAL -- "launch, collectFees, claim, setPayout" --> LP
-  WAL -- "approve the quote to Permit2" --> P2
-  WAL -- "swapExactIn" --> SVR
-  UPL -- "isAllowedLauncher" --> RPC
-  UPL -- "PUT image and JSON" --> FBS
-  UPL -- "launch_uploads" --> PG
-  LP -- "balanceOf" --> SUITS
-  LP -- "permitTransferFrom" --> P2
-  LP -- "initialize, unlock, modifyLiquidity, swap" --> PM
-  SVR -- "permitTransferFrom" --> P2
-  SVR -- "execute" --> UR
-  UR -- "swap" --> PM
-  SYNC -- "PoolManager and launchpad logs" --> HS
-  SYNC -- "token reads, prices, balances" --> RPC
-  RPC --> CL
-  RPC --> LP
-  SYNC -- "applyFold" --> PG
-  NIGHT -- "cursor block time" --> RPC
-  NIGHT -- "HEAD and DELETE" --> FBS
-  NIGHT --> PG
-  TV --> TOK
-  TV --> LOGO
-  TV --> QUO
-  MK -- "scope=sv on the SUITS tab" --> PAIRS
-  TOK --> PG
-  PAIRS --> PG
-  LOGO --> PG
-  LOGO --> GW
-  QUO --> RPC
-  HEALTH --> PG
-  HEALTH --> RPC
-  FBS -. "pins on IPFS" .-> GW
+  UI -->|pairs, candles, trades, holders, quote, logo, session, me/*| API
+  API -->|read only| DB
+  API -->|V4 Quoter simulation| RPC
+  API -->|launch image upload| FB
+  SYNC -->|PoolManager + launchpad logs| HS
+  SYNC -->|token metadata, supply, balances| RPC
+  SYNC -->|latestRoundData| CL
+  SYNC -->|rows + block cursor, one transaction| DB
+  HOLD -->|per-token Transfer history, 80 requests/min| HS
+  HOLD -->|balances| DB
+  NIGHT --> DB
+  NIGHT -->|unpin unused uploads| FB
+  W -->|Permit2 signature + swapExactIn| R
+  W -->|launch| LP
+  R --> PM
+  LP --> PM
+  PM -.events.-> HS
 ```
 
-#### Launching a token
+The UI reads only this app's own routes, and the routes read only the store. Nothing on a page request waits on
+HyperSync or a chain scan. The one exception is the quote route, which simulates the V4 Quoter per request and
+answers both the display numbers and the exact call block the wallet signs.
 
-The form reads every contract setting live and never hard-codes a fee or a share. The upload runs its checks in a fixed
-order, so a request that fails early costs nothing further. The launch itself is one transaction.
+## Engineering decisions worth reading
 
-```mermaid
-sequenceDiagram
-  actor C as Creator
-  participant F as /launch form
-  participant W as Wallet
-  participant S as Session routes
-  participant U as Upload route
-  participant DB as Postgres
-  participant FB as Filebase S3
-  participant L as SVLaunchpad
-  participant N as Suits NFT
-  participant P2 as Permit2
-  participant PM as PoolManager
+**1. Replacing the hosted indexer with an in-house chain reader.** The app first read an Envio HyperIndex
+deployment. Profiling on 21 Sep 2026 showed why it kept falling over: by 16 Sep it had processed 859 M events, 93 %
+of them ERC-20 `Transfer`s from the 132,000 registered tokens, at 9 to 25 M events a day, against a USD 70/month
+plan sized for about 1 M stored events. Dropping transfers still left 0.9 to 2.5 M swaps a day. The reader that
+replaced it lives in the existing minute cron: one HyperSync query for the PoolManager's `Initialize`, `Swap` and
+`ModifyLiquidity` (plus the launchpad's three events), a pure fold ported from the indexer with its tests, and one
+Postgres transaction that writes the rows and advances the block cursor together, so a crash replays a batch and
+never half-applies one. It reads to `head - 30` blocks (about 3 s) to stay clear of reorgs. Cost: holder counts are
+no longer exact from transfers; they come from a stored baseline moved by trades, with exact lists from decision 5.
+Design: [docs/superpowers/specs/2026-09-21-chain-reader-design.md](docs/superpowers/specs/2026-09-21-chain-reader-design.md).
 
-  C->>F: open /launch
-  Note over F: no NEXT_PUBLIC_LAUNCHPAD_ADDRESS shows Not live yet
-  F->>L: routerFeeBps, creatorShareBps, firstBuyCapBps, dailyLaunchLimit, hook
-  F->>L: isAllowedLauncher and launchesToday for the wallet
-  F->>L: currency for the picked quote
-  F->>L: predictToken, then openingFor, 300 ms after the last edit
-  C->>F: press Launch
-  opt no session yet, normally signed when the wallet connects
-    F->>S: GET /api/session/nonce
-    S-->>F: nonce and a signed nonce cookie
-    F->>W: sign the SIWE message
-    F->>S: POST /api/session
-    S-->>F: session cookie
-  end
-  F->>U: POST /api/launch/upload, multipart
-  U->>U: session, wallet and IP budgets, configuration
-  U->>L: isAllowedLauncher over the server RPC
-  L->>N: balanceOf
-  U->>U: body cap, fields, size, magic bytes
-  U->>U: sharp re-encodes one 512 x 512 WebP
-  U->>DB: this wallet's uploads in the last hour and day
-  U->>FB: PUT launch/img/sha256.webp
-  FB-->>U: image CID in x-amz-meta-cid
-  U->>FB: PUT launch/meta/sha256.json
-  FB-->>U: metadata CID
-  U->>DB: insert launch_uploads under a wallet lock
-  U-->>F: imageCid, metadataCid, metadataUri
-  opt first buy plus creation fee above zero
-    F->>W: approve Permit2 when the allowance is short
-    F->>W: sign a PermitTransferFrom for the exact total
-  end
-  F->>L: simulate launch
-  F->>W: send launch
-  W->>L: launch with params, permit, signature
-  L->>N: isAllowedLauncher reads balanceOf
-  L->>P2: permitTransferFrom the total
-  L->>L: deploy SVLaunchToken by CREATE2
-  L->>PM: initialize the pool
-  L->>PM: unlock
-  PM->>L: unlockCallback
-  L->>PM: modifyLiquidity mints the locked position
-  L->>PM: swap, only for a first buy
-  L->>PM: settle token and quote, take bought tokens to the creator
-  L->>L: fees to the fee wallet, burn the unused supply
-  L-->>W: Launched event in the receipt
-  F->>F: read the token from this creator's Launched log
-  F->>C: redirect to /t/token?launched=tx
+**2. Read metadata before the fold; never let one row throw.** A token created and traded in the same batch must be
+priced with its real decimals, so the runner names every new token first, reads its metadata, then folds; the old
+"read after" shape would have priced those first trades and five candles at the 18-decimal fallback forever. And
+because the fold runs inside the batch's one transaction, a throw on a single bad row (a pool with no token row, a
+garbage price copied from the old indexer) rolled back the whole batch and wedged the reader on that block. Handlers
+now skip and count such events (`orphanedTokens`, `skippedLiquidity`) instead of throwing
+([src/lib/chain/fold.ts](src/lib/chain/fold.ts), [src/lib/chain/run.ts](src/lib/chain/run.ts)).
+
+**3. RPC pacing at 40 calls a second, found by measurement.** Holder counts froze at their baseline. Measuring the
+public node from one address showed it meters calls, not HTTP requests: one batch of 40 per second sustained for
+20 s answered 800 of 800; two batches of 40 in the same second answered 40 of 1,600; the penalty clears within a
+second. Vercel functions leave from a small shared pool of addresses, so every server-side call now goes through one
+rolling-window limiter in front of viem's transport, batched at 40
+([src/lib/chain/pacing.ts](src/lib/chain/pacing.ts)).
+
+**4. A lease equal to `maxDuration`.** Candle volume and pool running totals are additive, so folding the same block
+range twice double-counts. Each cron job takes a lease with one conditional `UPDATE` in `market.sync_state`, and the
+lease is 300 s, the same as the route's `maxDuration`: Vercel cannot run an invocation longer than that, so a second
+writer over the same cursor is structurally impossible rather than unlikely. The cost is that a hard-killed run
+stalls the job for up to five minutes ([src/app/api/internal/sync/route.ts](src/app/api/internal/sync/route.ts)).
+
+**5. The top-holder builder's request budget.** Exact holder lists need each token's full `Transfer` history. The
+builder folds it per token from HyperSync into `market.token_balances`, spacing requests 750 ms apart (80 a minute)
+on a 100-a-minute key so the reader keeps its share, dropping to the advertised budget minus 10 on a smaller key, and
+marking a token `skipped` past 1 M holders or 30 M transfers. Lists are built for covered tokens and on demand when a
+holders tab is opened ([docs/superpowers/specs/2026-09-23-top-holders-design.md](docs/superpowers/specs/2026-09-23-top-holders-design.md)).
+
+**6. The store is the only thing the UI reads.** Every route reads Postgres; the crons are the only writers. A paused
+reader costs freshness (24-hour volume and change go stale) and never the table, the token pages or trading, which
+prices against the chain directly. Public reads carry short `s-maxage` headers so the CDN absorbs traffic.
+
+**7. SIWE sessions without a session table.** The nonce is 16 CSPRNG bytes sealed with HMAC in a 10-minute cookie
+(viem's `generateSiweNonce` uses `Math.random` and was rejected), spent on success. The server checks domain, chain
+id, version, nonce, a mandatory expiry and the signature (EIP-1271 and ERC-6492 for smart accounts), then sets an
+HttpOnly, SameSite=Lax, Secure, 7-day HMAC-signed cookie. `/api/me/*` takes the wallet from that cookie only. The
+trade-off, no server-side revocation, is written up in [SECURITY.md](SECURITY.md) (F-9).
+
+**8. Health that cannot lie, and the trimmed-env lesson.** The in-process memo serves its last good value when a
+reload throws; wrapped around the health check, that would have pinned `/api/health` at "healthy" for a whole
+outage. Health memoises the outcome for 5 s, never an exception, and answers 503 when anything is wrong. Separately,
+on 29 Sep a Filebase bucket name pasted with a leading newline sent every upload to a bucket that did not exist; every
+such setting is now trimmed, and health reports the lengths (never the values) so a stray character shows up.
+
+## Security
+
+Summary of [SECURITY.md](SECURITY.md): wallet identity comes only from a verified SIWE session; cron routes need a
+constant-time bearer check and a lease; uploads are gated on the launchpad's own `isAllowedLauncher`, size-capped,
+magic-byte sniffed and re-encoded by sharp; the logo proxy only fetches https on 443, re-checks every redirect and
+serves raster types only; SQL is parameterised; errors never carry driver messages or URLs. The review fixed one
+issue in place (an unbounded, insertion-ordered in-process memo, now a capped LRU) and leaves open, with recommendations, a Next.js upgrade for current
+advisories, security headers, a DNS-level SSRF check, a rate limit on the public quote route and a client-side check
+of the quote's call block. **Nothing here has been audited by a third party.**
+
+## Testing
+
+`npm test` runs 130 vitest files, 1,642 tests, in about 63 s (measured 27 Oct 2026). They cover the fold against
+fixtures ported from the indexer, the reader's cycle and lease, the holder builder, every route handler (23 files
+under `src/app/api`), SIWE and cookie sealing, rate limits, the upload rules and image handling, the logo resolver's
+SSRF guard, quote arithmetic in bigints, the swap path's error mapping and event parsing, and the UI components. 32
+test files run their SQL against PGlite with the real migrations applied, so queries are tested against Postgres, not
+mocks. `npm run lint` is clean on tracked code.
+
+The swap path was also proven end to end against a local anvil fork of the chain: `npm run fork:anvil`,
+`fork:deploy`, `fork:e2e` deploy the router locally and run real swaps through Permit2 and the Universal Router
+(see [scripts/README.md](scripts/README.md)). There is no browser end-to-end suite.
+
+## Run locally
+
+```bash
+npm install
+cp .env.example .env.local   # every variable is documented there
+npm run dev                  # http://localhost:3000
 ```
 
-#### Indexing the launch
+With nothing set, the app runs on the deterministic mock data source: the table, token pages and trade panel render,
+the watchlist and votes stay in `localStorage`, and nothing leaves the machine. Live mode
+(`NEXT_PUBLIC_DATA_SOURCE=envio`, a historical name) needs `DATABASE_URL` with the migrations applied
+(`npm run db:migrate`), and for the crons `CRON_SECRET` and `HYPERSYNC_API_TOKEN`; sign-in needs `SESSION_SECRET`;
+trading needs `NEXT_PUBLIC_SVROUTER_ADDRESS`; launching needs `NEXT_PUBLIC_LAUNCHPAD_ADDRESS` and the three Filebase
+settings. [.env.example](.env.example) and [docs/operations.md](docs/operations.md) describe each one.
 
-The chain reader is the only writer of launch rows. It adds the launchpad as a second log selection in the same
-HyperSync request, so a launch and its pool arrive in one batch and the pool is labelled SV before it is written.
+## Scope and status
 
-```mermaid
-sequenceDiagram
-  participant V as Vercel cron
-  participant R as /api/internal/sync
-  participant DB as Postgres
-  participant HS as HyperSync
-  participant RPC as Chain RPC
-  participant T as Token page
-  participant A as GET /api/tokens/address
+Live: the markets table (500 pairs, every listed quote asset and launchpad), token pages with candles, trades and
+top holders, quotes and swaps through SVRouter, SIWE sign-in with server-side watchlist and votes, the instant
+launchpad with its Suits tab and the creator's own launches, and the three crons.
 
-  V->>R: GET with Bearer CRON_SECRET
-  R->>DB: take the chain lease, read the cursor
-  loop one cycle every SYNC_INTERVAL_SEC
-    R->>HS: PoolManager selection plus launchpad selection
-    HS-->>R: Initialize, ModifyLiquidity, Swap, Launched, FeesCollected, PayoutChanged
-    R->>R: decode by the emitting address
-    R->>RPC: new token metadata and supply, Chainlink prices, holder balances
-    R->>R: fold, a pool named by Launched becomes SV
-    R->>DB: applyFold in one transaction
-    Note over DB: pools, tokens, swaps, candles, launches, attach uploads, fee events, payouts, listing, cursor
-  end
-  T->>A: every 5 s for up to 5 minutes while launched is set
-  A->>DB: the pair and its launch block
-  A-->>T: 404 until the launch is folded, then the pair
-```
+Removed: the Traders page and tab (30 Sep 2026; the board showed nothing useful yet, and its API stays behind
+`TRADERS_BOARD`), and the Suits holders-only gate (the app was holders-only from 28 Sep to 9 Oct, then public).
 
-What `applyFold` does with the launch rows, in order:
+Deferred: the presale launchpad ([design](docs/superpowers/specs/2026-09-27-launchpad-design.md)); shared-store rate
+limits and session revocation; the items marked Open in [SECURITY.md](SECURITY.md).
 
-| Step | Writes |
-|---|---|
-| 1 | `insertLaunches`: one `market.launches` row per `Launched`, nothing on conflict |
-| 2 | `attachUploads`: copies image CID, description and links from the creator's matching `launch_uploads` row, marks it `used` |
-| 3 | `insertLaunchFees`: one `market.launch_fee_events` row per `FeesCollected` log |
-| 4 | `applyPayouts`: moves `market.launches.payout`, only forward by block and log index |
-| 5 | `svWindowClosedTokens` and `recomputeListedPools`: the listing, including SV launches whose window just closed |
-| 6 | `saveCursors`: the block cursor, in the same transaction |
+Not here, and not to be expected: a third-party audit, a mobile app, a browser end-to-end suite, or a CI workflow.
+Quote assets without a Chainlink feed on the chain show prices in the quote asset rather than USD. Launching is open
+only to holders of The Suits NFT, which is the contract's own rule.
 
-#### Trading after the launch
-
-A launched pool is an ordinary hookless v4 pool, so trades go through the same path as every other pair.
-
-```mermaid
-sequenceDiagram
-  actor B as Buyer
-  participant P as Trade panel
-  participant Q as GET quote route
-  participant W as Wallet
-  participant SR as SVRouter
-  participant P2 as Permit2
-  participant UR as Universal Router
-  participant PM as PoolManager
-  participant R as Chain reader
-  participant DB as Postgres
-
-  B->>P: enter an amount
-  P->>Q: GET /api/tokens/address/quote
-  Q->>Q: simulate the V4 Quoter over RPC
-  Q-->>P: numbers and the call block
-  P->>W: approve Permit2 when short, sign the permit
-  W->>SR: swapExactIn
-  SR->>P2: permitTransferFrom
-  SR->>UR: execute with the amount after the router fee
-  UR->>PM: swap on the launch pool
-  R->>R: next cycle reads the Swap log from HyperSync
-  R->>DB: swaps, candles, pool swap_count
-  R->>DB: recompute the listed pool
-  Note over DB: listable means traded, or SV and under 24 h old
-```
-
-| Listing rule | Value |
-|---|---|
-| An SV pool with no swaps stays listed for | 86,400 s |
-| The per-cycle sweep looks back past a closed window for | 259,200 s |
-| The nightly run recomputes the listing of | every token |
-
-#### Fees, claims and the payout
-
-Anyone may call `collectFees`. The split uses the creator share fixed at launch. A transfer that fails is credited to
-`owed` and taken later with `claim`.
-
-```mermaid
-sequenceDiagram
-  participant FP as Fee panel
-  participant W as Wallet
-  participant L as SVLaunchpad
-  participant PM as PoolManager
-  participant PAY as Payout
-  participant FW as Fee wallet
-  participant R as Chain reader
-  participant DB as Postgres
-
-  FP->>L: uncollectedFees and owed, every 30 s
-  FP->>W: Collect
-  W->>L: collectFees for the token
-  L->>PM: unlock
-  PM->>L: unlockCallback
-  L->>PM: modifyLiquidity with a zero delta
-  L->>PM: take token and quote fees, measured by balance
-  L->>PAY: the creator share
-  L->>FW: the rest
-  Note over L,FW: a refused transfer is credited to owed
-  L-->>R: FeesCollected
-  R->>DB: one launch_fee_events row
-  FP->>W: Claim to an address
-  W->>L: claim for a currency, to an address
-  PAY->>L: setPayout for the token
-  L-->>R: PayoutChanged
-  R->>DB: update the launch payout
-```
-
-The fee totals on the token page are never stored. `GET /api/tokens/[address]` sums `market.launch_fee_events` when it
-builds the `launch` block.
-
-#### Logos and hiding a launch
-
-A token launched here answers only from its own row. A launch row never falls through to the older logo sources.
-
-```mermaid
-sequenceDiagram
-  participant B as Browser
-  participant CDN as Vercel CDN
-  participant LR as Logo route
-  participant DB as Postgres
-  participant GW as IPFS gateways
-
-  B->>CDN: GET /api/tokens/address/logo
-  CDN->>LR: on a miss
-  LR->>LR: per-process memo, 1 h for a launch
-  LR->>DB: image_cid, metadata_uri, hidden from market.launches
-  alt the read failed
-    LR-->>B: 404 logo unavailable, held 60 s
-  else hidden is true
-    LR-->>B: 404 no logo, held 1 h
-  else the row has an image CID
-    LR->>GW: Filebase gateway, then pinata, dweb.link, w3s.link, ipfs.io
-    GW-->>LR: the WebP
-    LR-->>B: the image, held 1 h
-  else the row has only a metadata URI
-    LR->>GW: the metadata JSON, then its image
-  else no launch row
-    LR->>LR: logo, tokenURI, then DexScreener, as before
-  end
-```
-
-| Logo number | Value |
-|---|---|
-| Memo for a launch logo, hit or hidden | 3,600 s |
-| Browser and CDN hold for a launch logo | 3,600 s |
-| Hold for a failed lookup | 60 s |
-| Whole lookup budget | 25,000 ms |
-| Largest image proxied | 2 MB |
-
-Setting `hidden` also blanks the image CID, description and links in the `launch` block of `GET /api/tokens/[address]`.
-
-#### Nightly clean-up of unused uploads
-
-The `uploads` phase runs between `holders` and `probe`. Its cut-off comes from the block the reader has reached, not the
-wall clock, so an upload whose launch is not yet folded is never deleted.
-
-```mermaid
-sequenceDiagram
-  participant V as Vercel cron
-  participant N as /api/internal/sync/nightly
-  participant DB as Postgres
-  participant RPC as Chain RPC
-  participant FB as Filebase S3
-
-  V->>N: GET at 03:00 UTC with Bearer CRON_SECRET
-  N->>N: phases listed, prune, holders, uploads, probe
-  alt Filebase names unset
-    N->>N: skip as unconfigured
-  else the reader has not succeeded for an hour
-    N->>N: skip as reader-stale
-  else ready
-    N->>RPC: timestamp of the cursor block
-    N->>N: cut-off is that time less 86,400 s less 1,200 s
-    loop 200 pending or refused rows older than the cut-off
-      N->>DB: does another row still need this CID
-      N->>FB: HEAD the key for Last-Modified
-      alt modified at or after the cut-off
-        N->>N: keep the row
-      else older
-        N->>FB: DELETE the key, which unpins it
-        N->>DB: mark the row deleted
-      end
-    end
-  end
-```
-
-| Upload status | Meaning |
-|---|---|
-| `pending` | pinned, no launch folded yet |
-| `refused` | pinned, then refused by the locked recount |
-| `used` | the reader matched it to a launch |
-| `deleted` | the nightly phase removed its objects |
-
-#### Deploy and rollout
-
-These are admin steps. The app never calls an owner setter.
-
-```mermaid
-sequenceDiagram
-  actor K as Kobe
-  participant DB as Postgres
-  participant G as launch:currencies
-  participant S as DeployLaunchpad script
-  participant CL as Chainlink feeds
-  participant L as SVLaunchpad
-  participant O as OWNER
-  participant V as Vercel
-
-  K->>DB: npm run db:migrate, before pushing
-  K->>DB: EXPLAIN the pairs query for both scopes
-  K->>G: npm run launch:currencies with --out
-  G-->>K: launch-currencies.json, reference prices filled by hand
-  K->>S: forge script, dry run on an anvil fork first
-  S->>CL: decimals and latestRoundData per chainlink row
-  S->>L: deploy with the broadcaster as owner
-  S->>L: setCurrency for every row
-  S->>L: transferOwnership to OWNER
-  O->>L: acceptOwnership
-  K->>V: set NEXT_PUBLIC_LAUNCHPAD_ADDRESS and the Filebase names, redeploy
-```
-
-| Deploy script name | Use |
-|---|---|
-| `OWNER` | the final owner, who must call `acceptOwnership` |
-| `FEE_WALLET` | receives the router fee, the creation fee and the platform fee share |
-| `LAUNCHER_GATE` | the Suits NFT; zero lets anyone launch |
-| `POOL_MANAGER` | optional, defaults to the chain's PoolManager |
-| `PERMIT2` | optional, defaults to canonical Permit2 |
-| `ALLOW_OTHER_ADDRESSES` | optional, `true` allows another PoolManager or Permit2 |
-
-The script reads `script/config/launch-currencies.json`, refuses any chain but 4663, and prices and checks every row
-before it broadcasts. The deployer key is passed to forge with `--account`, `--ledger` or `--interactive`, never
-through the environment.
-
-#### Every endpoint the launchpad touches
-
-Next.js routes and pages:
-
-| Endpoint | Method | Called by | Auth | Reads | Writes |
-|---|---|---|---|---|---|
-| `/launch` | page | creator | none to view | contract views through the wallet RPC, and `GET /api/pairs?scope=sv` for the connected wallet's own launches | nothing |
-| `/t/[address]` | page | anyone, and the redirect with `?launched=<tx>` | none | the store through the backend | nothing |
-| `/` with the SUITS origin chip | page | anyone | none | `GET /api/pairs?scope=sv` | nothing |
-| `/api/session/nonce` | GET | the sign-in asked at wallet connect, or the form's fallback step | per-IP budget | nothing | nonce cookie, 10 minutes |
-| `/api/session` | POST | the same, after the SIWE signature | nonce cookie, SIWE signature | nonce cookie | session cookie, 7 days |
-| `/api/session` | GET | app | session cookie | session cookie | nothing |
-| `/api/session` | DELETE | sign out | none | nothing | clears both cookies |
-| `/api/launch/upload` | POST | form, on Launch | session cookie, 60 writes a minute per wallet, 10 uploads a minute per IP, 5 an hour and 20 a day per wallet | `isAllowedLauncher`, `market.launch_uploads` | Filebase PUT twice, one `market.launch_uploads` row |
-| `/api/tokens/[address]` | GET | token page, every 5 s after a launch | none, cached 30 s | `market.tokens`, `pools`, `launches`, `launch_fee_events`, `quotes` | nothing |
-| `/api/tokens/[address]/logo` | GET | every logo on the site | none, no query string | `market.launches`, IPFS gateways | nothing |
-| `/api/tokens/[address]/quote` | GET | trade panel | none | V4 Quoter over RPC, the store | nothing |
-| `/api/pairs` | GET | markets table | none | the store, `scope=all` or `scope=launchpad`, the second now including SV | nothing |
-| `/api/pairs?scope=sv` | GET | the SUITS chip on the markets table, and the launch page's list of the wallet's own launches | none, cached 30 s | `market.launches` with its tokens, pools and quotes: every launch newest first, at most 500, bought or not, listed or not, hidden ones included | nothing |
-| `/api/health` | GET | monitors | none | the `launches` block, `sync.lastCycle.launchEvents` | nothing |
-| `/api/internal/sync` | GET | Vercel cron, every minute | Bearer `CRON_SECRET` | HyperSync, chain RPC | every launch table, the listing, the cursor |
-| `/api/internal/sync/nightly` | GET | Vercel cron, 03:00 UTC | Bearer `CRON_SECRET` | `market.sync_state`, `launch_uploads`, block time over RPC | Filebase HEAD and DELETE, `launch_uploads.status` |
-
-Contract functions the app sends:
-
-| Function | Who | Effect |
-|---|---|---|
-| `launch(p, permit, signature)` | a Suits holder | deploys the token, opens and funds the pool, optional first buy, emits `Launched` |
-| `collectFees(token)` | anyone | pokes the position, splits the fees, emits `FeesCollected` |
-| `claim(currency, to)` | anyone with `owed` | pays what a failed delivery left, no event |
-| `setPayout(token, payout)` | the current payout | moves the payout, emits `PayoutChanged` |
-| `approve(Permit2, max)` on the quote | creator or buyer | only when the allowance is short |
-| `swapExactIn` on SVRouter | buyer | the ordinary trade path |
-
-Contract views the app reads:
-
-| View | Read by | When |
-|---|---|---|
-| `routerFeeBps`, `creatorShareBps`, `firstBuyCapBps`, `dailyLaunchLimit`, `hook` | form | every 30 s |
-| `isAllowedLauncher(account)`, `launchesToday(account)` | form | every 30 s |
-| `isAllowedLauncher(account)` | upload route | every upload |
-| `currency(quote)` | form | every 30 s, and after a `PermitMismatch` |
-| `predictToken(creator, salt, name, symbol)` | form | 300 ms after the last edit |
-| `openingFor(token, quote, valuation)` | form | after `predictToken` |
-| `uncollectedFees(token)` | fee panel | every 30 s |
-| `owed(account, currency)` | fee panel | every 30 s, for the token and the quote |
-
-In the ABI but not read by the app: `getLaunch`, `poolKeyOf`, `launchCount`, `feeWallet`, `launcherGate`,
-`POOL_MANAGER`, `PERMIT2`.
-
-Events:
-
-| Event | Emitted by | Folded into |
-|---|---|---|
-| `Launched` | `launch` | `market.launches`, the pool and token become SV |
-| `FeesCollected` | `collectFees` | `market.launch_fee_events` |
-| `PayoutChanged` | `setPayout` | `market.launches.payout` |
-| `FeeWalletChanged`, `RouterFeeChanged`, `CreatorShareChanged`, `FirstBuyCapChanged`, `DailyLaunchLimitChanged`, `LauncherGateChanged`, `HookChanged`, `CurrencyChanged` | owner setters and the constructor | not read by the reader |
-
-Owner-only setters, admin work, never called by the app: `setFeeWallet`, `setRouterFee`, `setCreatorShare`,
-`setFirstBuyCap`, `setDailyLaunchLimit`, `setLauncherGate`, `setHook`, `setCurrency`, and `transferOwnership` with
-`acceptOwnership`. `renounceOwnership` always reverts.
-
-Outside services:
-
-| Service | Called by | Calls |
-|---|---|---|
-| Uniswap v4 PoolManager | `launch`, `collectFees` | `initialize`, `unlock`, then `modifyLiquidity`, `swap`, `sync`, `settle`, `take` inside the callback |
-| Permit2 | `launch`, SVRouter | `permitTransferFrom`, a signature transfer |
-| Suits NFT | `isAllowedLauncher` | `balanceOf` with a gas cap |
-| SVRouter and Universal Router | trades after launch | `swapExactIn`, then `execute` |
-| HyperSync | chain reader | one query a cycle, the launchpad selection filtered by address and the 3 activity topics |
-| Chain RPC, `CHAIN_RPC_URL` then `CHAIN_RPC_FALLBACK_URL` | upload route, chain reader, nightly, health | `isAllowedLauncher`, token metadata and supply, holder balances, Chainlink prices, block time, chain head |
-| Chain RPC, `ROBINHOOD_RPC_URL` | logo route | `logo` and `tokenURI` for tokens not launched here |
-| Chainlink feeds | deploy script, chain reader | `decimals`, `latestRoundData` |
-| Filebase S3 API | upload route, nightly | PUT, HEAD, DELETE on `FILEBASE_BUCKET`, the CID from `x-amz-meta-cid` |
-| Filebase gateway, `FILEBASE_GATEWAY_URL` | logo route | the first of 5 gateways tried |
-
-Postgres tables:
-
-| Table | Written by | Read by |
-|---|---|---|
-| `market.launches` | chain reader, and `hidden` by hand | token route, logo route, health, `attachUploads`, pairs with `scope=sv` |
-| `market.launch_fee_events` | chain reader | token route |
-| `market.launch_uploads` | upload route, chain reader, nightly | upload route, nightly, health |
-| `market.pools` | chain reader, origin SV from `Launched` | pairs, token route, listing |
-| `market.tokens` | chain reader, origin SV and `listed_pool_id` | pairs, token route |
-| `market.sync_state` | both cron jobs | nightly for the cursor and the reader's last success |
-
-Watchlist and votes are browser-local in live mode
-(`src/lib/data/localStore.ts`, `localStorage` keyed by wallet address): they do
-not follow the wallet to another device, and vote counts read 0 until the
-signed API lands in M3.
-
-Two methods were added beyond the handoff interface: `votes(address)` (the
-caller's current vote per token address) and `pair(id)` (one token by address,
-listed or not) — see the comments in `types.ts`.
-
-## Stubs still to wire
-
-| Stub | Where | Status |
-|---|---|---|
-| Swap execution | `src/lib/swap.ts` | **Done (M2)** — Permit2 signature and `SVRouter.swapExactIn`, the receipt's `Trade` event parsed for the real output |
-| Swap quote | `src/lib/quote.ts` `localQuote` | **Done (M2)** — the V4 Quoter behind `GET /api/tokens/[address]/quote`; the approximation stays for the mock source |
-| Wallet balances | `src/hooks/useTokenBalance.ts` | **Done (M2)** — batched ERC-20 `balanceOf` reads for the quote asset and the pair token |
-| Suit holder check | `src/lib/suits.ts` | **Done (M2)** — live `balanceOf` when `NEXT_PUBLIC_SUITS_NFT_ADDRESS` is set; the mock flag now defaults to "not a holder" |
-| Watchlist / votes persistence | `src/lib/social/store.ts`, `/api/me/*` | **Done (M4)** — Sign-In with Ethereum opens an HttpOnly session cookie; the watchlist and the votes live in the market store, so one wallet sees the same lists on every device. The demo source still keeps them in `localStorage` |
-| Top traders board | `src/components/TradersBoard.tsx`, `/api/traders` | **Parked, 30 Sep 2026.** The Traders tab and the `/traders` page were removed: the board showed nothing, and its data is not available yet. The API, its store query and the board component stay dormant behind `TRADERS_BOARD`, so the tab can come back. Built in M4: the last 24 hours of `market.swaps` ranked by USD volume or by trade count, 50 wallets, cached a minute |
-| Launchpad links for untradeable pools | `src/lib/chain.ts` | M3 — Bags dapp URL |
-
-Execution is off until `NEXT_PUBLIC_SVROUTER_ADDRESS` names a deployed router; the quote route
-still answers, so every number on the panel is real before the deploy. `scripts/fork/` proves
-the whole path against a local anvil fork in the meantime — see `scripts/README.md`.
+Further reading: [docs/operations.md](docs/operations.md) (the store, the chain reader and crons, every route,
+the variables) and [docs/launchpad.md](docs/launchpad.md) (one launch from the form to the nightly clean-up, every
+endpoint and table it touches).
 
 ## Layout
 
-```
-src/app            routes, layout, global CSS (design tokens)
-src/components     UI, one file per handoff component group
-src/context        Providers (wagmi, query, RainbowKit theme), AppState, DataSource
-src/hooks          breakpoint, data queries, balances
-src/lib            types, formatting, market filters, chain, wagmi, SVRouter swap, quote math
-src/lib/chain      the reader: HyperSync log source, decode, fold, onchain metadata and Chainlink prices, store writes
-src/lib/data       seed data, mock source, Envio source, local watch store
-src/lib/db         Db interface (postgres driver, PGlite in tests), migrations
-src/lib/holders    the top-holder builder: coverage, due list, transfer fold, balance store
-src/lib/launch     the instant launchpad: ABI and address, stores, upload rules, Filebase, form arithmetic; wallet writes in src/lib/launch.ts
-src/lib/sync       writers, cursor/lease state, the job runner, retention, nightly
-src/lib/market     MarketBackend: the store implementation (the only one now)
-src/lib/seed       the resumable one-off loader
-scripts            migrate, smoke, seed, parity (laptop, session pooler)
-supabase           migrations for the market schema
-```
+| Path | What is there |
+|---|---|
+| `src/app` | pages (`/`, `/watchlist`, `/t/[address]`, `/launch`), layout, design tokens in `globals.css` |
+| `src/app/api` | 21 route handlers; shared helpers in `src/app/api/_lib` |
+| `src/components`, `src/hooks`, `src/context` | UI, data hooks, providers (wagmi, TanStack Query, RainbowKit) |
+| `src/lib/chain` | the chain reader: HyperSync source, decode, pure fold, store writes, RPC pacing |
+| `src/lib/holders` | the top-holder builder |
+| `src/lib/sync` | cron state (cursor, lease), nightly, retention, routability probe |
+| `src/lib/market` | the store-backed `MarketBackend` the routes call |
+| `src/lib/session`, `src/lib/social` | SIWE and cookies; watchlist, votes, rate limits |
+| `src/lib/launch` | upload rules, image processing, Filebase, clean-up, launch reads |
+| `src/lib/quote`, `src/lib/swap`, `src/lib/swap.ts` | Quoter pricing in bigints; Permit2 and SVRouter execution |
+| `src/lib/db`, `supabase/migrations` | the `Db` interface (postgres driver, PGlite in tests); 11 migrations for schema `market` |
+| `scripts` | migrate, smoke, seed, parity, chain catch-up, fork harness ([scripts/README.md](scripts/README.md)) |
+| `docs/superpowers/specs` | the ten design specs the code was built against |
+| `docs/design-handoff` | the original UI handoff |
+
+## Links
+
+- Design specs: [M1 live data](docs/superpowers/specs/2026-09-12-m1-live-data-design.md),
+  [market store](docs/superpowers/specs/2026-09-16-supabase-market-store-design.md),
+  [trading](docs/superpowers/specs/2026-09-18-trading-frontend-design.md),
+  [token page](docs/superpowers/specs/2026-09-18-token-page-m3-design.md),
+  [social layer](docs/superpowers/specs/2026-09-18-social-layer-m4-design.md),
+  [chain reader](docs/superpowers/specs/2026-09-21-chain-reader-design.md),
+  [top holders](docs/superpowers/specs/2026-09-23-top-holders-design.md),
+  [instant launchpad](docs/superpowers/specs/2026-09-28-instant-launchpad-design.md),
+  [Suits gate](docs/superpowers/specs/2026-09-28-suits-token-gate-design.md),
+  [presale launchpad](docs/superpowers/specs/2026-09-27-launchpad-design.md)
+- System overview and Decision Log: https://github.com/maxlong-markets/suitventures-markets
+- Contracts (SVRouter, SVLaunchpad): https://github.com/maxlong-markets/suitventures-markets-contracts
+- The decommissioned Envio indexer: https://github.com/maxlong-markets/suitventures-markets-indexer
