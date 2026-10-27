@@ -1,7 +1,7 @@
 # Security review: MaxLong Markets frontend
 
 Review of this repository (the Next.js app, its API route handlers, the chain reader, the top-holder builder, the
-launch upload path and the Supabase migrations) as of 27 Oct 2026, commit `13e040b` plus the fix in this commit.
+launch upload path and the Supabase migrations) as of 27 Oct 2026, commit `13e040b` plus the fixes in this commit.
 It is a written self-review by the developer, not a third-party audit. Nothing in this system has been audited.
 The contracts the app calls (`SVRouter`, `SVLaunchpad`) are reviewed in their own repository.
 
@@ -24,7 +24,7 @@ Ran:
 
 | Check | Result |
 |---|---|
-| `npm test` (vitest) | 130 files, 1,640 tests, all passing, 63 s (1,639 before the test added here) |
+| `npm test` (vitest) | 130 files, 1,642 tests, all passing, about 63 s (1,639 before the three tests added here) |
 | `npm run lint` | 0 problems in tracked code; 28 `no-require-imports` errors, all in `.chain/`, a local scratch folder that is git-excluded and never committed |
 | `npm audit --omit=dev` | 19 advisories: 1 critical, 11 high, 7 moderate (see F-2 and F-3) |
 | Secret grep over every tracked file | no credentials. Matches were event topics, pool ids, a fake `postgres://user:sup3rSecret@` URL in a test, and anvil's published test key 0 in the local fork harness |
@@ -78,7 +78,7 @@ environment variables) is trusted: the browser signs what the quote route return
 | Orphan clean-up keyed to the reader's cursor, skipped when the reader is stale, re-checks before and after each delete | `src/lib/launch/cleanup.ts` | deleting the image of a launch the reader has not folded yet |
 | Logo fetch: `https` on 443 only, no IP literals, no `localhost`/`.local`/`.internal`, re-checked on every redirect (max 3), 15 s and 25 s budgets, 2 MiB cap counted while streaming, raster types only, `nosniff` | `src/lib/logos/resolve.ts:208,241,271`; `src/app/api/tokens/[address]/logo/route.ts:49` | SSRF to metadata endpoints or loopback, redirect bounces inward, SVG script in this origin, slow-loris upstreams |
 | Logo route refuses any query string; logo memo capped at 5,000 | `src/app/api/tokens/[address]/logo/route.ts:115`; `src/lib/logos/resolve.ts:375` | walking past the CDN into the gateways |
-| In-process memo capped at 5,000 keys (added in this commit) | `src/lib/envio/cache.ts:11` | memory growth from caller-chosen addresses (F-1) |
+| In-process memo (`ttlCache`, on the live request path despite its `envio/` folder name) capped at 5,000 keys, least recently used evicted first, unmemoised answer when every key is mid-load (added in this commit) | `src/lib/envio/cache.ts:11` | memory growth from caller-chosen addresses; a flood of ids pushing hot keys out (F-1, F-17, F-18) |
 | Address inputs: `^0x[0-9a-f]{40}$` after lowercasing; amounts `^\d+(\.\d+)?$` parsed to bigint; slippage integer 1..5000 bps; enums checked by value | `src/app/api/_lib/respond.ts:8`; `src/app/api/tokens/[address]/quote/route.ts:27`; `src/lib/quote/math.ts` | malformed input reaching SQL or the Quoter; float amounts |
 | Parameterised SQL everywhere; the only interpolated text is code constants (column names, fixed `ORDER BY` from a two-value map, `LIMIT` constants) | `src/lib/db/client.ts:70`; `src/lib/sync/state.ts:69` `saveCursors`; `src/lib/social/store.ts:89` `TRADERS_ORDER` | SQL injection |
 | Errors answer fixed strings; logs carry name, code and message only, never driver objects, RPC URLs or signatures | `src/app/api/_lib/respond.ts:32` `failure`; `src/app/api/session/route.ts:136` | leaking connection strings, queries or keys |
@@ -91,7 +91,7 @@ environment variables) is trusted: the browser signs what the quote route return
 
 | ID | Severity | Title | Where | What could go wrong | Status |
 |---|---|---|---|---|---|
-| F-1 | Medium | In-process memo had no key cap | `src/lib/envio/cache.ts` | `candles`, `trades`, `holders` and the quote route's pool-key lookup memoise by a caller-chosen address and expired entries were never removed, so a client walking random valid addresses grew a function instance's memory without bound | Fixed in this commit: 5,000-key cap, expired idle entries swept first, then the oldest idle one; test in `src/lib/envio/cache.test.ts` |
+| F-1 | Medium | In-process memo had no key cap | `src/lib/envio/cache.ts` | `candles`, `trades`, `holders` and the quote route's pool-key lookup memoise by a caller-chosen address and expired entries were never removed, so a client walking random valid addresses grew a function instance's memory without bound | Fixed in this commit: 5,000-key cap, expired idle entries swept first, then the least recently used idle one; test in `src/lib/envio/cache.test.ts` |
 | F-2 | High | `next` 16.3.5 is inside the range of current Next.js advisories (one critical) | `package.json` | `npm audit` lists image-optimization SSRF and RCE, cache poisoning and a Server Actions DoS for 16.0.0-16.4.0. The app uses `next/image` (`src/components/ui.tsx`) with a local source and no `remotePatterns`, and has no `next/og`, `"use cache"` or Server Actions, so most do not apply, but the image ones may | Open: upgrade to `next@16.4.3` or later and redeploy; not done here because it changes the framework under a live client deployment |
 | F-3 | Low | Transitive advisories in the WalletConnect / Reown tree | `@walletconnect/ethereum-provider` 2.21.1 and its deps (`ws`, `zod`, `decode-uri-component`, `query-string`), plus `source-map-js` | DoS-class issues in browser-side or build-time code; none sits on a server route | Open: move to `@walletconnect/ethereum-provider` 2.26 when RainbowKit supports it; `npm audit fix` covers `source-map-js` |
 | F-4 | Low | No security headers | `next.config.ts` | No `Content-Security-Policy`, `frame-ancestors` / `X-Frame-Options` or `Referrer-Policy`, so the trade panel and launch form can be framed by another site (clickjacking a wallet prompt still needs the user to confirm in the wallet) | Open: add `headers()` with `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, then a CSP tested against RainbowKit and WalletConnect |
@@ -107,6 +107,8 @@ environment variables) is trusted: the browser signs what the quote route return
 | F-14 | Informational | Unlimited ERC-20 approval to Permit2 | `src/lib/swap.ts:205` | `approve(Permit2, maxUint256)` on the first trade of a token | Accepted: Uniswap's standard pattern; Permit2's signature transfer still needs a fresh per-trade signature naming the router and amount |
 | F-15 | Informational | Router address check does not verify the checksum | `src/lib/chain.ts:87` | A mistyped mixed-case `NEXT_PUBLIC_SVROUTER_ADDRESS` would be accepted (the launchpad address uses viem's strict check) | Open: use `isAddress(value, { strict: true })` as `src/lib/launch/address.ts` does |
 | F-16 | Informational | No CSRF token on cookie-authenticated writes | `/api/me/*`, `/api/launch/upload` | Cross-site requests do not carry a `SameSite=Lax` cookie on POST/PUT/DELETE; a compromised sibling subdomain would | Accepted: Lax plus JSON or multipart bodies is the control; the worst outcome is a starred token or a vote |
+| F-17 | Medium | The new memo cap could be exceeded while entries were loading (raised by an automated review of the F-1 fix) | `src/lib/envio/cache.ts` | The first version of the cap evicted at most one idle entry; with every entry in flight, or many inserts racing, the map still grew past 5,000. `ttlCache` is on the live path: every public market route and `dbBackend` use it (the folder name is left over from the retired Envio source) | Fixed in this commit: when nothing idle can be freed, the call is answered by running the load without memoising it; test in `src/lib/envio/cache.test.ts` |
+| F-18 | Medium | Insertion-order eviction let caller-chosen ids push out the hot global keys (raised by the same review) | `src/lib/envio/cache.ts` | With first-in eviction, requesting thousands of token addresses could evict `pairs:db:*` and `quotes`, turning each visitor request into a database read | Fixed in this commit: every use moves the key to the back (least recently used order), and expired entries go before any live one; a test keeps a key in steady use alive through a 5,500-key flood |
 
 ## 5. Reporting
 

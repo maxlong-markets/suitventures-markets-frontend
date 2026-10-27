@@ -80,4 +80,33 @@ describe("ttlCache", () => {
     vi.useRealTimers();
     clearTtlCache();
   });
+
+  it("evicts the least recently used key, so a key in steady use survives a flood of new ones", async () => {
+    clearTtlCache();
+    await ttlCache("hot", 60_000, async () => "h");
+    const reload = vi.fn(async () => "fresh");
+    for (let i = 0; i < MAX_TTL_ENTRIES + 500; i++) {
+      await ttlCache(`flood:${i}`, 60_000, async () => i);
+      if (i % 100 === 0) expect(await ttlCache("hot", 60_000, reload)).toBe("h");
+    }
+    expect(reload).not.toHaveBeenCalled();
+    expect(ttlCacheSize()).toBe(MAX_TTL_ENTRIES);
+    clearTtlCache();
+  });
+
+  it("answers without memoising when every key is mid-load, never growing past the cap", async () => {
+    clearTtlCache();
+    const pending: Array<() => void> = [];
+    const hang = () => new Promise<number>((resolve) => pending.push(() => resolve(0)));
+    const loads = Array.from({ length: MAX_TTL_ENTRIES }, (_, i) => ttlCache(`busy:${i}`, 60_000, hang));
+    expect(ttlCacheSize()).toBe(MAX_TTL_ENTRIES);
+    const extra = vi.fn(async () => "x");
+    expect(await ttlCache("overflow", 60_000, extra)).toBe("x");
+    expect(await ttlCache("overflow", 60_000, extra)).toBe("x");
+    expect(extra).toHaveBeenCalledTimes(2);
+    expect(ttlCacheSize()).toBe(MAX_TTL_ENTRIES);
+    pending.forEach((release) => release());
+    await Promise.all(loads);
+    clearTtlCache();
+  });
 });

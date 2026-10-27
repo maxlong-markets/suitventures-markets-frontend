@@ -10,7 +10,7 @@ const store = new Map<string, Entry<unknown>>();
  */
 export const MAX_TTL_ENTRIES = 5_000;
 
-/** Before a new key goes in at the cap: drop every expired, idle entry, then, if still full, the oldest idle one. */
+/** Before a new key goes in at the cap: drop every expired, idle entry, then, if still full, the least recently used idle one. */
 function makeRoom(now: number): void {
   for (const [key, entry] of store) {
     if (!entry.inflight && entry.expires <= now) store.delete(key);
@@ -44,9 +44,21 @@ export async function ttlCache<T>(
   opts?: TtlCacheOpts<T>,
 ): Promise<T> {
   const now = Date.now();
-  const entry = (store.get(key) as Entry<T> | undefined) ?? { expires: 0 };
+  const existing = store.get(key) as Entry<T> | undefined;
+  // Least recently used order: every use moves the key to the back, so the eviction below takes the coldest key, and
+  // a flood of caller-chosen ids cannot push out a key every visitor keeps asking for (pairs, quotes).
+  if (existing) {
+    store.delete(key);
+    store.set(key, existing as Entry<unknown>);
+  }
+  const entry = existing ?? { expires: 0 };
   if (entry.value !== undefined && entry.expires > now) return entry.value;
   if (entry.inflight) return entry.inflight;
+  if (!existing && store.size >= MAX_TTL_ENTRIES) {
+    makeRoom(now);
+    // Every key is mid-load: answer this call without memoising it rather than grow past the cap.
+    if (store.size >= MAX_TTL_ENTRIES) return load();
+  }
   entry.inflight = load()
     .then((value) => {
       if (opts?.skipCache?.(value)) {
@@ -66,7 +78,6 @@ export async function ttlCache<T>(
     .finally(() => {
       entry.inflight = undefined;
     });
-  if (!store.has(key) && store.size >= MAX_TTL_ENTRIES) makeRoom(now);
   store.set(key, entry as Entry<unknown>);
   return entry.inflight;
 }
