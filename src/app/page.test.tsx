@@ -27,6 +27,8 @@ vi.mock("@/lib/suits", () => ({ useIsSuitHolder: () => false }));
 vi.mock("@/context/DataSource", () => ({ useDataSource: () => h.ds }));
 // QuoteChips reads window.matchMedia, which jsdom lacks, and has nothing to do with which list the table shows.
 vi.mock("@/components/QuoteChips", () => ({ default: () => null }));
+vi.mock("@/components/TheDesk", () => ({ default: () => null }));
+vi.mock("@/components/StockTape", () => ({ default: () => null }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), prefetch: vi.fn() }) }));
 
 function row(ticker: string, id: Address, over: Partial<TokenPair> = {}): TokenPair {

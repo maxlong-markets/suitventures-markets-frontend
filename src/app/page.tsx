@@ -6,10 +6,11 @@ import QuoteChips from "@/components/QuoteChips";
 import MarketsToolbar from "@/components/MarketsToolbar";
 import PairsTable from "@/components/PairsTable";
 import StockTape from "@/components/StockTape";
+import TheDesk from "@/components/TheDesk";
 import { sharedTickers } from "@/lib/sharedTickers";
 import { useAppState } from "@/context/AppState";
 import { useDataSource } from "@/context/DataSource";
-import { usePairs } from "@/hooks/useMarketsData";
+import { usePairs, useQuotes } from "@/hooks/useMarketsData";
 import { isMockSource } from "@/lib/data";
 import { originLabel, presetLabel, selectPairs } from "@/lib/markets";
 
@@ -21,6 +22,7 @@ export default function MarketsPage() {
   // below follow whichever list is in use.
   const suits = filters.origin === "SV";
   const pairsQuery = usePairs(suits ? "sv" : undefined);
+  const quotesQuery = useQuotes();
 
   // Ages are measured from the moment the pairs were fetched.
   const now = pairsQuery.dataUpdatedAt;
@@ -64,6 +66,9 @@ export default function MarketsPage() {
       <StockTape />
       <QuoteChips />
       <section className="px-4 pb-8 tablet:px-5 desktop:px-6">
+        {!loading && !pairsQuery.isError ? (
+          <TheDesk pairs={pairsQuery.data ?? []} quotes={quotesQuery.data ?? []} now={now} />
+        ) : null}
         <MarketsToolbar total={rows.length} loading={loading} />
         {!loading && sharedShown > 0 ? (
           <div

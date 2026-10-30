@@ -63,6 +63,8 @@ export interface AppState {
   filters: MarketFilters;
   toggleQuote(symbol: string): void;
   clearQuotes(): void;
+  /** Replaces the quote selection in one step (the stock tape's sector groups). */
+  setQuotes(symbols: string[]): void;
   setOrigin(o: OriginFilter): void;
   setPreset(p: PresetKey): void;
   sortBy(key: SortKey): void;
@@ -152,6 +154,10 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   }, []);
   const clearQuotes = useCallback(
     () => setFilters((f) => ({ ...f, quotes: [] })),
+    [],
+  );
+  const setQuotes = useCallback(
+    (symbols: string[]) => setFilters((f) => ({ ...f, quotes: [...new Set(symbols)] })),
     [],
   );
   const setOrigin = useCallback(
@@ -556,6 +562,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       filters,
       toggleQuote,
       clearQuotes,
+      setQuotes,
       setOrigin,
       setPreset,
       sortBy,
@@ -586,6 +593,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       filters,
       toggleQuote,
       clearQuotes,
+      setQuotes,
       setOrigin,
       setPreset,
       sortBy,

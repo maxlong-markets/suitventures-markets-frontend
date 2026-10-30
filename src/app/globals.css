@@ -48,14 +48,17 @@
   --color-hairline-mid: rgba(240, 232, 214, 0.12);
   --color-hairline-btn: rgba(240, 232, 214, 0.18);
   --color-hairline-hover: rgba(240, 232, 214, 0.45);
-  --color-hairline-focus: rgba(244, 238, 218, 0.55);
+  --color-hairline-focus: rgba(212, 174, 98, 0.6);
   --color-hover-row: rgba(232, 228, 220, 0.045);
   --color-hover-soft: rgba(232, 228, 220, 0.035);
   --color-hover-item: rgba(232, 228, 220, 0.05);
-  --color-chalk: #f4eeda;
-  --color-chalk-10: rgba(244, 238, 218, 0.1);
-  --color-chalk-50: rgba(244, 238, 218, 0.5);
-  --color-chalk-60: rgba(244, 238, 218, 0.6);
+  /* Brass (29 Oct 2026, the terminal redesign): the accent moved from chalk cream to the gold of
+     the Suits pins. The token keeps its name so every primary action and active state follows.
+     #d4ae62 on the #1f2125 ground is 8.1:1; onlight ink on a brass fill is 9.6:1. */
+  --color-chalk: #d4ae62;
+  --color-chalk-10: rgba(212, 174, 98, 0.12);
+  --color-chalk-50: rgba(212, 174, 98, 0.5);
+  --color-chalk-60: rgba(212, 174, 98, 0.6);
   --color-up: #5dbe8a;
   --color-down: #d46a63;
   --color-up-vol: rgba(93, 190, 138, 0.26);
@@ -65,9 +68,11 @@
   --color-wallet-border-hover: rgba(255, 255, 255, 0.75);
   --color-wallet-hover: rgba(255, 255, 255, 0.08);
 
-  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  /* IBM Plex (terminal redesign): Sans for copy, Mono for every number, Condensed for headings. */
+  --font-sans: var(--font-plex-sans), "Helvetica Neue", Helvetica, Arial, sans-serif;
   --font-mono:
-    "SF Mono", SFMono-Regular, ui-monospace, Menlo, Consolas, monospace;
+    var(--font-plex-mono), "SF Mono", SFMono-Regular, ui-monospace, Menlo, Consolas, monospace;
+  --font-cond: var(--font-plex-cond), var(--font-plex-sans), "Helvetica Neue", Arial, sans-serif;
   --font-script: var(--font-yellowtail), "Brush Script MT", cursive;
 
   /* Container breakpoints from the handoff: phone < 680, tablet 680–1179,

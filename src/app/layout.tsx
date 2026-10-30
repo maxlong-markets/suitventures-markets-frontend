@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { Yellowtail } from "next/font/google";
+import { IBM_Plex_Mono, IBM_Plex_Sans, IBM_Plex_Sans_Condensed, Yellowtail } from "next/font/google";
 import { headers } from "next/headers";
 import { Analytics } from "@vercel/analytics/next";
 import Providers from "@/context/Providers";
@@ -9,12 +9,17 @@ import ToastStack from "@/components/ToastStack";
 import SignModal from "@/components/SignModal";
 import "./globals.css";
 
-// Wordmark only. Helvetica Neue and SF Mono come from the system stacks.
+// Wordmark only. The rest of the type is IBM Plex, below.
 const yellowtail = Yellowtail({
   variable: "--font-yellowtail",
   subsets: ["latin"],
   weight: "400",
 });
+
+// The terminal redesign's type: Plex Sans for copy, Plex Mono for numbers, Plex Sans Condensed for headings.
+const plexSans = IBM_Plex_Sans({ variable: "--font-plex-sans", subsets: ["latin"], weight: ["400", "500", "600"] });
+const plexMono = IBM_Plex_Mono({ variable: "--font-plex-mono", subsets: ["latin"], weight: ["400", "500", "600"] });
+const plexCond = IBM_Plex_Sans_Condensed({ variable: "--font-plex-cond", subsets: ["latin"], weight: ["600", "700"] });
 
 export const metadata: Metadata = {
   title: {
@@ -41,7 +46,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const cookies = (await headers()).get("cookie");
 
   return (
-    <html lang="en" className={`${yellowtail.variable} h-full antialiased`}>
+    <html lang="en" className={`${yellowtail.variable} ${plexSans.variable} ${plexMono.variable} ${plexCond.variable} h-full antialiased`}>
       <body className="min-h-full">
         <Providers cookies={cookies}>
           <TopBar />

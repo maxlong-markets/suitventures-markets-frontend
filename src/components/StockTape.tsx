@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { useAppState } from "@/context/AppState";
 import { useQuotes } from "@/hooks/useMarketsData";
 import { fmtInt, fmtPrice, fmtUsd } from "@/lib/format";
-import { isStockQuote } from "@/lib/sharedTickers";
+import { BIOTECH, isStockQuote } from "@/lib/sharedTickers";
 
 /**
  * The stock tape: every Robinhood stock token that memecoins trade against, by 24h pair volume,
@@ -14,7 +14,7 @@ import { isStockQuote } from "@/lib/sharedTickers";
  */
 export default function StockTape() {
   const { data: quotes } = useQuotes();
-  const { filters, toggleQuote } = useAppState();
+  const { filters, toggleQuote, setQuotes, clearQuotes } = useAppState();
 
   const stocks = useMemo(
     () =>
@@ -24,14 +24,37 @@ export default function StockTape() {
     [quotes],
   );
 
+  // The Biotech group selects every biotech stock that has pairs, in one click; a second click clears it.
+  const biotech = useMemo(
+    () => stocks.filter((q) => (BIOTECH as readonly string[]).includes(q.symbol)).map((q) => q.symbol),
+    [stocks],
+  );
+  const biotechOn =
+    biotech.length > 0 &&
+    filters.quotes.length === biotech.length &&
+    biotech.every((s) => filters.quotes.includes(s));
+
   if (stocks.length === 0) return null;
 
   return (
-    <div className="border-b border-hairline" aria-label="Stock tape">
+    <div className="mt-3 border-y border-hairline tablet:mt-0 tablet:border-t-0" aria-label="Stock tape">
       <div className="no-scrollbar flex items-stretch overflow-x-auto">
         <div className="flex flex-none items-center border-r border-hairline px-4 font-mono text-[9.5px] uppercase tracking-[0.22em] text-chalk tablet:px-5 desktop:px-6">
           Stock tape
         </div>
+        {biotech.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => (biotechOn ? clearQuotes() : setQuotes(biotech))}
+            aria-pressed={biotechOn}
+            title={`Biotech and healthcare: ${biotech.join(", ")}`}
+            className={`flex flex-none items-center border-r border-hairline px-4 font-mono text-[10px] uppercase tracking-[0.18em] hover:bg-hover-row ${
+              biotechOn ? "bg-chalk-10 text-chalk" : "text-ink-75"
+            }`}
+          >
+            Biotech · {biotech.length}
+          </button>
+        ) : null}
         {stocks.map((q) => {
           const on = filters.quotes.includes(q.symbol);
           return (

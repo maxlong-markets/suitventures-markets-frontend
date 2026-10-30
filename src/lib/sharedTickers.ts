@@ -29,3 +29,6 @@ const NON_STOCK = /^(W?ETH|USDG|USDC|USDT|DAI)$/i;
 export function isStockQuote(q: QuoteAsset): boolean {
   return /robinhood token/i.test(q.name) || !NON_STOCK.test(q.symbol);
 }
+
+/** Healthcare and biotech stock tokens on Robinhood Chain, for the stock tape's Biotech group. */
+export const BIOTECH = ["LLY", "MRNA", "PFE", "JNJ", "HIMS"] as const;
